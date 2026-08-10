@@ -82,6 +82,7 @@ struct FslIMX6State {
     MemoryRegion       ocram_alias[7];
     uint32_t           phy_num;
     bool               sololite;
+    bool               sololite_lite;
     bool               has_el3;
 };
 

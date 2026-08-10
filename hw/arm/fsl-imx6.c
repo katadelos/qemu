@@ -170,6 +170,8 @@ static void fsl_imx6_realize(DeviceState *dev, Error **errp)
 
     object_property_set_bool(OBJECT(&s->ccm), "sololite", s->sololite,
                              &error_abort);
+    object_property_set_bool(OBJECT(&s->ccm), "sololite-lite",
+                             s->sololite_lite, &error_abort);
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->ccm), errp)) {
         return;
     }
@@ -526,6 +528,7 @@ static void fsl_imx6_realize(DeviceState *dev, Error **errp)
 static const Property fsl_imx6_properties[] = {
     DEFINE_PROP_UINT32("fec-phy-num", FslIMX6State, phy_num, 0),
     DEFINE_PROP_BOOL("sololite", FslIMX6State, sololite, false),
+    DEFINE_PROP_BOOL("sololite-lite", FslIMX6State, sololite_lite, false),
     DEFINE_PROP_BOOL("has-el3", FslIMX6State, has_el3, true),
 };
 
