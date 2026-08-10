@@ -103,6 +103,7 @@ struct SDHCIState {
 
     /* Configurable properties */
     bool pending_insert_quirk; /* Quirk for Raspberry Pi card insert int */
+    bool defer_data_transfer;  /* Expose command completion before i.MX DMA */
     uint32_t quirks;
     uint8_t sd_spec_version;
     uint8_t uhs_mode;

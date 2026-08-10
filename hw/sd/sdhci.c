@@ -212,7 +212,8 @@ static void sdhci_check_capareg(SDHCIState *s, Error **errp)
 
 static uint8_t sdhci_slotint(SDHCIState *s)
 {
-    return (s->norintsts & s->norintsigen) || (s->errintsts & s->errintsigen) ||
+    return (s->norintsts & s->norintsigen) ||
+         (s->errintsts & s->errintsigen) ||
          ((s->norintsts & SDHC_NIS_INSERT) && (s->wakcon & SDHC_WKUP_ON_INS)) ||
          ((s->norintsts & SDHC_NIS_REMOVE) && (s->wakcon & SDHC_WKUP_ON_RMV));
 }
@@ -353,14 +354,41 @@ static void sdhci_send_command(SDHCIState *s)
     uint8_t response[16];
     size_t rlen;
     bool timeout = false;
+    bool imx_tuning;
 
     s->errintsts = 0;
     s->acmd12errsts = 0;
     request.cmd = s->cmdreg >> 8;
     request.arg = s->argument;
+    imx_tuning = object_dynamic_cast(OBJECT(s), TYPE_IMX_USDHC) &&
+                 (request.cmd == 19 || request.cmd == 21) &&
+                 (s->cmdreg & SDHC_CMD_DATA_PRESENT);
 
     trace_sdhci_send_command(request.cmd, request.arg);
     rlen = sdbus_do_command(&s->sdbus, &request, response, sizeof(response));
+
+    /*
+     * i.MX USDHC consumes tuning data internally.  Software deliberately
+     * enables only BRR while issuing CMD19/CMD21, so waiting for a command
+     * acknowledgement before starting the data phase deadlocks.  QEMU's
+     * generic eMMC card also has no CMD21 implementation.  Model the USDHC
+     * tuning engine here: accept either tuning opcode, select the sampled
+     * clock, clear EXE_TUNE in the i.MX ACMD12_ERR alias and report BRR.
+     */
+    if (imx_tuning) {
+        if (s->cmdreg & SDHC_CMD_RESPONSE) {
+            s->rspreg[0] = 0;
+            s->rspreg[1] = s->rspreg[2] = s->rspreg[3] = 0;
+        }
+        s->acmd12errsts &= ~R_SDHC_HOSTCTL2_EXECUTE_TUNING_MASK;
+        s->acmd12errsts |= R_SDHC_HOSTCTL2_SAMPLING_CLKSEL_MASK;
+        s->prnsts &= ~(SDHC_DOING_READ | SDHC_DOING_WRITE |
+                       SDHC_DAT_LINE_ACTIVE | SDHC_DATA_INHIBIT |
+                       SDHC_DATA_AVAILABLE);
+        s->norintsts |= SDHC_NIS_RBUFRDY;
+        sdhci_update_irq(s);
+        return;
+    }
 
     if (s->cmdreg & SDHC_CMD_RESPONSE) {
         if (rlen == 4) {
@@ -391,7 +419,8 @@ static void sdhci_send_command(SDHCIState *s)
         }
     }
 
-    if (s->norintstsen & SDHC_NISEN_CMDCMP) {
+    if ((s->norintstsen & SDHC_NISEN_CMDCMP) ||
+        object_dynamic_cast(OBJECT(s), TYPE_IMX_USDHC)) {
         s->norintsts |= SDHC_NIS_CMDCMP;
     }
 
@@ -401,15 +430,31 @@ static void sdhci_send_command(SDHCIState *s)
         (s->cmdreg & SDHC_CMD_DATA_PRESENT)) {
         s->data_count = 0;
         if (object_dynamic_cast(OBJECT(s), TYPE_IMX_USDHC)) {
-            /*
-             * Lab126 U-Boot polls command completion and requires it to be
-             * observable before the data phase.  Keep the same ordering for
-             * Linux: starting SDMA before the guest acknowledges command
-             * completion races reprogramming of SYS_ADDR and corrupts reads.
-             */
-            timer_mod(s->transfer_timer,
-                      qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-                      3600LL * 1000 * 1000 * 1000);
+            if (s->defer_data_transfer) {
+                /*
+                 * Keep the data phase pending until the guest acknowledges
+                 * command completion and programs the DMA address.
+                 */
+                timer_mod(s->transfer_timer,
+                          qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                          3600LL * 1000 * 1000 * 1000);
+            } else {
+                /*
+                 * Lab126 U-Boot waits for the i.MX transfer-active state
+                 * before it acknowledges command completion.  Running the
+                 * complete DMA synchronously makes that state unobservable,
+                 * so expose it now and perform the transfer asynchronously.
+                 */
+                s->prnsts |= SDHC_DATA_INHIBIT | SDHC_DAT_LINE_ACTIVE;
+                if (s->trnmod & SDHC_TRNS_READ) {
+                    s->prnsts |= SDHC_DOING_READ;
+                } else {
+                    s->prnsts |= SDHC_DOING_WRITE;
+                }
+                timer_mod(s->transfer_timer,
+                          qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                          SDHC_TRANSFER_DELAY);
+            }
         } else {
             sdhci_data_transfer(s);
         }
@@ -435,7 +480,8 @@ static void sdhci_end_transfer(SDHCIState *s)
             SDHC_DAT_LINE_ACTIVE | SDHC_DATA_INHIBIT |
             SDHC_SPACE_AVAILABLE | SDHC_DATA_AVAILABLE);
 
-    if (s->norintstsen & SDHC_NISEN_TRSCMP) {
+    if ((s->norintstsen & SDHC_NISEN_TRSCMP) ||
+        object_dynamic_cast(OBJECT(s), TYPE_IMX_USDHC)) {
         s->norintsts |= SDHC_NIS_TRSCMP;
     }
 
@@ -642,13 +688,14 @@ static void sdhci_sdma_transfer_multi_blocks(SDHCIState *s)
      */
     /*
      * Only stop on an SDMA boundary when the guest asked for the boundary
-     * interrupt.  Lab126 U-Boot leaves it disabled and expects one contiguous
-     * transfer; Linux enables it and advances through its mapped segments.
-     * Ignoring boundaries for Linux makes DMA run past each segment and
-     * silently corrupts ext3 writes.
+     * interrupt.  Rex U-Boot enables DINT but waits for DINT and transfer
+     * completion together, so the firmware-compatibility mode keeps its SDMA
+     * transfer contiguous.  Other controllers retain normal boundary stops.
      */
     if ((s->sdmasysad % boundary_chk) == 0 &&
-        (s->norintstsen & SDHC_NISEN_DMA)) {
+        (s->norintstsen & SDHC_NISEN_DMA) &&
+        !(object_dynamic_cast(OBJECT(s), TYPE_IMX_USDHC) &&
+          !s->defer_data_transfer)) {
         page_aligned = true;
     }
 
@@ -1284,7 +1331,24 @@ sdhci_write(void *opaque, hwaddr offset, uint64_t val, unsigned size)
         MASKED_WRITE(s->cmdreg, mask >> 16, value >> 16);
 
         /* Writing to the upper byte of CMDREG triggers SD command generation */
-        if ((mask & 0xFF000000) || !sdhci_can_issue_command(s)) {
+        if (mask & 0xFF000000) {
+            break;
+        }
+
+        /*
+         * i.MX firmware needs the command-complete state to be observable
+         * before DMA finishes, so its data phase may still be pending here.
+         * Linux is allowed to submit the next command as soon as it has
+         * acknowledged that completion.  Drain the preceding data phase
+         * before testing DATA_INHIBIT; silently dropping the new command
+         * otherwise turns a nanosecond DMA delay into a ten-second request
+         * timeout.
+         */
+        if (!sdhci_can_issue_command(s) && timer_pending(s->transfer_timer) &&
+            object_dynamic_cast(OBJECT(s), TYPE_IMX_USDHC)) {
+            sdhci_resume_pending_transfer(s);
+        }
+        if (!sdhci_can_issue_command(s)) {
             break;
         }
 
@@ -1609,6 +1673,8 @@ static const Property sdhci_sysbus_properties[] = {
     DEFINE_SDHCI_COMMON_PROPERTIES(SDHCIState),
     DEFINE_PROP_BOOL("pending-insert-quirk", SDHCIState, pending_insert_quirk,
                      false),
+    DEFINE_PROP_BOOL("defer-data-transfer", SDHCIState, defer_data_transfer,
+                     true),
     DEFINE_PROP_LINK("dma", SDHCIState,
                      dma_mr, TYPE_MEMORY_REGION, MemoryRegion *),
     DEFINE_PROP_BOOL("wp-inverted", SDHCIState,
@@ -1717,7 +1783,8 @@ static uint64_t esdhc_read(void *opaque, hwaddr offset, unsigned size)
     switch (offset) {
     default:
         if (object_dynamic_cast(OBJECT(s), TYPE_IMX_USDHC) &&
-            offset >= 0x50 && offset < 0xf0) {
+            offset >= 0x50 && offset < 0xf0 &&
+            !(offset >= SDHC_ADMAERR && offset < ESDHC_DLL_CTRL)) {
             return 0;
         }
         return sdhci_read(opaque, offset, size);
@@ -1963,7 +2030,8 @@ esdhc_write(void *opaque, hwaddr offset, uint64_t val, unsigned size)
     default:
         /* Reserved words in the i.MX USDHC vendor aperture read as zero. */
         if (object_dynamic_cast(OBJECT(s), TYPE_IMX_USDHC) &&
-            offset >= 0x50 && offset < 0xf0) {
+            offset >= 0x50 && offset < 0xf0 &&
+            !(offset >= SDHC_ADMAERR && offset < ESDHC_DLL_CTRL)) {
             break;
         }
         sdhci_write(opaque, offset, val, size);
