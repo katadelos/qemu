@@ -54,6 +54,7 @@ static void arm_set_cpu_on_async_work(CPUState *target_cpu_state,
 
     /* Initialize the cpu we are turning on */
     cpu_reset(target_cpu_state);
+    target_cpu->env.aarch64 = info->target_aa64;
     arm_emulate_firmware_reset(target_cpu_state, info->target_el);
     target_cpu_state->halted = 0;
 
@@ -134,15 +135,13 @@ int arm_set_cpu_on(uint64_t cpuid, uint64_t entry, uint64_t context_id,
     }
 
     if (!target_aa64 && arm_feature(&target_cpu->env, ARM_FEATURE_AARCH64)) {
-        /*
-         * For now we don't support booting an AArch64 CPU in AArch32 mode
-         * TODO: We should add this support later
-         */
-        qemu_log_mask(LOG_UNIMP,
-                      "[ARM]%s: Starting AArch64 CPU %" PRId64
-                      " in AArch32 mode is not supported yet\n",
-                      __func__, cpuid);
-        return QEMU_ARM_POWERCTL_INVALID_PARAM;
+        bool supports_aa32 = target_el == 1 ?
+            cpu_isar_feature(aa64_aa32_el1, target_cpu) :
+            cpu_isar_feature(aa64_aa32_el2, target_cpu);
+
+        if (!supports_aa32) {
+            return QEMU_ARM_POWERCTL_INVALID_PARAM;
+        }
     }
 
     /*
