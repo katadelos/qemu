@@ -43,7 +43,6 @@ enum {
 
 #define EPDC_CTRL_SFTRST        (1U << 31)
 #define EPDC_CTRL_CLKGATE       (1U << 30)
-#define EPDC_UPD_CTRL_USE_FIXED (1U << 31)
 #define EPDC_IRQ_WB_CMPLT       (1U << 16)
 #define EPDC_IRQ_UPD_DONE       (1U << 22)
 #define EPDC_UPD_LUT_SHIFT      16
@@ -51,6 +50,7 @@ enum {
 #define EPDC_STATUS_WB_BUSY     (1U << 0)
 #define EPDC_VERSION_2_1_0      0x02010000
 #define EPDC_MAX_PANEL_DIMENSION 4096
+#define EPDC_SCANOUT_INTERVAL_MS 100
 
 static inline uint32_t *epdc_reg(IMXEPDCState *s, hwaddr offset)
 {
@@ -157,6 +157,7 @@ static void imx_epdc_render_update(IMXEPDCState *s)
     uint32_t cord = *epdc_reg(s, EPDC_UPD_CORD);
     uint32_t size = *epdc_reg(s, EPDC_UPD_SIZE);
     uint32_t source_addr = *epdc_reg(s, EPDC_UPD_ADDR);
+    IMX6SLPXPFetch fetch;
     unsigned panel_width, panel_height;
     unsigned left = cord & 0x1fff;
     unsigned top = (cord >> 16) & 0x1fff;
@@ -170,6 +171,15 @@ static void imx_epdc_render_update(IMXEPDCState *s)
     unsigned display_update_width, display_update_height;
     bool rotate_cw;
     unsigned x, y;
+
+    if (!source_addr && s->pxp) {
+        if (imx6sl_pxp_get_wfe_a_fetch(s->pxp, &fetch) ||
+            imx6sl_pxp_get_wfe_b_store(s->pxp, &fetch)) {
+            source_addr = fetch.addr;
+            source_stride = fetch.pitch;
+            source_addr += (uint64_t)fetch.top * source_stride + fetch.left;
+        }
+    }
 
     if (!s->console || !source_addr ||
         !imx_epdc_panel_geometry(s, &panel_width, &panel_height) ||
@@ -266,6 +276,23 @@ static void imx_epdc_update_display(void *opaque)
     }
 }
 
+/*
+ * The Kindle X driver renders through an mmap of /dev/fb0.  Those stores do
+ * not cross the EPDC MMIO aperture, and modern KPP views can finish drawing
+ * after their last explicit panel update.  Real hardware scans the backing
+ * framebuffer as part of its update pipeline; keep the Cocoa scanout tied to
+ * that same memory so it cannot retain an older blanket frame.
+ */
+static void imx_epdc_refresh_scanout(void *opaque)
+{
+    IMXEPDCState *s = opaque;
+
+    imx_epdc_update_display(s);
+    timer_mod(s->refresh_timer,
+              qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
+              EPDC_SCANOUT_INTERVAL_MS);
+}
+
 static const GraphicHwOps imx_epdc_gfx_ops = {
     .invalidate = imx_epdc_invalidate_display,
     .gfx_update = imx_epdc_update_display,
@@ -298,13 +325,8 @@ static void imx_epdc_complete(void *opaque)
         return;
     }
 
-    /*
-     * Fixed-pixel submissions such as the driver's draw_mode0() are panel
-     * electrical initialization cycles, not logical framebuffer updates.
-     * UPD_ADDR is stale during those transactions; displaying it produces
-     * large rectangles of unrelated framebuffer memory.
-     */
-    if (!(upd_ctrl & ((1U << 1) | EPDC_UPD_CTRL_USE_FIXED))) {
+    /* Dry-run collision tests do not change the logical display. */
+    if (!(upd_ctrl & (1U << 1))) {
         if (imx_epdc_has_framebuffer(s)) {
             imx_epdc_render_framebuffer(s);
         } else {
@@ -401,6 +423,22 @@ static void imx_epdc_write(void *opaque, hwaddr offset, uint64_t value,
         }
     }
 
+    if (offset == EPDC_RES && s->console) {
+        unsigned width, height;
+
+        if (imx_epdc_panel_geometry(s, &width, &height)) {
+            /* Landscape EPDC scan order is portrait on the assembled unit. */
+            if (width > height) {
+                unsigned tmp = width;
+
+                width = height;
+                height = tmp;
+            }
+            imx_epdc_prepare_surface(s, width, height);
+            dpy_gfx_update_full(s->console);
+        }
+    }
+
     if (offset == EPDC_UPD_CTRL) {
         lut = ((uint32_t)value >> EPDC_UPD_LUT_SHIFT) & EPDC_UPD_LUT_MASK;
         *epdc_reg(s, EPDC_STATUS) |= EPDC_STATUS_WB_BUSY;
@@ -420,7 +458,13 @@ static void imx_epdc_write(void *opaque, hwaddr offset, uint64_t value,
                       *epdc_reg(s, EPDC_UPD_SIZE),
                       *epdc_reg(s, EPDC_RES),
                       *epdc_reg(s, EPDC_FORMAT));
-        qemu_bh_schedule(s->complete_bh);
+        /*
+         * The physical panel latency is irrelevant to the guest's queue
+         * contract.  Complete synchronously so early userspace cannot park
+         * the only runnable vCPU while waiting for a virtual-time bottom
+         * half to deliver the level interrupt.
+         */
+        imx_epdc_complete(s);
     }
 
     if (base == EPDC_IRQ_MASK1 || base == EPDC_IRQ_MASK2 ||
@@ -475,6 +519,11 @@ static void imx_epdc_realize(DeviceState *dev, Error **errp)
     }
     s->complete_bh = qemu_bh_new(imx_epdc_complete, s);
     s->console = graphic_console_init(dev, 0, &imx_epdc_gfx_ops, s);
+    s->refresh_timer = timer_new_ms(QEMU_CLOCK_REALTIME,
+                                    imx_epdc_refresh_scanout, s);
+    timer_mod(s->refresh_timer,
+              qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
+              EPDC_SCANOUT_INTERVAL_MS);
 }
 
 static void imx_epdc_unrealize(DeviceState *dev)
@@ -482,11 +531,14 @@ static void imx_epdc_unrealize(DeviceState *dev)
     IMXEPDCState *s = IMX_EPDC(dev);
 
     qemu_bh_delete(s->complete_bh);
+    timer_free(s->refresh_timer);
     g_free(s->fb_buffer);
     s->fb_buffer = NULL;
 }
 
 static const Property imx_epdc_properties[] = {
+    DEFINE_PROP_LINK("pxp", IMXEPDCState, pxp, TYPE_IMX6SL_PXP,
+                     IMX6SLPXPState *),
     DEFINE_PROP_UINT64("fb-addr", IMXEPDCState, fb_addr, 0),
     DEFINE_PROP_UINT32("fb-width", IMXEPDCState, fb_width, 0),
     DEFINE_PROP_UINT32("fb-height", IMXEPDCState, fb_height, 0),

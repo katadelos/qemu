@@ -8,6 +8,8 @@
 #define HW_DISPLAY_IMX_EPDC_H
 
 #include "hw/core/sysbus.h"
+#include "hw/misc/imx6sl_pxp.h"
+#include "qemu/timer.h"
 #include "qom/object.h"
 #include "ui/console.h"
 
@@ -22,7 +24,9 @@ struct IMXEPDCState {
     MemoryRegion iomem;
     qemu_irq irq;
     QEMUBH *complete_bh;
+    QEMUTimer *refresh_timer;
     QemuConsole *console;
+    IMX6SLPXPState *pxp;
     uint8_t *fb_buffer;
     uint64_t fb_addr;
     uint32_t fb_width;
