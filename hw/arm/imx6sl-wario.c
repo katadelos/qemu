@@ -100,6 +100,14 @@ static bool wario_is_pinot(const WarioMachineState *wms)
            g_ascii_strncasecmp(wms->idme_pcbsn, "02f", 3) == 0;
 }
 
+static bool wario_is_muscat(const WarioMachineState *wms)
+{
+    /* 067/13G are Wi-Fi Muscat boards; 068 is the WAN variant. */
+    return g_str_has_prefix(wms->idme_pcbsn, "067") ||
+           g_str_has_prefix(wms->idme_pcbsn, "068") ||
+           g_ascii_strncasecmp(wms->idme_pcbsn, "13g", 3) == 0;
+}
+
 static void wario_firmware_reset(void *opaque)
 {
     ARMCPU *cpu = opaque;
@@ -255,6 +263,7 @@ static void wario_init(MachineState *machine)
     I2CBus *i2c;
     bool bourbon = wario_is_bourbon(wms);
     bool pinot = wario_is_pinot(wms);
+    bool muscat = wario_is_muscat(wms);
 
     if (machine->ram_size > WARIO_RAM_MAX) {
         error_report("RAM size " RAM_ADDR_FMT " exceeds i.MX6SL maximum",
@@ -312,12 +321,17 @@ static void wario_init(MachineState *machine)
     i2c_slave_create_simple(s->i2c[2].bus, TYPE_DRV2667, 0x59);
 
     /*
-     * Touch is on I2C2 for both production variants.  Icewine uses Cypress
-     * TrueTouch Gen4 while the 256 MiB Bourbon board uses Neonode zForce2.
-     * They share the active-low GPIO4_3 interrupt and GPIO4_5 reset lines.
+     * Touch is on I2C2 for these production variants.  Icewine, Pinot and
+     * Muscat use Cypress TrueTouch Gen4 while the 256 MiB Bourbon board uses
+     * Neonode zForce2.  They share the active-low GPIO4_3 interrupt and
+     * GPIO4_5 reset lines.  Muscat's stock driver flips X, so pre-invert the
+     * controller coordinates to keep host pointer input spatially aligned.
      */
     pmic = qdev_new(bourbon ? TYPE_KINDLE_ZFORCE2 : TYPE_CYTTSP4);
     qdev_prop_set_uint8(pmic, "address", bourbon ? 0x50 : 0x24);
+    if (muscat) {
+        qdev_prop_set_bit(pmic, "invert-x", true);
+    }
     qdev_realize(pmic, BUS(s->i2c[1].bus), &error_fatal);
     qdev_connect_gpio_out(pmic, 0,
                           qdev_get_gpio_in(DEVICE(&s->gpio[3]), 3));

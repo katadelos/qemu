@@ -3,6 +3,7 @@
 #include "qemu/osdep.h"
 #include "hw/i2c/cyttsp4.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
@@ -55,6 +56,7 @@ struct CYTTSP4State {
     uint16_t report_y;
     bool input_pressed;
     bool report_pressed;
+    bool invert_x;
 };
 
 static void cyttsp4_set_sysinfo(CYTTSP4State *s);
@@ -116,6 +118,9 @@ static void cyttsp4_input_sync(DeviceState *dev)
                               INPUT_EVENT_ABS_MAX, 0, CY_TOUCH_MAX_X);
     y = qemu_input_scale_axis(s->input_y, INPUT_EVENT_ABS_MIN,
                               INPUT_EVENT_ABS_MAX, 0, CY_TOUCH_MAX_Y);
+    if (s->invert_x) {
+        x = CY_TOUCH_MAX_X - x;
+    }
 
     if (s->input_pressed == s->report_pressed &&
         (!s->input_pressed || (x == s->report_x && y == s->report_y))) {
@@ -501,6 +506,10 @@ static void cyttsp4_init(Object *obj)
     qdev_init_gpio_in(DEVICE(obj), cyttsp4_reset_input, 1);
 }
 
+static const Property cyttsp4_properties[] = {
+    DEFINE_PROP_BOOL("invert-x", CYTTSP4State, invert_x, false),
+};
+
 static void cyttsp4_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
@@ -510,6 +519,7 @@ static void cyttsp4_class_init(ObjectClass *oc, const void *data)
     dc->unrealize = cyttsp4_unrealize;
     device_class_set_legacy_reset(dc, cyttsp4_reset);
     dc->vmsd = &cyttsp4_vmstate;
+    device_class_set_props(dc, cyttsp4_properties);
     sc->send = cyttsp4_send;
     sc->recv = cyttsp4_recv;
     sc->event = cyttsp4_event;
