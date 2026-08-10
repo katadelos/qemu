@@ -471,6 +471,24 @@ static const ARMCPRegInfo cp_reginfo[] = {
       .resetvalue = 0, .writefn = contextidr_write, .raw_writefn = raw_write, },
 };
 
+static uint64_t tlb_lockdown_read(CPUARMState *env, const ARMCPRegInfo *ri)
+{
+    if ((env_archcpu(env)->midr & 0xfff0) == 0xc090 &&
+        ri->crm == 0 && ri->opc1 == 0 && ri->opc2 == 0) {
+        return env->cp15.a9_tlb_lockdown;
+    }
+    return 0;
+}
+
+static void tlb_lockdown_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                               uint64_t value)
+{
+    if ((env_archcpu(env)->midr & 0xfff0) == 0xc090 &&
+        ri->crm == 0 && ri->opc1 == 0 && ri->opc2 == 0) {
+        env->cp15.a9_tlb_lockdown = value;
+    }
+}
+
 static const ARMCPRegInfo not_v8_cp_reginfo[] = {
     /*
      * NB: Some of these registers exist in v8 but with more precise
@@ -488,7 +506,9 @@ static const ARMCPRegInfo not_v8_cp_reginfo[] = {
      * For v6 and v5, these mappings are overly broad.
      */
     { .name = "TLB_LOCKDOWN", .cp = 15, .crn = 10, .crm = 0,
-      .opc1 = CP_ANY, .opc2 = CP_ANY, .access = PL1_RW, .type = ARM_CP_NOP },
+      .opc1 = CP_ANY, .opc2 = CP_ANY, .access = PL1_RW,
+      .type = ARM_CP_NO_RAW, .readfn = tlb_lockdown_read,
+      .writefn = tlb_lockdown_write },
     { .name = "TLB_LOCKDOWN", .cp = 15, .crn = 10, .crm = 1,
       .opc1 = CP_ANY, .opc2 = CP_ANY, .access = PL1_RW, .type = ARM_CP_NOP },
     { .name = "TLB_LOCKDOWN", .cp = 15, .crn = 10, .crm = 4,

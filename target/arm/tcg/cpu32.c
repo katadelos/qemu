@@ -380,6 +380,51 @@ static void cortex_a8_initfn(Object *obj)
     define_arm_cp_regs(cpu, cortexa8_cp_reginfo);
 }
 
+static void a9_tlb_read_index_write(CPUARMState *env,
+                                    const ARMCPRegInfo *ri, uint64_t value)
+{
+    env->cp15.a9_tlb_read_index = value & 3;
+}
+
+static void a9_tlb_write_index_write(CPUARMState *env,
+                                     const ARMCPRegInfo *ri, uint64_t value)
+{
+    env->cp15.a9_tlb_write_index = value & 3;
+}
+
+static uint64_t a9_tlb_va_read(CPUARMState *env, const ARMCPRegInfo *ri)
+{
+    return env->cp15.a9_tlb_va[env->cp15.a9_tlb_read_index & 3];
+}
+
+static void a9_tlb_va_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                            uint64_t value)
+{
+    env->cp15.a9_tlb_va[env->cp15.a9_tlb_write_index & 3] = value;
+}
+
+static uint64_t a9_tlb_pa_read(CPUARMState *env, const ARMCPRegInfo *ri)
+{
+    return env->cp15.a9_tlb_pa[env->cp15.a9_tlb_read_index & 3];
+}
+
+static void a9_tlb_pa_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                            uint64_t value)
+{
+    env->cp15.a9_tlb_pa[env->cp15.a9_tlb_write_index & 3] = value;
+}
+
+static uint64_t a9_tlb_attr_read(CPUARMState *env, const ARMCPRegInfo *ri)
+{
+    return env->cp15.a9_tlb_attr[env->cp15.a9_tlb_read_index & 3];
+}
+
+static void a9_tlb_attr_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                              uint64_t value)
+{
+    env->cp15.a9_tlb_attr[env->cp15.a9_tlb_write_index & 3] = value;
+}
+
 static const ARMCPRegInfo cortexa9_cp_reginfo[] = {
     /*
      * power_control should be set to maximum latency. Again,
@@ -398,15 +443,22 @@ static const ARMCPRegInfo cortexa9_cp_reginfo[] = {
       .access = PL1_RW, .resetvalue = 0, .type = ARM_CP_CONST },
     /* TLB lockdown control */
     { .name = "TLB_LOCKR", .cp = 15, .crn = 15, .crm = 4, .opc1 = 5, .opc2 = 2,
-      .access = PL1_W, .resetvalue = 0, .type = ARM_CP_NOP },
+      .access = PL1_W, .resetvalue = 0,
+      .fieldoffset = offsetof(CPUARMState, cp15.a9_tlb_read_index),
+      .writefn = a9_tlb_read_index_write },
     { .name = "TLB_LOCKW", .cp = 15, .crn = 15, .crm = 4, .opc1 = 5, .opc2 = 4,
-      .access = PL1_W, .resetvalue = 0, .type = ARM_CP_NOP },
+      .access = PL1_W, .resetvalue = 0,
+      .fieldoffset = offsetof(CPUARMState, cp15.a9_tlb_write_index),
+      .writefn = a9_tlb_write_index_write },
     { .name = "TLB_VA", .cp = 15, .crn = 15, .crm = 5, .opc1 = 5, .opc2 = 2,
-      .access = PL1_RW, .resetvalue = 0, .type = ARM_CP_CONST },
+      .access = PL1_RW, .resetvalue = 0,
+      .readfn = a9_tlb_va_read, .writefn = a9_tlb_va_write },
     { .name = "TLB_PA", .cp = 15, .crn = 15, .crm = 6, .opc1 = 5, .opc2 = 2,
-      .access = PL1_RW, .resetvalue = 0, .type = ARM_CP_CONST },
+      .access = PL1_RW, .resetvalue = 0,
+      .readfn = a9_tlb_pa_read, .writefn = a9_tlb_pa_write },
     { .name = "TLB_ATTR", .cp = 15, .crn = 15, .crm = 7, .opc1 = 5, .opc2 = 2,
-      .access = PL1_RW, .resetvalue = 0, .type = ARM_CP_CONST },
+      .access = PL1_RW, .resetvalue = 0,
+      .readfn = a9_tlb_attr_read, .writefn = a9_tlb_attr_write },
 };
 
 static void cortex_a9_initfn(Object *obj)

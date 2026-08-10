@@ -527,6 +527,13 @@ typedef struct CPUArchState {
         uint32_t c15_diagnostic; /* diagnostic register */
         uint32_t c15_power_diagnostic;
         uint32_t c15_power_control; /* power control */
+        /* Cortex-A9 implementation-defined TLB lockdown interface. */
+        uint32_t a9_tlb_lockdown;
+        uint32_t a9_tlb_read_index;
+        uint32_t a9_tlb_write_index;
+        uint32_t a9_tlb_va[4];
+        uint32_t a9_tlb_pa[4];
+        uint32_t a9_tlb_attr[4];
         uint64_t dbgbvr[16]; /* breakpoint value registers */
         uint64_t dbgbcr[16]; /* breakpoint control registers */
         uint64_t dbgwvr[16]; /* watchpoint value registers */

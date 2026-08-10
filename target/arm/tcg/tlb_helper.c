@@ -10,6 +10,8 @@
 #include "helper.h"
 #include "internals.h"
 #include "cpu-features.h"
+#include "exec/target_page.h"
+#include "qemu/log.h"
 
 /*
  * Returns true if the stage 1 translation regime is using LPAE format page
@@ -356,6 +358,58 @@ bool arm_cpu_tlb_fill_align(CPUState *cs, CPUTLBEntryFull *out, vaddr address,
      * page description.
      *
      */
+    if ((cpu->midr & 0xfff0) == 0xc090) {
+        unsigned index;
+
+        /*
+         * Cortex-A9 has four implementation-defined unified TLB lockdown
+         * entries.  i.MX6SoloLite Linux uses them while page-table walks are
+         * disabled so its IRAM idle routine can execute and access the CCM,
+         * MMDC and L2 controller while DDR is slowed or self-refreshing.
+         *
+         * The CP15 register interface is modeled in cpu32.c.  Honor committed
+         * (PA.V == 1) 4 KiB entries here as real TLB translations; merely
+         * retaining the CP15 values is insufficient once TTBCR.PD0/PD1 stop
+         * hardware table walks.
+         */
+        for (index = 0; index < ARRAY_SIZE(cpu->env.cp15.a9_tlb_va);
+             index++) {
+            uint32_t va = cpu->env.cp15.a9_tlb_va[index];
+            uint32_t pa = cpu->env.cp15.a9_tlb_pa[index];
+            uint32_t mask;
+            unsigned page_bits;
+
+            switch (pa & 0xc0) {
+            case 0x40:
+                page_bits = 16; /* 64 KiB large page */
+                break;
+            case 0xc0:
+                page_bits = 20; /* 1 MiB section */
+                break;
+            default:
+                page_bits = 12; /* 4 KiB small page */
+                break;
+            }
+            mask = -(1U << page_bits);
+
+            if ((pa & 1) &&
+                ((uint32_t)address & mask) == (va & mask)) {
+                res.f.phys_addr = (pa & mask) | (address & ~mask);
+                res.f.prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
+                res.f.lg_page_size = page_bits;
+                res.cacheattrs.attrs =
+                    cpu->env.cp15.a9_tlb_attr[index] & 0xff;
+                res.f.extra.arm.pte_attrs = res.cacheattrs.attrs;
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "a9 lockdown hit[%u]: va=%08" PRIx32
+                              " pa=%08" PRIx32 " address=%08" VADDR_PRIx
+                              "\n", index, va, pa, address);
+                *out = res.f;
+                return true;
+            }
+        }
+    }
+
     if (access_type == MMU_INST_FETCH && !cpu->env.thumb &&
         (address & 3)) {
         fi->type = ARMFault_Alignment;
@@ -364,10 +418,42 @@ bool arm_cpu_tlb_fill_align(CPUState *cs, CPUTLBEntryFull *out, vaddr address,
     } else if (!get_phys_addr(&cpu->env, address, access_type, memop,
                               core_to_arm_mmu_idx(&cpu->env, mmu_idx),
                               &res, fi)) {
+        /*
+         * Cortex-A9 can direct a page-table-walk result into one of four
+         * implementation-defined lockdown entries.  Linux on i.MX6SL uses
+         * this interface to discover the VA/PA/attribute tuple that it later
+         * locks while changing DDR frequency.
+         */
+        if ((cpu->midr & 0xfff0) == 0xc090 &&
+            (cpu->env.cp15.a9_tlb_lockdown & 1)) {
+            unsigned index = extract32(cpu->env.cp15.a9_tlb_lockdown,
+                                       28, 2);
+
+            /* Cortex-A9 lockdown entries describe 4 KiB small pages. */
+            cpu->env.cp15.a9_tlb_va[index] = address & ~0xfffULL;
+            cpu->env.cp15.a9_tlb_pa[index] =
+                res.f.phys_addr & ~0xfffULL;
+            cpu->env.cp15.a9_tlb_attr[index] = res.cacheattrs.attrs;
+        }
         res.f.extra.arm.pte_attrs = res.cacheattrs.attrs;
         res.f.extra.arm.shareability = res.cacheattrs.shareability;
         *out = res.f;
         return true;
+    }
+    if ((cpu->midr & 0xfff0) == 0xc090 && address >= 0xe0000000) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "a9 lockdown miss: address=%08" VADDR_PRIx
+                      " entries=%08x/%08x %08x/%08x %08x/%08x "
+                      "%08x/%08x\n",
+                      address,
+                      cpu->env.cp15.a9_tlb_va[0],
+                      cpu->env.cp15.a9_tlb_pa[0],
+                      cpu->env.cp15.a9_tlb_va[1],
+                      cpu->env.cp15.a9_tlb_pa[1],
+                      cpu->env.cp15.a9_tlb_va[2],
+                      cpu->env.cp15.a9_tlb_pa[2],
+                      cpu->env.cp15.a9_tlb_va[3],
+                      cpu->env.cp15.a9_tlb_pa[3]);
     }
     if (probe) {
         return false;
