@@ -3400,11 +3400,17 @@ void qemu_init(int argc, char **argv)
             case QEMU_OPTION_idme_serial:
                 qdict_put_str(machine_opts_dict, "idme-serial", optarg);
                 break;
+            case QEMU_OPTION_idme_accel:
+                qdict_put_str(machine_opts_dict, "idme-accel", optarg);
+                break;
             case QEMU_OPTION_idme_mac:
                 qdict_put_str(machine_opts_dict, "idme-mac", optarg);
                 break;
             case QEMU_OPTION_idme_mfg:
                 qdict_put_str(machine_opts_dict, "idme-mfg", optarg);
+                break;
+            case QEMU_OPTION_idme_sec:
+                qdict_put_str(machine_opts_dict, "idme-sec", optarg);
                 break;
             case QEMU_OPTION_idme_pcbsn:
                 qdict_put_str(machine_opts_dict, "idme-pcbsn", optarg);
