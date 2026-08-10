@@ -1029,6 +1029,8 @@ struct ArchCPU {
      * 0 - disabled, 1 - smc, 2 - hvc
      */
     uint32_t psci_conduit;
+    uint32_t mtk_sip_vcorefs;
+    uint32_t mtk_optee_fbe;
 
     /* For v8M, initial value of the Secure VTOR */
     uint32_t init_svtor;

@@ -1517,6 +1517,12 @@ static void arm_cpu_post_init(Object *obj)
     object_property_add_uint32_ptr(obj, "psci-conduit",
                                    &cpu->psci_conduit,
                                    OBJ_PROP_FLAG_READWRITE);
+    object_property_add_uint32_ptr(obj, "mtk-sip-vcorefs",
+                                   &cpu->mtk_sip_vcorefs,
+                                   OBJ_PROP_FLAG_READWRITE);
+    object_property_add_uint32_ptr(obj, "mtk-optee-fbe",
+                                   &cpu->mtk_optee_fbe,
+                                   OBJ_PROP_FLAG_READWRITE);
 
     if (arm_feature(&cpu->env, ARM_FEATURE_GENERIC_TIMER)) {
         qdev_property_add_static(DEVICE(cpu), &arm_cpu_gt_cntfrq_property);
