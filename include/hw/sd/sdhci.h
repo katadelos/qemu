@@ -49,6 +49,7 @@ struct SDHCIState {
     QEMUTimer *insert_timer;       /* timer for 'changing' sd card. */
     QEMUTimer *transfer_timer;
     qemu_irq irq;
+    bool sdio_irq_level;
 
     /* Registers cleared on reset */
     uint32_t sdmasysad;    /* SDMA System Address register */
@@ -75,7 +76,14 @@ struct SDHCIState {
     uint16_t acmd12errsts; /* Auto CMD12 error status register */
     uint16_t hostctl2;     /* Host Control 2 */
     uint64_t admasysaddr;  /* ADMA System Address Register */
-    uint16_t vendor_spec;  /* Vendor specific register */
+    /* i.MX eSDHC/USDHC vendor register bank. */
+    uint32_t vendor_spec;
+    uint32_t mix_ctrl;
+    uint32_t wtmk_lvl;
+    uint32_t dll_ctrl;
+    uint32_t tune_ctrl_status;
+    uint32_t undocumented_reg27;
+    uint32_t tuning_ctrl;
 
     /* Read-only registers */
     uint64_t capareg;      /* Capabilities Register */

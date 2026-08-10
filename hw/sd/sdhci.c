@@ -227,6 +227,19 @@ static bool sdhci_update_irq(SDHCIState *s)
     return pending;
 }
 
+static void sdhci_sdio_irq(void *opaque, int n, int level)
+{
+    SDHCIState *s = opaque;
+
+    s->sdio_irq_level = !!level;
+    if (level && (s->norintstsen & SDHC_NISEN_CARDINT)) {
+        s->norintsts |= SDHC_NIS_CARDINT;
+    } else if (!level) {
+        s->norintsts &= ~SDHC_NIS_CARDINT;
+    }
+    sdhci_update_irq(s);
+}
+
 static void sdhci_raise_insertion_irq(void *opaque)
 {
     SDHCIState *s = (SDHCIState *)opaque;
@@ -387,7 +400,19 @@ static void sdhci_send_command(SDHCIState *s)
     if (!timeout && (s->blksize & BLOCK_SIZE_MASK) &&
         (s->cmdreg & SDHC_CMD_DATA_PRESENT)) {
         s->data_count = 0;
-        sdhci_data_transfer(s);
+        if (object_dynamic_cast(OBJECT(s), TYPE_IMX_USDHC)) {
+            /*
+             * Lab126 U-Boot polls command completion and requires it to be
+             * observable before the data phase.  Keep the same ordering for
+             * Linux: starting SDMA before the guest acknowledges command
+             * completion races reprogramming of SYS_ADDR and corrupts reads.
+             */
+            timer_mod(s->transfer_timer,
+                      qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                      3600LL * 1000 * 1000 * 1000);
+        } else {
+            sdhci_data_transfer(s);
+        }
     }
 }
 
@@ -615,7 +640,15 @@ static void sdhci_sdma_transfer_multi_blocks(SDHCIState *s)
      * possible stop at page boundary if initial address is not page aligned,
      * allow them to work properly
      */
-    if ((s->sdmasysad % boundary_chk) == 0) {
+    /*
+     * Only stop on an SDMA boundary when the guest asked for the boundary
+     * interrupt.  Lab126 U-Boot leaves it disabled and expects one contiguous
+     * transfer; Linux enables it and advances through its mapped segments.
+     * Ignoring boundaries for Linux makes DMA run past each segment and
+     * silently corrupts ext3 writes.
+     */
+    if ((s->sdmasysad % boundary_chk) == 0 &&
+        (s->norintstsen & SDHC_NISEN_DMA)) {
         page_aligned = true;
     }
 
@@ -1032,7 +1065,8 @@ static uint64_t sdhci_read(void *opaque, hwaddr offset, unsigned size)
     SDHCIState *s = (SDHCIState *)opaque;
     uint32_t ret = 0;
 
-    if (timer_pending(s->transfer_timer)) {
+    if (timer_pending(s->transfer_timer) &&
+        !object_dynamic_cast(OBJECT(s), TYPE_IMX_USDHC)) {
         sdhci_resume_pending_transfer(s);
     }
 
@@ -1179,7 +1213,8 @@ sdhci_write(void *opaque, hwaddr offset, uint64_t val, unsigned size)
     uint32_t value = val;
     value <<= shift;
 
-    if (timer_pending(s->transfer_timer)) {
+    if (timer_pending(s->transfer_timer) &&
+        !object_dynamic_cast(OBJECT(s), TYPE_IMX_USDHC)) {
         sdhci_resume_pending_transfer(s);
     }
 
@@ -1296,12 +1331,20 @@ sdhci_write(void *opaque, hwaddr offset, uint64_t val, unsigned size)
             s->norintsts &= ~SDHC_NIS_ERR;
         }
         sdhci_update_irq(s);
+        /* Preserve command-complete -> transfer-complete ordering when a
+         * guest acknowledges the command interrupt before i.MX DMA runs. */
+        if (timer_pending(s->transfer_timer)) {
+            sdhci_resume_pending_transfer(s);
+        }
         break;
     case SDHC_NORINTSTSEN:
         MASKED_WRITE(s->norintstsen, mask, value);
         MASKED_WRITE(s->errintstsen, mask >> 16, value >> 16);
         s->norintsts &= s->norintstsen;
         s->errintsts &= s->errintstsen;
+        if (s->sdio_irq_level && (s->norintstsen & SDHC_NISEN_CARDINT)) {
+            s->norintsts |= SDHC_NIS_CARDINT;
+        }
         if (s->errintsts) {
             s->norintsts |= SDHC_NIS_ERR;
         } else {
@@ -1475,6 +1518,28 @@ static const VMStateDescription sdhci_pending_insert_vmstate = {
     },
 };
 
+static bool sdhci_imx_vmstate_needed(void *opaque)
+{
+    return object_dynamic_cast(OBJECT(opaque), TYPE_IMX_USDHC) != NULL;
+}
+
+static const VMStateDescription sdhci_imx_vmstate = {
+    .name = "sdhci/imx-usdhc",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = sdhci_imx_vmstate_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(vendor_spec, SDHCIState),
+        VMSTATE_UINT32(mix_ctrl, SDHCIState),
+        VMSTATE_UINT32(wtmk_lvl, SDHCIState),
+        VMSTATE_UINT32(dll_ctrl, SDHCIState),
+        VMSTATE_UINT32(tune_ctrl_status, SDHCIState),
+        VMSTATE_UINT32(undocumented_reg27, SDHCIState),
+        VMSTATE_UINT32(tuning_ctrl, SDHCIState),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 const VMStateDescription sdhci_vmstate = {
     .name = "sdhci",
     .version_id = 1,
@@ -1512,6 +1577,7 @@ const VMStateDescription sdhci_vmstate = {
     },
     .subsections = (const VMStateDescription * const []) {
         &sdhci_pending_insert_vmstate,
+        &sdhci_imx_vmstate,
         NULL
     },
 };
@@ -1542,6 +1608,7 @@ static void sdhci_sysbus_init(Object *obj)
     SDHCIState *s = SYSBUS_SDHCI(obj);
 
     sdhci_initfn(s);
+    qdev_init_gpio_in_named(DEVICE(obj), sdhci_sdio_irq, "sdio-irq", 1);
 }
 
 static void sdhci_sysbus_finalize(Object *obj)
@@ -1637,6 +1704,10 @@ static uint64_t esdhc_read(void *opaque, hwaddr offset, unsigned size)
 
     switch (offset) {
     default:
+        if (object_dynamic_cast(OBJECT(s), TYPE_IMX_USDHC) &&
+            offset >= 0x50 && offset < 0xf0) {
+            return 0;
+        }
         return sdhci_read(opaque, offset, size);
 
     case SDHC_HOSTCTL:
@@ -1664,21 +1735,31 @@ static uint64_t esdhc_read(void *opaque, hwaddr offset, unsigned size)
     case SDHC_PRNSTS:
         /* Add SDSTB (SD Clock Stable) bit to PRNSTS */
         ret = sdhci_read(opaque, offset, size) & ~ESDHC_PRNSTS_SDSTB;
-        if (s->clkcon & SDHC_CLOCK_INT_STABLE) {
-            ret |= ESDHC_PRNSTS_SDSTB;
-        }
+        /* eSDHC reports the divided internal clock stable before firmware
+         * enables SDCLKEN; it is not the SDHCI CLOCK_INT_STABLE bit. */
+        ret |= ESDHC_PRNSTS_SDSTB;
         break;
 
     case ESDHC_VENDOR_SPEC:
         ret = s->vendor_spec;
         break;
     case ESDHC_DLL_CTRL:
+        ret = s->dll_ctrl;
+        break;
     case ESDHC_TUNE_CTRL_STATUS:
+        ret = s->tune_ctrl_status;
+        break;
     case ESDHC_UNDOCUMENTED_REG27:
+        ret = s->undocumented_reg27;
+        break;
     case ESDHC_TUNING_CTRL:
+        ret = s->tuning_ctrl;
+        break;
     case ESDHC_MIX_CTRL:
+        ret = s->mix_ctrl;
+        break;
     case ESDHC_WTMK_LVL:
-        ret = 0;
+        ret = s->wtmk_lvl;
         break;
     }
 
@@ -1694,10 +1775,19 @@ esdhc_write(void *opaque, hwaddr offset, uint64_t val, unsigned size)
 
     switch (offset) {
     case ESDHC_DLL_CTRL:
+        s->dll_ctrl = value;
+        break;
     case ESDHC_TUNE_CTRL_STATUS:
+        s->tune_ctrl_status = value;
+        break;
     case ESDHC_UNDOCUMENTED_REG27:
+        s->undocumented_reg27 = value;
+        break;
     case ESDHC_TUNING_CTRL:
+        s->tuning_ctrl = value;
+        break;
     case ESDHC_WTMK_LVL:
+        s->wtmk_lvl = value;
         break;
 
     case ESDHC_VENDOR_SPEC:
@@ -1810,7 +1900,18 @@ esdhc_write(void *opaque, hwaddr offset, uint64_t val, unsigned size)
          * sdhci_send_command(s) which we don't want.
          *
          */
+        s->mix_ctrl = value;
         s->trnmod = value & UINT16_MAX;
+        break;
+    case SDHC_CLKCON:
+        /*
+         * eSDHC's SYSCTL clock enables are not laid out like SDHCI's
+         * Clock Control bits.  Once firmware programs SYSCTL, keep the
+         * internal model clocked so command submission is not suppressed.
+         * The original value is retained for guest read/modify/write use.
+         */
+        sdhci_write(opaque, offset,
+                    value | SDHC_CLOCK_INT_EN | SDHC_CLOCK_SDCLK_EN, size);
         break;
     case SDHC_TRNMOD:
         /*
@@ -1836,6 +1937,11 @@ esdhc_write(void *opaque, hwaddr offset, uint64_t val, unsigned size)
         val |= 0x7 << 12;
         /* FALLTHROUGH */
     default:
+        /* Reserved words in the i.MX USDHC vendor aperture read as zero. */
+        if (object_dynamic_cast(OBJECT(s), TYPE_IMX_USDHC) &&
+            offset >= 0x50 && offset < 0xf0) {
+            break;
+        }
         sdhci_write(opaque, offset, val, size);
         break;
     }
