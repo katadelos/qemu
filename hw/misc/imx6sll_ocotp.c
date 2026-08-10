@@ -3,12 +3,14 @@
  *
  * This implements the shadow and direct-read interfaces used by U-Boot.
  * Programming is intentionally volatile: fuse writes survive guest resets,
- * but not a QEMU restart.
+ * but not a QEMU restart. Shadow-register overrides last until the next reset.
  */
 
 #include "qemu/osdep.h"
 #include "hw/misc/imx6sll_ocotp.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
+#include "qemu/error-report.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 
@@ -37,6 +39,8 @@ struct IMX6SLLOCOTPState {
     SysBusDevice parent_obj;
     MemoryRegion iomem;
     uint32_t fuses[OCOTP_BANKS][OCOTP_WORDS];
+    uint32_t shadows[OCOTP_BANKS][OCOTP_WORDS];
+    char *shadow_overrides;
     uint32_t ctrl;
     uint32_t timing;
     uint32_t data;
@@ -82,7 +86,7 @@ static uint64_t ocotp_read(void *opaque, hwaddr offset, unsigned size)
     unsigned bank, word;
 
     if (ocotp_shadow_address(offset, &bank, &word)) {
-        return s->fuses[bank][word];
+        return s->shadows[bank][word];
     }
 
     switch (offset) {
@@ -111,6 +115,11 @@ static void ocotp_write(void *opaque, hwaddr offset, uint64_t value,
 {
     IMX6SLLOCOTPState *s = opaque;
     unsigned bank, word;
+
+    if (ocotp_shadow_address(offset, &bank, &word)) {
+        s->shadows[bank][word] = value;
+        return;
+    }
 
     switch (offset) {
     case OCOTP_CTRL:
@@ -165,6 +174,65 @@ void imx6sll_ocotp_set_fuse(IMX6SLLOCOTPState *s, unsigned bank,
 {
     assert(bank < OCOTP_BANKS && word < OCOTP_WORDS);
     s->fuses[bank][word] = value;
+    s->shadows[bank][word] = value;
+}
+
+void imx6sll_ocotp_override_fuse(IMX6SLLOCOTPState *s, unsigned bank,
+                                 unsigned word, uint32_t value)
+{
+    assert(bank < OCOTP_BANKS && word < OCOTP_WORDS);
+    s->shadows[bank][word] = value;
+}
+
+static void ocotp_reset_hold(Object *obj, ResetType type)
+{
+    IMX6SLLOCOTPState *s = IMX6SLL_OCOTP(obj);
+    g_auto(GStrv) entries = NULL;
+    size_t i;
+
+    memcpy(s->shadows, s->fuses, sizeof(s->fuses));
+    if (s->shadow_overrides) {
+        entries = g_strsplit(s->shadow_overrides, ";", -1);
+        for (i = 0; entries[i]; i++) {
+            g_auto(GStrv) fields = g_strsplit(entries[i], ":", 3);
+            char *end;
+            guint64 bank, word, value;
+
+            if (!fields[0] || !fields[1] || !fields[2] || fields[3]) {
+                goto invalid;
+            }
+            bank = g_ascii_strtoull(fields[0], &end, 0);
+            if (*end) {
+                goto invalid;
+            }
+            word = g_ascii_strtoull(fields[1], &end, 0);
+            if (*end) {
+                goto invalid;
+            }
+            value = g_ascii_strtoull(fields[2], &end, 0);
+            if (*end || bank >= OCOTP_BANKS || word >= OCOTP_WORDS ||
+                value > UINT32_MAX) {
+                goto invalid;
+            }
+            s->shadows[bank][word] = value;
+            continue;
+
+invalid:
+            error_report("invalid OCOTP shadow-overrides entry '%s' "
+                         "(expected bank:word:value)", entries[i]);
+            exit(EXIT_FAILURE);
+        }
+    }
+    s->ctrl = 0;
+    s->timing = 0;
+    s->data = 0;
+    s->read_ctrl = 0;
+    s->read_fuse_data = 0;
+}
+
+void imx6sll_ocotp_apply_shadow_overrides(IMX6SLLOCOTPState *s)
+{
+    ocotp_reset_hold(OBJECT(s), RESET_TYPE_COLD);
 }
 
 static const VMStateDescription ocotp_vmstate = {
@@ -173,6 +241,8 @@ static const VMStateDescription ocotp_vmstate = {
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_2DARRAY(fuses, IMX6SLLOCOTPState,
+                              OCOTP_BANKS, OCOTP_WORDS),
+        VMSTATE_UINT32_2DARRAY(shadows, IMX6SLLOCOTPState,
                               OCOTP_BANKS, OCOTP_WORDS),
         VMSTATE_UINT32(ctrl, IMX6SLLOCOTPState),
         VMSTATE_UINT32(timing, IMX6SLLOCOTPState),
@@ -192,11 +262,27 @@ static void ocotp_init(Object *obj)
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
 }
 
+static void ocotp_finalize(Object *obj)
+{
+    IMX6SLLOCOTPState *s = IMX6SLL_OCOTP(obj);
+
+    g_free(s->shadow_overrides);
+}
+
+static const Property ocotp_properties[] = {
+    DEFINE_PROP_STRING("shadow-overrides", IMX6SLLOCOTPState,
+                       shadow_overrides),
+};
+
 static void ocotp_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
 
     dc->vmsd = &ocotp_vmstate;
+    device_class_set_props(dc, ocotp_properties);
+    ResettableClass *rc = RESETTABLE_CLASS(oc);
+
+    rc->phases.hold = ocotp_reset_hold;
 }
 
 static const TypeInfo ocotp_info = {
@@ -204,6 +290,7 @@ static const TypeInfo ocotp_info = {
     .parent = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(IMX6SLLOCOTPState),
     .instance_init = ocotp_init,
+    .instance_finalize = ocotp_finalize,
     .class_init = ocotp_class_init,
 };
 
