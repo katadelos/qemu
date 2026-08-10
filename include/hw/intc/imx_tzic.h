@@ -16,6 +16,8 @@ struct IMXTZICState {
     uint32_t pending[4];
     uint32_t priority[32];
     uint32_t intcntl;
+    uint32_t dsmint;
+    uint32_t wakeup[4];
     qemu_irq irq;
 };
 #endif

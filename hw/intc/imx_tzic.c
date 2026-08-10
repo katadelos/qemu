@@ -40,6 +40,7 @@ static uint64_t imx_tzic_read(void *opaque, hwaddr offset, unsigned size)
     case 0x004: return 0x00000003; /* 128 interrupt inputs */
     case 0x008: return 0x00000051; /* Freescale implementer */
     case 0x00c: return 0x1f;
+    case 0x014: return s->dsmint;
     default:
         if (offset >= 0x100 && offset < 0x110) {
             index = (offset - 0x100) / 4;
@@ -56,6 +57,10 @@ static uint64_t imx_tzic_read(void *opaque, hwaddr offset, unsigned size)
             index = (offset - 0xd80) / 4;
             return s->pending[index] & s->enabled[index];
         }
+        if (offset >= 0xe00 && offset < 0xe10) {
+            index = (offset - 0xe00) / 4;
+            return s->wakeup[index];
+        }
         return 0;
     }
 }
@@ -69,6 +74,9 @@ static void imx_tzic_write(void *opaque, hwaddr offset, uint64_t value,
     switch (offset) {
     case 0x000:
         s->intcntl = value;
+        break;
+    case 0x014:
+        s->dsmint = value & 1;
         break;
     default:
         if (offset >= 0x100 && offset < 0x110) {
@@ -85,6 +93,9 @@ static void imx_tzic_write(void *opaque, hwaddr offset, uint64_t value,
             s->pending[index] &= ~value;
         } else if (offset >= 0x400 && offset < 0x480) {
             s->priority[(offset - 0x400) / 4] = value;
+        } else if (offset >= 0xe00 && offset < 0xe10) {
+            index = (offset - 0xe00) / 4;
+            s->wakeup[index] = value;
         }
         break;
     }
@@ -113,7 +124,10 @@ static const VMStateDescription vmstate_imx_tzic = {
         VMSTATE_UINT32_ARRAY(enabled, IMXTZICState, 4),
         VMSTATE_UINT32_ARRAY(pending, IMXTZICState, 4),
         VMSTATE_UINT32_ARRAY(priority, IMXTZICState, 32),
-        VMSTATE_UINT32(intcntl, IMXTZICState), VMSTATE_END_OF_LIST()
+        VMSTATE_UINT32(intcntl, IMXTZICState),
+        VMSTATE_UINT32(dsmint, IMXTZICState),
+        VMSTATE_UINT32_ARRAY(wakeup, IMXTZICState, 4),
+        VMSTATE_END_OF_LIST()
     },
 };
 
