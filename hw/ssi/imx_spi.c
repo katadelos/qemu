@@ -236,7 +236,14 @@ static void imx_spi_flush_txfifo(IMXSPIState *s)
         if (s->burst_length <= 0) {
             if (!imx_spi_is_multiple_master_burst(s)) {
                 s->regs[ECSPI_STATREG] |= ECSPI_STATREG_TC;
-                break;
+                /*
+                 * Legacy CSPI treats BL as the size of each FIFO word and
+                 * shifts every queued word for one XCH request.  eCSPI BL
+                 * instead describes the complete exchange.
+                 */
+                if (!s->legacy_cspi) {
+                    break;
+                }
             }
         }
     }
