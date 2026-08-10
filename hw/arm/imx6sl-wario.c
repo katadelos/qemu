@@ -15,6 +15,7 @@
 #include "hw/display/imx_epdc.h"
 #include "hw/i2c/drv2667.h"
 #include "hw/i2c/cyttsp4.h"
+#include "hw/i2c/zforce.h"
 #include "hw/input/wario-keyboard.h"
 #include "hw/i2c/max77696.h"
 #include "hw/misc/unimp.h"
@@ -43,6 +44,10 @@
 #define WARIO_FB_WIDTH       1072
 #define WARIO_FB_HEIGHT      1448
 #define WARIO_FB_STRIDE      1088
+#define BOURBON_FB_ADDR      0x80c00000
+#define BOURBON_FB_WIDTH     600
+#define BOURBON_FB_HEIGHT    800
+#define BOURBON_FB_STRIDE    608
 #define WARIO_PXP_ADDR       0x020f0000
 /* Linux IRQ 130 minus the GIC SPI base (32). */
 #define WARIO_PXP_GIC_IRQ    98
@@ -71,6 +76,16 @@ typedef struct WarioIdmeField {
 } WarioIdmeField;
 
 static struct arm_boot_info wario_boot_info;
+
+static bool wario_is_bourbon(const WarioMachineState *wms)
+{
+    /*
+     * Lab126 board IDs occupy the first three bytes of the PCB serial.
+     * 051 is production Bourbon and 062 is the pre-EVT2 Bourbon spin.
+     */
+    return g_str_has_prefix(wms->idme_pcbsn, "051") ||
+           g_str_has_prefix(wms->idme_pcbsn, "062");
+}
 
 static void wario_firmware_reset(void *opaque)
 {
@@ -225,6 +240,7 @@ static void wario_init(MachineState *machine)
     DeviceState *keyboard;
     DeviceState *pmic;
     I2CBus *i2c;
+    bool bourbon = wario_is_bourbon(wms);
 
     if (machine->ram_size > WARIO_RAM_MAX) {
         error_report("RAM size " RAM_ADDR_FMT " exceeds i.MX6SL maximum",
@@ -281,9 +297,13 @@ static void wario_init(MachineState *machine)
     /* Icewine's TI DRV2667 piezo haptic controller is on I2C3. */
     i2c_slave_create_simple(s->i2c[2].bus, TYPE_DRV2667, 0x59);
 
-    /* Cypress TrueTouch Gen4: I2C2, active-low GPIO4_3, reset GPIO4_5. */
-    pmic = qdev_new(TYPE_CYTTSP4);
-    qdev_prop_set_uint8(pmic, "address", 0x24);
+    /*
+     * Touch is on I2C2 for both production variants.  Icewine uses Cypress
+     * TrueTouch Gen4 while the 256 MiB Bourbon board uses Neonode zForce2.
+     * They share the active-low GPIO4_3 interrupt and GPIO4_5 reset lines.
+     */
+    pmic = qdev_new(bourbon ? TYPE_KINDLE_ZFORCE2 : TYPE_CYTTSP4);
+    qdev_prop_set_uint8(pmic, "address", bourbon ? 0x50 : 0x24);
     qdev_realize(pmic, BUS(s->i2c[1].bus), &error_fatal);
     qdev_connect_gpio_out(pmic, 0,
                           qdev_get_gpio_in(DEVICE(&s->gpio[3]), 3));
@@ -293,10 +313,22 @@ static void wario_init(MachineState *machine)
 
     epdc = qdev_new(TYPE_IMX_EPDC);
     object_property_add_child(OBJECT(machine), "epdc", OBJECT(epdc));
-    qdev_prop_set_uint64(epdc, "fb-addr", WARIO_FB_ADDR);
-    qdev_prop_set_uint32(epdc, "fb-width", WARIO_FB_WIDTH);
-    qdev_prop_set_uint32(epdc, "fb-height", WARIO_FB_HEIGHT);
-    qdev_prop_set_uint32(epdc, "fb-stride", WARIO_FB_STRIDE);
+    if (bourbon) {
+        /*
+         * Bourbon's 256 MiB stock kernel reserves its 608x5376 virtual
+         * framebuffer at 0x80c00000.  Scan out the visible 600x800 page.
+         */
+        qdev_prop_set_uint64(epdc, "fb-addr", BOURBON_FB_ADDR);
+        qdev_prop_set_uint32(epdc, "fb-width", BOURBON_FB_WIDTH);
+        qdev_prop_set_uint32(epdc, "fb-height", BOURBON_FB_HEIGHT);
+        qdev_prop_set_uint32(epdc, "fb-stride", BOURBON_FB_STRIDE);
+    } else {
+        /* Icewine's fixed 512 MiB layout places the framebuffer here. */
+        qdev_prop_set_uint64(epdc, "fb-addr", WARIO_FB_ADDR);
+        qdev_prop_set_uint32(epdc, "fb-width", WARIO_FB_WIDTH);
+        qdev_prop_set_uint32(epdc, "fb-height", WARIO_FB_HEIGHT);
+        qdev_prop_set_uint32(epdc, "fb-stride", WARIO_FB_STRIDE);
+    }
     sysbus_realize_and_unref(SYS_BUS_DEVICE(epdc), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(epdc), 0, WARIO_EPDC_ADDR);
     sysbus_connect_irq(SYS_BUS_DEVICE(epdc), 0,
