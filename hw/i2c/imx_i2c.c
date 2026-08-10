@@ -128,10 +128,14 @@ static uint64_t imx_i2c_read(void *opaque, hwaddr offset,
             }
 
             s->i2dr_read = ret;
-        } else {
-            qemu_log_mask(LOG_UNIMP, "[%s]%s: slave mode not implemented\n",
-                          TYPE_IMX_I2C, __func__);
         }
+        /*
+         * The i.MX receive sequence generates STOP before reading the last
+         * byte.  Clearing MSTA ends the QEMU I2C transfer, but I2DR still
+         * contains the byte prefetched by the preceding bus cycle.  Return
+         * that latched byte here just as the controller does; this is not a
+         * target/slave-mode transaction.
+         */
         break;
     default:
         qemu_log_mask(LOG_GUEST_ERROR, "[%s]%s: Bad address at offset 0x%"
