@@ -94,6 +94,9 @@ DECLARE_INSTANCE_CHECKER(SDState, EMMC, TYPE_EMMC)
 void emmc_boot_partition_write(DeviceState *dev, unsigned int partition,
                                uint64_t offset, const void *data, size_t len,
                                Error **errp);
+void emmc_boot_partition_read(DeviceState *dev, unsigned int partition,
+                              uint64_t offset, void *data, size_t len,
+                              Error **errp);
 
 /* Atheros AR6003 Wi-Fi function used by the Lab126 Wario board. */
 #define TYPE_AR6003_SDIO "ar6003-sdio"

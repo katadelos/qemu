@@ -170,6 +170,7 @@ struct SDState {
     bool boot_parts_in_memory;
     uint8_t *boot_parts;
     uint32_t boot_parts_size;
+    char *boot_parts_file;
 
     const SDProto *proto;
 
@@ -2371,6 +2372,19 @@ static void sd_blk_read(SDState *sd, uint64_t addr, uint32_t len)
     }
 }
 
+static void emmc_boot_parts_sync(SDState *sd, Error **errp)
+{
+    g_autoptr(GError) error = NULL;
+
+    if (sd->boot_parts_file) {
+        if (!g_file_set_contents(sd->boot_parts_file, (char *)sd->boot_parts,
+                                 sd->boot_parts_size, &error)) {
+            error_setg(errp, "cannot write eMMC boot partitions file '%s': %s",
+                       sd->boot_parts_file, error->message);
+        }
+    }
+}
+
 static void sd_blk_write(SDState *sd, uint64_t addr, uint32_t len)
 {
     unsigned int partition_access;
@@ -2385,6 +2399,7 @@ static void sd_blk_write(SDState *sd, uint64_t addr, uint32_t len)
 
         if (addr + len <= sd->boot_part_size) {
             memcpy(sd->boot_parts + offset, sd->data, len);
+            emmc_boot_parts_sync(sd, &error_fatal);
         } else {
             fprintf(stderr,
                     "sd_blk_write: boot partition write out of range\n");
@@ -4313,6 +4328,7 @@ static void sd_instance_finalize(Object *obj)
         timer_free(sd->sdio_credit_timer);
     }
     g_free(sd->boot_parts);
+    g_free(sd->boot_parts_file);
 }
 
 static void sd_blk_size_error(SDState *sd, int64_t blk_size,
@@ -4425,6 +4441,26 @@ static void sd_realize(DeviceState *dev, Error **errp)
         }
         sd->boot_parts_size = sd->boot_part_size * 2;
         sd->boot_parts = g_malloc0(sd->boot_parts_size);
+        if (sd->boot_parts_file &&
+            g_file_test(sd->boot_parts_file, G_FILE_TEST_EXISTS)) {
+            g_autofree char *contents = NULL;
+            g_autoptr(GError) error = NULL;
+            gsize length;
+
+            if (!g_file_get_contents(sd->boot_parts_file, &contents, &length,
+                                     &error)) {
+                error_setg(errp,
+                           "cannot read eMMC boot partitions file '%s': %s",
+                           sd->boot_parts_file, error->message);
+                return;
+            }
+            if (length != sd->boot_parts_size) {
+                error_setg(errp, "eMMC boot partitions file '%s' has invalid size",
+                           sd->boot_parts_file);
+                return;
+            }
+            memcpy(sd->boot_parts, contents, length);
+        }
     }
 }
 
@@ -4445,6 +4481,26 @@ void emmc_boot_partition_write(DeviceState *dev, unsigned int partition,
     }
     memcpy(sd->boot_parts + (partition - 1) * sd->boot_part_size + offset,
            data, len);
+    emmc_boot_parts_sync(sd, errp);
+}
+
+void emmc_boot_partition_read(DeviceState *dev, unsigned int partition,
+                              uint64_t offset, void *data, size_t len,
+                              Error **errp)
+{
+    SDState *sd = EMMC(dev);
+
+    if (!sd->boot_parts_in_memory || !sd->boot_parts) {
+        error_setg(errp, "eMMC boot partitions are not backed by memory");
+        return;
+    }
+    if (partition < 1 || partition > 2 ||
+        offset > sd->boot_part_size || len > sd->boot_part_size - offset) {
+        error_setg(errp, "eMMC boot partition read is out of range");
+        return;
+    }
+    memcpy(data, sd->boot_parts + (partition - 1) * sd->boot_part_size + offset,
+           len);
 }
 
 static void emmc_realize(DeviceState *dev, Error **errp)
@@ -4469,6 +4525,7 @@ static const Property emmc_properties[] = {
     DEFINE_PROP_UINT64("boot-partition-size", SDState, boot_part_size, 0),
     DEFINE_PROP_BOOL("boot-partitions-in-memory", SDState,
                      boot_parts_in_memory, false),
+    DEFINE_PROP_STRING("boot-partitions-file", SDState, boot_parts_file),
     DEFINE_PROP_UINT8("boot-config", SDState, boot_config, 0x0),
     DEFINE_PROP_UINT64("rpmb-partition-size", SDState, rpmb_part_size, 0),
 };
