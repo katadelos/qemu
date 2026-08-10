@@ -45,6 +45,8 @@ enum {
 #define EPDC_UPD_LUT_SHIFT      16
 #define EPDC_UPD_LUT_MASK       0xf
 #define EPDC_MAX_DIMENSION      2048
+#define EPDC_WB_COMPLETE_NS     1000000
+#define EPDC_LUT_COMPLETE_NS    10000000
 
 static inline uint32_t *epdc_reg(IMX50EPDCState *s, hwaddr offset)
 {
@@ -186,6 +188,7 @@ static void imx50_epdc_wb_complete(void *opaque)
 
     *epdc_reg(s, EPDC_STATUS) &= ~EPDC_STATUS_WB_BUSY;
     *epdc_reg(s, EPDC_IRQ) |= EPDC_IRQ_WB_CMPLT;
+    trace_whitney_epdc_wb_complete(*epdc_reg(s, EPDC_IRQ));
     imx50_epdc_update_irq(s);
 }
 
@@ -197,6 +200,7 @@ static void imx50_epdc_lut_complete(void *opaque)
     s->pending_luts = 0;
     *epdc_reg(s, EPDC_STATUS_LUTS) &= ~completed;
     *epdc_reg(s, EPDC_IRQ) |= completed;
+    trace_whitney_epdc_lut_complete(completed, *epdc_reg(s, EPDC_IRQ));
     imx50_epdc_update_irq(s);
 }
 
@@ -273,10 +277,22 @@ static void imx50_epdc_write(void *opaque, hwaddr offset, uint64_t value,
         *epdc_reg(s, EPDC_STATUS) |= EPDC_STATUS_WB_BUSY;
         *epdc_reg(s, EPDC_STATUS_LUTS) |= 1U << lut;
         s->pending_luts |= 1U << lut;
+        trace_whitney_epdc_submit(lut,
+                                  *epdc_reg(s, EPDC_STATUS_LUTS));
+
+        /*
+         * The i.MX50 presents working-buffer and LUT completion as distinct
+         * ownership transitions.  Leave enough virtual time between them
+         * for the guest to service WB_CMPLT before the LUT interrupt arrives;
+         * otherwise both status bits are observed in one IRQ and Kobo's
+         * 2.6.35 queue never reaches its final idle/powerdown check.
+         */
         timer_mod(s->wb_timer,
-                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1000);
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                  EPDC_WB_COMPLETE_NS);
         timer_mod(s->lut_timer,
-                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 100000);
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                  EPDC_LUT_COMPLETE_NS);
     }
 
     if (base == EPDC_IRQ_MASK || base == EPDC_IRQ) {

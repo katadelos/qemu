@@ -3,6 +3,9 @@
 # imx50_epdc.c
 whitney_epdc_begin(unsigned width, unsigned height) "update=%ux%u"
 whitney_epdc_render(unsigned width, unsigned height, int64_t duration_ns) "update=%ux%u duration=%"PRId64"ns"
+whitney_epdc_submit(unsigned lut, uint32_t active) "lut=%u active=0x%08x"
+whitney_epdc_wb_complete(uint32_t irq) "irq=0x%08x"
+whitney_epdc_lut_complete(uint32_t completed, uint32_t irq) "completed=0x%08x irq=0x%08x"
 
 # jazz_led.c
 jazz_led_read(uint64_t addr, uint8_t val) "read addr=0x%"PRIx64": 0x%x"
