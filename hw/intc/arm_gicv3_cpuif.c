@@ -1055,7 +1055,10 @@ void gicv3_cpuif_update(GICv3CPUState *cs)
     g_assert(bql_locked());
 
     trace_gicv3_cpuif_update(gicv3_redist_affid(cs), cs->hppi.irq,
-                             cs->hppi.grp, cs->hppi.prio);
+                             cs->hppi.grp, cs->hppi.prio,
+                             cs->icc_pmr_el1,
+                             cs->icc_igrpen[cs->hppi.grp],
+                             icc_highest_active_prio(cs));
 
     if (cs->hppi.grp == GICV3_G1 && !arm_feature(env, ARM_FEATURE_EL3)) {
         /* If a Security-enabled GIC sends a G1S interrupt to a
