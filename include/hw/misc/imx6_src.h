@@ -68,6 +68,7 @@ struct IMX6SRCState {
     MemoryRegion iomem;
 
     uint32_t regs[SRC_MAX];
+    uint32_t sbmr1;
 
 };
 

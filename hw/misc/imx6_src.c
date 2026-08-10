@@ -17,6 +17,7 @@
 #include "qemu/module.h"
 #include "target/arm/arm-powerctl.h"
 #include "hw/core/cpu.h"
+#include "hw/core/qdev-properties.h"
 #include "trace.h"
 
 static const char *imx6_src_reg_name(uint32_t reg)
@@ -84,6 +85,7 @@ static void imx6_src_reset(DeviceState *dev)
     s->regs[SRC_SCR] = 0x521;
     s->regs[SRC_SRSR] = 0x1;
     s->regs[SRC_SIMR] = 0x1F;
+    s->regs[SRC_SBMR1] = s->sbmr1;
 }
 
 static uint64_t imx6_src_read(void *opaque, hwaddr offset, unsigned size)
@@ -276,8 +278,12 @@ static void imx6_src_realize(DeviceState *dev, Error **errp)
 static void imx6_src_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    static const Property properties[] = {
+        DEFINE_PROP_UINT32("sbmr1", IMX6SRCState, sbmr1, 0),
+    };
 
     dc->realize = imx6_src_realize;
+    device_class_set_props(dc, properties);
     device_class_set_legacy_reset(dc, imx6_src_reset);
     dc->vmsd = &vmstate_imx6_src;
     dc->desc = "i.MX6 System Reset Controller";

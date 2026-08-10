@@ -149,6 +149,8 @@
 #define USB_ANALOG_USB2_MISC_TOG 151
 #define USB_ANALOG_DIGPROG 152
 #define CCM_ANALOG_MAX 153
+#define USB_ANALOG_DIGPROG_SL 160
+#define CCM_ANALOG_REGION_MAX 161
 
 /* CCM_CBCMR */
 #define PRE_PERIPH_CLK_SEL_SHIFT  (18)
@@ -192,6 +194,7 @@ struct IMX6CCMState {
 
     uint32_t ccm[CCM_MAX];
     uint32_t analog[CCM_ANALOG_MAX];
+    bool sololite;
 
 };
 

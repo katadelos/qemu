@@ -11,6 +11,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/misc/imx6_ccm.h"
 #include "migration/vmstate.h"
 #include "qemu/log.h"
@@ -223,6 +224,8 @@ static const char *imx6_analog_reg_name(uint32_t reg)
         return "PMU_MISC1_TOG";
     case USB_ANALOG_DIGPROG:
         return "USB_ANALOG_DIGPROG";
+    case USB_ANALOG_DIGPROG_SL:
+        return "USB_ANALOG_DIGPROG_SL";
     default:
         snprintf(unknown, sizeof(unknown), "%u ?", reg);
         return unknown;
@@ -498,6 +501,9 @@ static uint64_t imx6_analog_read(void *opaque, hwaddr offset, unsigned size)
     IMX6CCMState *s = (IMX6CCMState *)opaque;
 
     switch (index) {
+    case USB_ANALOG_DIGPROG_SL:
+        value = s->sololite ? 0x00600000 : 0;
+        break;
     case CCM_ANALOG_PLL_ARM_SET:
     case CCM_ANALOG_PLL_USB1_SET:
     case CCM_ANALOG_PLL_USB2_SET:
@@ -592,6 +598,10 @@ static void imx6_analog_write(void *opaque, hwaddr offset, uint64_t value,
     trace_imx6_analog_write(imx6_analog_reg_name(index), (uint32_t)value);
 
     switch (index) {
+    case USB_ANALOG_DIGPROG_SL:
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "Guest write to read-only SoloLite DIGPROG register\n");
+        break;
     case CCM_ANALOG_PLL_ARM_SET:
     case CCM_ANALOG_PLL_USB1_SET:
     case CCM_ANALOG_PLL_USB2_SET:
@@ -733,7 +743,7 @@ static void imx6_ccm_init(Object *obj)
     /* We initialize an IO memory region for the ANALOG part */
     memory_region_init_io(&s->ioanalog, OBJECT(dev), &imx6_analog_ops, s,
                           TYPE_IMX6_CCM ".analog",
-                          CCM_ANALOG_MAX * sizeof(uint32_t));
+                          CCM_ANALOG_REGION_MAX * sizeof(uint32_t));
 
     /* Add the ANALOG as a subregion at offset 0x4000 */
     memory_region_add_subregion(&s->container, 0x4000, &s->ioanalog);
@@ -741,12 +751,17 @@ static void imx6_ccm_init(Object *obj)
     sysbus_init_mmio(sd, &s->container);
 }
 
+static const Property imx6_ccm_properties[] = {
+    DEFINE_PROP_BOOL("sololite", IMX6CCMState, sololite, false),
+};
+
 static void imx6_ccm_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     IMXCCMClass *ccm = IMX_CCM_CLASS(klass);
 
     device_class_set_legacy_reset(dc, imx6_ccm_reset);
+    device_class_set_props(dc, imx6_ccm_properties);
     dc->vmsd = &vmstate_imx6_ccm;
     dc->desc = "i.MX6 Clock Control Module";
 
