@@ -1,5 +1,8 @@
 # See docs/devel/tracing.rst for syntax documentation.
 
+# mt8113_hwtcon.c
+mt8113_hwtcon_mdp_source(uint32_t addr, uint32_t format, unsigned width, unsigned height, unsigned pitch, unsigned panel_width, unsigned panel_height, unsigned captured) "addr=0x%08x format=%u size=%ux%u pitch=%u panel=%ux%u captured=%u"
+
 # imx50_epdc.c
 whitney_epdc_begin(unsigned width, unsigned height) "update=%ux%u"
 whitney_epdc_render(unsigned width, unsigned height, int64_t duration_ns) "update=%ux%u duration=%"PRId64"ns"
