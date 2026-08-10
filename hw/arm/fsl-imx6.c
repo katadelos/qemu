@@ -495,8 +495,13 @@ static void fsl_imx6_realize(DeviceState *dev, Error **errp)
     }
 
     /* OCRAM memory */
-    hwaddr ocram_size = s->sololite ? 0x20000 : FSL_IMX6_OCRAM_SIZE;
-    unsigned ocram_aliases = s->sololite ? 7 : 3;
+    /*
+     * SoloLite exposes the complete 1 MiB OCRAM arbitration window.  Wario's
+     * Boot ROM loads its U-Boot image at 0x00980400; treating that window as
+     * repeated 128 KiB aliases corrupts images larger than a single bank.
+     */
+    hwaddr ocram_size = s->sololite ? 0x100000 : FSL_IMX6_OCRAM_SIZE;
+    unsigned ocram_aliases = s->sololite ? 0 : 3;
 
     if (!memory_region_init_ram(&s->ocram, NULL, "imx6.ocram", ocram_size,
                                 errp)) {
@@ -505,7 +510,7 @@ static void fsl_imx6_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(get_system_memory(), FSL_IMX6_OCRAM_ADDR,
                                 &s->ocram);
 
-    /* Internal OCRAM is mirrored three times across the 0x0094xxxx window. */
+    /* Non-SoloLite i.MX6 variants mirror their OCRAM banks. */
     for (i = 0; i < ocram_aliases; i++) {
         g_autofree char *name = g_strdup_printf("imx6.ocram_alias[%d]", i);
 
