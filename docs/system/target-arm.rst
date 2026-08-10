@@ -93,6 +93,7 @@ Board-specific documentation
    arm/nrf
    arm/nuvoton
    arm/imx25-pdk
+   arm/imx50-tequila
    arm/mcimx6ul-evk
    arm/mcimx7d-sabre
    arm/imx8mp-evk
