@@ -4462,7 +4462,7 @@ foreach target : target_dirs
         get_option('bindir') / exe_name,
         meson.current_source_dir() / icon
       ]
-      if 'CONFIG_HVF' in config_target
+      if 'CONFIG_HVF' in config_target or vmnet.found()
         entitlements = 'accel/hvf/entitlements.plist'
         build_input += files(entitlements)
         install_input += meson.current_source_dir() / entitlements

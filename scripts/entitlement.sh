@@ -22,12 +22,17 @@ else
 fi
 
 if test -n "$ENTITLEMENT"; then
+  # Current macOS code signing rejects resource forks and Finder metadata on
+  # signed command-line executables.  Adding the legacy QEMU icon after
+  # signing also makes AMFI kill Cocoa QEMU at launch, so omit that cosmetic
+  # metadata for entitled binaries.
+  xattr -c "$SRC"
   codesign --entitlements "$ENTITLEMENT" --force -s - "$SRC"
+else
+  # Add the QEMU icon to unsigned binaries on older macOS configurations.
+  Rez -append "$ICON" -o "$SRC"
+  SetFile -a C "$SRC"
 fi
-
-# Add the QEMU icon to the binary on Mac OS
-Rez -append "$ICON" -o "$SRC"
-SetFile -a C "$SRC"
 
 mv -f "$SRC" "$DST"
 trap '' exit
