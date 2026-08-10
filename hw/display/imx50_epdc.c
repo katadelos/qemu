@@ -40,7 +40,9 @@ enum {
 #define EPDC_CTRL_SFTRST        (1U << 31)
 #define EPDC_CTRL_CLKGATE       (1U << 30)
 #define EPDC_UPD_CTRL_USE_FIXED (1U << 31)
+#define EPDC_UPD_CTRL_AUTOWV_PAUSE (1U << 3)
 #define EPDC_IRQ_WB_CMPLT       (1U << 16)
+#define EPDC_IRQ_UPD_DONE       (1U << 22)
 #define EPDC_STATUS_WB_BUSY     (1U << 0)
 #define EPDC_UPD_LUT_SHIFT      16
 #define EPDC_UPD_LUT_MASK       0xf
@@ -287,12 +289,22 @@ static void imx50_epdc_write(void *opaque, hwaddr offset, uint64_t value,
          * otherwise both status bits are observed in one IRQ and Kobo's
          * 2.6.35 queue never reaches its final idle/powerdown check.
          */
-        timer_mod(s->wb_timer,
-                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-                  EPDC_WB_COMPLETE_NS);
-        timer_mod(s->lut_timer,
-                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-                  EPDC_LUT_COMPLETE_NS);
+        if (value & EPDC_UPD_CTRL_AUTOWV_PAUSE) {
+            /*
+             * Lab126 pauses AUTO waveform updates after histogram/working-
+             * buffer processing.  Linux handles UPD_DONE, selects the final
+             * waveform and VCOM, then rewrites UPD_CTRL with PAUSE clear.
+             */
+            *epdc_reg(s, EPDC_IRQ) |= EPDC_IRQ_UPD_DONE;
+            imx50_epdc_update_irq(s);
+        } else {
+            timer_mod(s->wb_timer,
+                      qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                      EPDC_WB_COMPLETE_NS);
+            timer_mod(s->lut_timer,
+                      qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                      EPDC_LUT_COMPLETE_NS);
+        }
     }
 
     if (base == EPDC_IRQ_MASK || base == EPDC_IRQ) {
