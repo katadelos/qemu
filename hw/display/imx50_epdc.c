@@ -18,6 +18,7 @@
 #include "qemu/module.h"
 #include "qemu/timer.h"
 #include "system/dma.h"
+#include "trace.h"
 #include "ui/console.h"
 
 enum {
@@ -101,6 +102,7 @@ static void imx50_epdc_render_update(IMX50EPDCState *s,
     unsigned display_width, display_height;
     uint32_t *pixels;
     MemTxResult result;
+    int64_t started_ns;
     unsigned x, y;
 
     if (!source ||
@@ -115,6 +117,8 @@ static void imx50_epdc_render_update(IMX50EPDCState *s,
      * 8-pixel blocks, while EPDC consumes only the requested rectangle.
      */
     stride = QEMU_ALIGN_UP(width, 8);
+    trace_whitney_epdc_begin(width, height);
+    started_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     update = g_malloc((size_t)stride * height);
     result = dma_memory_read(&address_space_memory, source, update,
                              (size_t)stride * height,
@@ -157,6 +161,9 @@ static void imx50_epdc_render_update(IMX50EPDCState *s,
         }
     }
     dpy_gfx_update(s->console, display_left, display_top, height, width);
+    trace_whitney_epdc_render(width, height,
+                              qemu_clock_get_ns(QEMU_CLOCK_REALTIME) -
+                              started_ns);
 }
 
 static void imx50_epdc_invalidate(void *opaque)
