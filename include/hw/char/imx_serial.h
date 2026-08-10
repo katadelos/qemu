@@ -83,6 +83,9 @@ OBJECT_DECLARE_SIMPLE_TYPE(IMXSerialState, IMX_SERIAL)
 #define UTS1_RXEMPTY    (1<<5)
 #define UTS1_TXFULL     (1<<4)
 #define UTS1_RXFULL     (1<<3)
+#define UTS1_LOOP       (1<<12)
+#define UTS1_FRCPERR    (1<<13)
+#define UTS1_SOFTRST    (1<<0)
 
 #define TL_MASK         0x3f
 
@@ -118,6 +121,9 @@ struct IMXSerialState {
     uint32_t onems;
     uint32_t ubmr;
     uint32_t ubrc;
+    uint32_t ubir;
+    uint32_t uesc;
+    uint32_t utim;
     uint32_t ucr3;
     uint32_t ucr4;
 

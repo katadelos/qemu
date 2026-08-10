@@ -43,7 +43,7 @@
 
 static const VMStateDescription vmstate_imx_serial = {
     .name = TYPE_IMX_SERIAL,
-    .version_id = 3,
+    .version_id = 4,
     .minimum_version_id = 3,
     .fields = (const VMStateField[]) {
         VMSTATE_FIFO32(rx_fifo, IMXSerialState),
@@ -58,6 +58,10 @@ static const VMStateDescription vmstate_imx_serial = {
         VMSTATE_UINT32(ubrc, IMXSerialState),
         VMSTATE_UINT32(ucr3, IMXSerialState),
         VMSTATE_UINT32(ucr4, IMXSerialState),
+        VMSTATE_UINT32_V(ucr2, IMXSerialState, 4),
+        VMSTATE_UINT32_V(ubir, IMXSerialState, 4),
+        VMSTATE_UINT32_V(uesc, IMXSerialState, 4),
+        VMSTATE_UINT32_V(utim, IMXSerialState, 4),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -154,12 +158,21 @@ static void imx_serial_reset(IMXSerialState *s)
      */
     s->usr1 |= USR1_RTSS;
     s->usr2 = USR2_TXFE | USR2_TXDC | USR2_DCDIN;
-    s->uts1 = UTS1_RXEMPTY | UTS1_TXEMPTY;
+    /*
+     * SOFTRST reads as one after reset has completed.  Linux preserves this
+     * bit when imx_set_mctrl() read-modify-writes UTS; leaving it clear makes
+     * that routine look like a fresh software-reset request and disables the
+     * UART as soon as a tty (notably getty) opens it.
+     */
+    s->uts1 = UTS1_SOFTRST | UTS1_RXEMPTY | UTS1_TXEMPTY;
     s->ucr1 = 0;
     s->ucr2 = UCR2_SRST;
     s->ucr3 = 0x700;
     s->ubmr = 0;
     s->ubrc = 4;
+    s->ubir = 0;
+    s->uesc = 0x2b;
+    s->utim = 0;
     s->ufcr = BIT(11) | BIT(0);
 
     fifo32_reset(&s->rx_fifo);
@@ -229,6 +242,14 @@ static uint64_t imx_serial_read(void *opaque, hwaddr offset,
         value = s->usr2;
         break;
 
+    case 0x27: /* UESC */
+        value = s->uesc;
+        break;
+
+    case 0x28: /* UTIM */
+        value = s->utim;
+        break;
+
     case 0x2A: /* BRM Modulator */
         value = s->ubmr;
         break;
@@ -258,7 +279,7 @@ static uint64_t imx_serial_read(void *opaque, hwaddr offset,
         break;
 
     case 0x29: /* BRM Incremental */
-        value = 0x0; /* TODO */
+        value = s->ubir;
         break;
 
     default:
@@ -342,12 +363,20 @@ static void imx_serial_write(void *opaque, hwaddr offset,
         s->usr2 &= ~value;
         break;
 
+    case 0x27: /* UESC */
+        s->uesc = value & 0xffff;
+        break;
+
+    case 0x28: /* UTIM */
+        s->utim = value & 0xffff;
+        break;
+
     /*
      * Linux expects to see what it writes to these registers
      * We don't currently alter the baud rate
      */
     case 0x29: /* UBIR */
-        s->ubrc = value & 0xffff;
+        s->ubir = value & 0xffff;
         break;
 
     case 0x2a: /* UBMR */
@@ -372,9 +401,13 @@ static void imx_serial_write(void *opaque, hwaddr offset,
         break;
 
     case 0x2d: /* UTS1 */
-        qemu_log_mask(LOG_UNIMP, "[%s]%s: Unimplemented reg 0x%"
-                      HWADDR_PRIx "\n", TYPE_IMX_SERIAL, __func__, offset);
-        /* TODO */
+        if (!(value & UTS1_SOFTRST)) {
+            imx_serial_reset(s);
+        } else {
+            s->uts1 = (s->uts1 & ~(UTS1_LOOP | UTS1_FRCPERR)) |
+                      (value & (UTS1_LOOP | UTS1_FRCPERR));
+        }
+        imx_update(s);
         break;
 
     default:
