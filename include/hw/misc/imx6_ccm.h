@@ -195,6 +195,7 @@ struct IMX6CCMState {
     uint32_t ccm[CCM_MAX];
     uint32_t analog[CCM_ANALOG_MAX];
     bool sololite;
+    bool sololite_lite;
 
 };
 

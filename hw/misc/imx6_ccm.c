@@ -502,7 +502,11 @@ static uint64_t imx6_analog_read(void *opaque, hwaddr offset, unsigned size)
 
     switch (index) {
     case USB_ANALOG_DIGPROG_SL:
-        value = s->sololite ? 0x00600000 : 0;
+        value = s->sololite && !s->sololite_lite ? 0x00600000 : 0;
+        break;
+    case USB_ANALOG_DIGPROG:
+        value = s->sololite_lite ? 0x00670000 :
+                                   s->analog[USB_ANALOG_DIGPROG];
         break;
     case CCM_ANALOG_PLL_ARM_SET:
     case CCM_ANALOG_PLL_USB1_SET:
@@ -753,6 +757,7 @@ static void imx6_ccm_init(Object *obj)
 
 static const Property imx6_ccm_properties[] = {
     DEFINE_PROP_BOOL("sololite", IMX6CCMState, sololite, false),
+    DEFINE_PROP_BOOL("sololite-lite", IMX6CCMState, sololite_lite, false),
 };
 
 static void imx6_ccm_class_init(ObjectClass *klass, const void *data)
