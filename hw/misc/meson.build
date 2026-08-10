@@ -6,6 +6,10 @@ system_ss.add(when: 'CONFIG_ISA_TESTDEV', if_true: files('pc-testdev.c'))
 system_ss.add(when: 'CONFIG_PCI_TESTDEV', if_true: files('pci-testdev.c'))
 system_ss.add(when: 'CONFIG_IOMMU_TESTDEV', if_true: files('iommu-testdev.c'))
 system_ss.add(when: 'CONFIG_UNIMP', if_true: files('unimp.c'))
+system_ss.add(when: 'CONFIG_MT8113', if_true: files(
+  'mt8113_gce.c',
+  'mt8113_iommu.c',
+))
 system_ss.add(when: 'CONFIG_EMPTY_SLOT', if_true: files('empty_slot.c'))
 system_ss.add(when: 'CONFIG_LED', if_true: files('led.c'))
 system_ss.add(when: 'CONFIG_PVPANIC_COMMON', if_true: files('pvpanic.c'))
@@ -157,6 +161,7 @@ system_ss.add(when: 'CONFIG_IMX6SL_WARIO', if_true: files(
   'imx6sl_iomuxc.c',
   'imx6sl_mmdc.c',
 ))
+system_ss.add(when: 'CONFIG_IMX6SLL_REX', if_true: files('imx6sll_ocotp.c'))
 
 specific_ss.add(when: 'CONFIG_AVR_POWER', if_true: files('avr_power.c'))
 
@@ -172,3 +177,4 @@ system_ss.add(when: 'CONFIG_SBSA_REF', if_true: files('sbsa_ec.c'))
 
 # HPPA devices
 system_ss.add(when: 'CONFIG_LASI', if_true: files('lasi.c'))
+system_ss.add(when: 'CONFIG_FSL_IMX50', if_true: files('imx50_ccm.c'))

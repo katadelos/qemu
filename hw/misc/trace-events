@@ -1,5 +1,10 @@
 # See docs/devel/tracing.rst for syntax documentation.
 
+# mt8113_gce.c
+mt8113_gce_execute(unsigned thread, uint32_t pc, uint32_t end) "thread %u pc 0x%08x end 0x%08x"
+mt8113_gce_complete(unsigned thread, uint32_t pc, uint32_t end, unsigned steps, unsigned writes) "thread %u pc 0x%08x end 0x%08x steps %u writes %u"
+mt8113_gce_dma_error(unsigned thread, uint32_t pc, uint64_t translated) "thread %u pc 0x%08x translated 0x%08" PRIx64
+
 # allwinner-cpucfg.c
 allwinner_cpucfg_cpu_reset(uint8_t cpu_id, uint32_t reset_addr) "id %u, reset_addr 0x%" PRIx32
 allwinner_cpucfg_read(uint64_t offset, uint64_t data, unsigned size) "offset 0x%" PRIx64 " data 0x%" PRIx64 " size %" PRIu32
