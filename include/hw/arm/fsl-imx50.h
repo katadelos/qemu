@@ -56,7 +56,7 @@ struct FslIMX50State {
     uint32_t anatop[0x100 / 4];
     uint32_t pxp[0x1000 / 4];
     uint8_t pxp_lut[256];
-    bool pxp_rgb888_xrgb32;
+    uint32_t ddr_type;
 };
 
 #define FSL_IMX50_TZIC_ADDR   0x0fffc000

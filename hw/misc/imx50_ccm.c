@@ -61,6 +61,10 @@ static void imx50_pll_write(void *opaque, hwaddr offset, uint64_t value,
 {
     IMX50PLLRegion *r = opaque;
 
+    /* DP_CONFIG.LDREQ clears when the new DPLL factors are accepted. */
+    if (offset == 0x04) {
+        value &= ~1U;
+    }
     r->ccm->pll[r->index][offset / 4] = value;
 }
 
@@ -85,6 +89,14 @@ static uint32_t imx50_ccm_get_clock(IMXCCMState *ccm, IMXClk clock)
         return 0;
     case CLK_32k:
         return 32768;
+    case CLK_PER:
+        /*
+         * Whitney's Linux clocksource accounts for an additional divide by
+         * two on ipg_perclk.  Feeding the GPT 8 MHz makes guest monotonic
+         * time advance at twice wall time and triggers Nickel's idle suspend
+         * prematurely.
+         */
+        return 4000000;
     case CLK_IPG:
         return 66000000;
     case CLK_IPG_HIGH:

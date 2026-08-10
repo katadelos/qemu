@@ -31,11 +31,14 @@
 #define IMX50_DATABAHN_CTL42       0xa8
 #define IMX50_DATABAHN_CTL63       0xfc
 #define IMX50_DATABAHN_CTL79       0x13c
+#define IMX50_DATABAHN_PHY25       0x264
+#define IMX50_DATABAHN_DDR_TYPE_MASK 0xf00
 #define IMX50_DATABAHN_SELF_REFRESH (1U << 0)
 #define IMX50_DATABAHN_LPM_MODE    0x1fU
 #define IMX50_DATABAHN_DLL_LOCKED  (1U << 8)
 #define IMX50_DATABAHN_CKE         (1U << 16)
 #define IMX50_DATABAHN_BUSY        (1U << 8)
+#define IMX50_DATABAHN_PHY_READY   (1U << 1)
 #define IMX50_PXP_CTRL            0x000
 #define IMX50_PXP_STAT            0x010
 #define IMX50_PXP_OUTBUF          0x020
@@ -50,7 +53,9 @@
 #define IMX50_PXP_STAT_IRQ        (1U << 0)
 #define IMX50_PXP_LUT_BYPASS      (1U << 31)
 #define IMX50_PXP_MAX_DIMENSION   2048
+#define IMX50_PXP_ARGB8888        0
 #define IMX50_PXP_RGB888          1
+#define IMX50_PXP_RGB565          4
 #define IMX50_PXP_YUV420          9
 #define IMX50_PXP_MONOC8          8
 
@@ -174,9 +179,9 @@ static void imx50_pxp_process(FslIMX50State *s)
     unsigned x, y;
 
     /*
-     * The EPDC driver uses MONOC8 output.  Kobo's stock kernel supplies an
-     * RGB888 framebuffer, whereas other i.MX50 EPDC kernels use the Y plane
-     * of a YUV420 buffer.  Both paths use the same crop/rotation machinery.
+     * The EPDC driver uses MONOC8 output.  The i.MX50 PxP accepts ARGB8888,
+     * RGB888, RGB565, or the Y plane of a YUV420 buffer on S0; all four use
+     * the same crop/rotation machinery.
      */
     if (!source || !output || !out_width || !out_height ||
         !src_width || !src_height ||
@@ -184,13 +189,21 @@ static void imx50_pxp_process(FslIMX50State *s)
         src_height > IMX50_PXP_MAX_DIMENSION ||
         out_width > IMX50_PXP_MAX_DIMENSION ||
         out_height > IMX50_PXP_MAX_DIMENSION ||
-        (input_format != IMX50_PXP_RGB888 &&
+        (input_format != IMX50_PXP_ARGB8888 &&
+         input_format != IMX50_PXP_RGB888 &&
+         input_format != IMX50_PXP_RGB565 &&
          input_format != IMX50_PXP_YUV420) ||
         output_format != IMX50_PXP_MONOC8) {
         return;
     }
-    input_bpp = input_format == IMX50_PXP_RGB888 ?
-                (s->pxp_rgb888_xrgb32 ? 4 : 3) : 1;
+    if (input_format == IMX50_PXP_ARGB8888 ||
+        input_format == IMX50_PXP_RGB888) {
+        input_bpp = 4;
+    } else if (input_format == IMX50_PXP_RGB565) {
+        input_bpp = 2;
+    } else {
+        input_bpp = 1;
+    }
     if (!crop_width) {
         crop_width = src_width;
     }
@@ -218,6 +231,7 @@ static void imx50_pxp_process(FslIMX50State *s)
 
     trace_whitney_pxp_begin(src_width, src_height,
                             result_width, result_height);
+    trace_whitney_pxp_config(ctrl, source, output, outsize, s0param, crop);
     started_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     input = g_malloc((size_t)src_width * src_height * input_bpp);
     result = g_malloc0((size_t)result_width * result_height);
@@ -252,12 +266,23 @@ static void imx50_pxp_process(FslIMX50State *s)
             if (sx < src_width && sy < src_height) {
                 uint8_t gray;
 
-                if (input_format == IMX50_PXP_RGB888) {
+                if (input_format == IMX50_PXP_ARGB8888 ||
+                    input_format == IMX50_PXP_RGB888) {
                     const uint8_t *pixel = input +
                         ((size_t)sy * src_width + sx) * input_bpp;
 
-                    /* The guest's RGB byte order is irrelevant to a mean. */
-                    gray = ((unsigned)pixel[0] + pixel[1] + pixel[2]) / 3;
+                    gray = (77 * pixel[2] + 150 * pixel[1] +
+                            29 * pixel[0]) >> 8;
+                } else if (input_format == IMX50_PXP_RGB565) {
+                    const uint8_t *pixel = input +
+                        ((size_t)sy * src_width + sx) * input_bpp;
+                    uint16_t rgb = pixel[0] | ((uint16_t)pixel[1] << 8);
+                    unsigned red = extract32(rgb, 11, 5) * 255 / 31;
+                    unsigned green = extract32(rgb, 5, 6) * 255 / 63;
+                    unsigned blue = extract32(rgb, 0, 5) * 255 / 31;
+
+                    /* Lab126's i.MX50 driver programs CSC2 as 77/150/29. */
+                    gray = (77 * red + 150 * green + 29 * blue) >> 8;
                 } else {
                     gray = input[(size_t)sy * src_width + sx];
                 }
@@ -463,6 +488,9 @@ static uint64_t imx50_databahn_read(void *opaque, hwaddr offset,
     case IMX50_DATABAHN_CTL79:
         /* No outstanding DRAM transaction. */
         return value & ~IMX50_DATABAHN_BUSY;
+    case IMX50_DATABAHN_PHY25:
+        /* DDR PHY initialization/relock has completed. */
+        return value | IMX50_DATABAHN_PHY_READY;
     default:
         return value;
     }
@@ -502,7 +530,7 @@ static void fsl_imx50_init(Object *obj)
         snprintf(name, sizeof(name), "uart%u", i + 1);
         object_initialize_child(obj, name, &s->uart[i], TYPE_IMX_SERIAL);
     }
-    object_initialize_child(obj, "gpt", &s->gpt, TYPE_IMX6_GPT);
+    object_initialize_child(obj, "gpt", &s->gpt, TYPE_IMX50_GPT);
     for (i = 0; i < 2; i++) {
         snprintf(name, sizeof(name), "epit%u", i + 1);
         object_initialize_child(obj, name, &s->epit[i], TYPE_IMX_EPIT);
@@ -557,6 +585,9 @@ static void fsl_imx50_realize(DeviceState *dev, Error **errp)
     static const hwaddr spi_addr[] = { 0x50010000, 0x63fac000, 0x63fc0000 };
     static const unsigned spi_irq[] = { 36, 37, 38 };
     unsigned i;
+
+    s->databahn[0] = (s->databahn[0] & ~IMX50_DATABAHN_DDR_TYPE_MASK) |
+                     (s->ddr_type & IMX50_DATABAHN_DDR_TYPE_MASK);
 
     if (!qdev_realize(DEVICE(&s->cpu), NULL, errp)) {
         return;
@@ -634,6 +665,9 @@ static void fsl_imx50_realize(DeviceState *dev, Error **errp)
     for (i = 0; i < FSL_IMX50_NUM_SPI; i++) {
         if (i == 2) {
             qdev_prop_set_bit(DEVICE(&s->spi[i]), "legacy-cspi", true);
+            /* The legacy CSPI block completes after observable bus latency. */
+            qdev_prop_set_uint32(DEVICE(&s->spi[i]),
+                                 "transfer-completion-reads", 128);
         }
         if (!sysbus_realize(SYS_BUS_DEVICE(&s->spi[i]), errp)) {
             return;
@@ -705,8 +739,7 @@ static void fsl_imx50_realize(DeviceState *dev, Error **errp)
 }
 
 static const Property fsl_imx50_properties[] = {
-    DEFINE_PROP_BOOL("pxp-rgb888-xrgb32", FslIMX50State,
-                     pxp_rgb888_xrgb32, false),
+    DEFINE_PROP_UINT32("ddr-type", FslIMX50State, ddr_type, 0),
 };
 
 static void fsl_imx50_class_init(ObjectClass *oc, const void *data)
