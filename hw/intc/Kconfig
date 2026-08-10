@@ -35,6 +35,9 @@ config ARM_GIC_KVM
     bool
     depends on ARM_GIC && KVM
 
+config IMX_TZIC
+    bool
+
 config XICS
     bool
 
