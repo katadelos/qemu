@@ -50,6 +50,8 @@
 #define IMX50_PXP_LUT             0x480
 #define IMX50_PXP_CTRL_IRQ_ENABLE (1U << 1)
 #define IMX50_PXP_CTRL_ENABLE     (1U << 0)
+#define IMX50_PXP_CTRL_CLKGATE    (1U << 30)
+#define IMX50_PXP_CTRL_SFTRST     (1U << 31)
 #define IMX50_PXP_STAT_IRQ        (1U << 0)
 #define IMX50_PXP_LUT_BYPASS      (1U << 31)
 #define IMX50_PXP_MAX_DIMENSION   2048
@@ -367,6 +369,15 @@ static void imx50_pxp_write(void *opaque, hwaddr offset, uint64_t value,
         break;
     }
 
+    /*
+     * PxP's documented soft-reset handshake raises CLKGATE after SFTRST is
+     * asserted.  The Linux DMA driver polls this transition in IRQ context
+     * before clearing both bits, so omitting it deadlocks the guest.
+     */
+    if (base == IMX50_PXP_CTRL && (*reg & IMX50_PXP_CTRL_SFTRST)) {
+        *reg |= IMX50_PXP_CTRL_CLKGATE;
+    }
+
     if (base == IMX50_PXP_CTRL && (*reg & IMX50_PXP_CTRL_ENABLE)) {
         /*
          * The stock display path uses PxP to crop/rotate its grayscale
@@ -665,9 +676,6 @@ static void fsl_imx50_realize(DeviceState *dev, Error **errp)
     for (i = 0; i < FSL_IMX50_NUM_SPI; i++) {
         if (i == 2) {
             qdev_prop_set_bit(DEVICE(&s->spi[i]), "legacy-cspi", true);
-            /* The legacy CSPI block completes after observable bus latency. */
-            qdev_prop_set_uint32(DEVICE(&s->spi[i]),
-                                 "transfer-completion-reads", 128);
         }
         if (!sysbus_realize(SYS_BUS_DEVICE(&s->spi[i]), errp)) {
             return;
