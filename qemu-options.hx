@@ -24,6 +24,27 @@ SRST
     Display version information and exit
 ERST
 
+DEF("idme-serial", HAS_ARG, QEMU_OPTION_idme_serial,
+    "-idme-serial value\n"
+    "                set Wario IDME serial number\n", QEMU_ARCH_ARM)
+DEF("idme-mac", HAS_ARG, QEMU_OPTION_idme_mac,
+    "-idme-mac value set Wario IDME Wi-Fi MAC address\n", QEMU_ARCH_ARM)
+DEF("idme-mfg", HAS_ARG, QEMU_OPTION_idme_mfg,
+    "-idme-mfg value set Wario IDME manufacturing secret\n", QEMU_ARCH_ARM)
+DEF("idme-pcbsn", HAS_ARG, QEMU_OPTION_idme_pcbsn,
+    "-idme-pcbsn value\n"
+    "                set Wario IDME PCBA serial number\n", QEMU_ARCH_ARM)
+DEF("idme-bootmode", HAS_ARG, QEMU_OPTION_idme_bootmode,
+    "-idme-bootmode value\n"
+    "                set Wario IDME boot mode\n", QEMU_ARCH_ARM)
+DEF("idme-postmode", HAS_ARG, QEMU_OPTION_idme_postmode,
+    "-idme-postmode value\n"
+    "                set Wario IDME POST mode\n", QEMU_ARCH_ARM)
+SRST
+The ``-idme-*`` options populate the volatile eMMC boot partition used by
+the ``imx6sl-wario`` machine.  They do not modify the eMMC image.
+ERST
+
 DEF("machine", HAS_ARG, QEMU_OPTION_machine, \
     "-machine [type=]name[,prop=value[,...]]\n"
     "                selects emulated machine ('-machine help' for list)\n"

@@ -70,6 +70,8 @@ system_ss.add(when: 'CONFIG_IMX', if_true: files(
   'imx7_snvs.c',
   'imx_ccm.c',
   'imx_rngc.c',
+  'imx6sl_pxp.c',
+  'max44009.c',
 ))
 system_ss.add(when: 'CONFIG_MAX78000_AES', if_true: files('max78000_aes.c'))
 system_ss.add(when: 'CONFIG_MAX78000_GCR', if_true: files('max78000_gcr.c'))
@@ -151,6 +153,10 @@ system_ss.add(when: 'CONFIG_NRF51_SOC', if_true: files('nrf51_rng.c'))
 system_ss.add(when: 'CONFIG_GRLIB', if_true: files('grlib_ahb_apb_pnp.c'))
 
 system_ss.add(when: 'CONFIG_I2C_ECHO', if_true: files('i2c-echo.c'))
+system_ss.add(when: 'CONFIG_IMX6SL_WARIO', if_true: files(
+  'imx6sl_iomuxc.c',
+  'imx6sl_mmdc.c',
+))
 
 specific_ss.add(when: 'CONFIG_AVR_POWER', if_true: files('avr_power.c'))
 
