@@ -99,6 +99,10 @@ void emmc_boot_partition_write(DeviceState *dev, unsigned int partition,
 #define TYPE_AR6003_SDIO "ar6003-sdio"
 DECLARE_INSTANCE_CHECKER(SDState, AR6003_SDIO, TYPE_AR6003_SDIO)
 
+/* Broadcom BCM43430 Wi-Fi function used by the Lab126 Rex board. */
+#define TYPE_BCM43430_SDIO "bcm43430-sdio"
+DECLARE_INSTANCE_CHECKER(SDState, BCM43430_SDIO, TYPE_BCM43430_SDIO)
+
 struct SDCardClass {
     /*< private >*/
     DeviceClass parent_class;

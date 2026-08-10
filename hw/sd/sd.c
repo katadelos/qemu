@@ -274,6 +274,11 @@ static const SDProto sd_proto_emmc;
 #define AR6003_RX_LOOKAHEAD    0x0405
 #define AR6003_BMI_CREDIT      0x0450
 
+#define BCM43430_SDIO_OCR      0x90ff8000u
+#define BCM43430_SDIO_RCA      1
+#define BCM43430_SDIO_CIS0     0x1000
+#define BCM43430_SDIO_CIS1     0x1100
+
 enum {
     AR6003_BMI_DONE = 1,
     AR6003_BMI_READ_MEMORY = 2,
@@ -1176,6 +1181,251 @@ static void ar6003_sdio_instance_init(Object *obj)
                                            ar6003_wmi_connect_timer, sd);
     sd->sdio_credit_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
                                           ar6003_htc_credit_timer, sd);
+}
+
+static uint8_t bcm43430_sdio_cis_byte(uint32_t addr)
+{
+    static const uint8_t common_cis[] = {
+        0x20, 0x04, 0xd0, 0x02, 0xa6, 0xa9,
+        0x21, 0x02, 0x0c, 0x00,
+        0x22, 0x04, 0x00, 0x00, 0x02, 0x32,
+        0xff,
+    };
+    static const uint8_t function_cis[] = {
+        0x20, 0x04, 0xd0, 0x02, 0xa6, 0xa9,
+        0x21, 0x02, 0x0c, 0x00,
+        0x22, 42,
+        0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0x00, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 100, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0,
+        0xff,
+    };
+
+    if (addr >= BCM43430_SDIO_CIS0 &&
+        addr < BCM43430_SDIO_CIS0 + sizeof(common_cis)) {
+        return common_cis[addr - BCM43430_SDIO_CIS0];
+    }
+    if (addr >= BCM43430_SDIO_CIS1 &&
+        addr < BCM43430_SDIO_CIS1 + sizeof(function_cis)) {
+        return function_cis[addr - BCM43430_SDIO_CIS1];
+    }
+    return 0xff;
+}
+
+static uint8_t bcm43430_sdio_readb(SDState *sd, unsigned function,
+                                   uint32_t addr)
+{
+    if (function == 1) {
+        return sd->sdio_target_mem[
+            addr & (sizeof(sd->sdio_target_mem) - 1)];
+    }
+    if (function != 0) {
+        return 0;
+    }
+
+    switch (addr) {
+    case 0x00: return 0x32; /* CCCR 1.20, SDIO 3.00 */
+    case 0x02: return sd->sdio_io_enable;
+    case 0x03: return sd->sdio_io_enable;
+    case 0x04: return sd->sdio_int_enable;
+    case 0x05: return 0;
+    case 0x07: return sd->sdio_bus_if;
+    case 0x08: return 0x1e; /* SMB, SRW, SBS and S4MI */
+    case 0x09: return extract32(BCM43430_SDIO_CIS0, 0, 8);
+    case 0x0a: return extract32(BCM43430_SDIO_CIS0, 8, 8);
+    case 0x0b: return extract32(BCM43430_SDIO_CIS0, 16, 8);
+    case 0x13: return sd->sdio_speed;
+    case 0x100: return 0x07; /* Standard SDIO WLAN interface. */
+    case 0x109: return extract32(BCM43430_SDIO_CIS1, 0, 8);
+    case 0x10a: return extract32(BCM43430_SDIO_CIS1, 8, 8);
+    case 0x10b: return extract32(BCM43430_SDIO_CIS1, 16, 8);
+    case 0x110: return extract32(sd->sdio_block_size, 0, 8);
+    case 0x111: return extract32(sd->sdio_block_size, 8, 8);
+    default: return bcm43430_sdio_cis_byte(addr);
+    }
+}
+
+static void bcm43430_sdio_writeb(SDState *sd, unsigned function,
+                                 uint32_t addr, uint8_t value)
+{
+    if (function == 1) {
+        sd->sdio_target_mem[addr & (sizeof(sd->sdio_target_mem) - 1)] = value;
+        return;
+    }
+    if (function != 0) {
+        return;
+    }
+
+    switch (addr) {
+    case 0x02:
+        sd->sdio_io_enable = value & 0x02;
+        break;
+    case 0x04:
+        sd->sdio_int_enable = value & 0x03;
+        break;
+    case 0x06:
+        if (value & 0x08) {
+            sd->sdio_io_enable = 0;
+        }
+        break;
+    case 0x07:
+        sd->sdio_bus_if = value;
+        break;
+    case 0x13:
+        sd->sdio_speed = 1 | (value & 2);
+        break;
+    case 0x110:
+        sd->sdio_block_size = deposit32(sd->sdio_block_size, 0, 8, value);
+        break;
+    case 0x111:
+        sd->sdio_block_size = deposit32(sd->sdio_block_size, 8, 8, value);
+        break;
+    default:
+        break;
+    }
+}
+
+static size_t bcm43430_sdio_do_command(SDState *sd, SDRequest *req,
+                                       uint8_t *resp, size_t respsz)
+{
+    uint32_t arg = req->arg;
+    unsigned function;
+    uint32_t count;
+    uint32_t addr;
+    uint8_t value;
+
+    if (!sd->sdio_powered || (req->cmd != 0 && respsz < 4)) {
+        return 0;
+    }
+
+    switch (req->cmd) {
+    case 0: /* GO_IDLE_STATE */
+        sd->sdio_selected = false;
+        sd->sdio_io_enable = 0;
+        return 0;
+    case 5: /* IO_SEND_OP_COND (R4) */
+        stl_be_p(resp, BCM43430_SDIO_OCR | (arg & 0x00ffffff));
+        return 4;
+    case 3: /* SEND_RELATIVE_ADDR (R6) */
+        sd->rca = BCM43430_SDIO_RCA;
+        stl_be_p(resp, sd->rca << 16);
+        return 4;
+    case 7: /* SELECT_CARD (R1) */
+        sd->sdio_selected = (arg >> 16) == sd->rca;
+        stl_be_p(resp, 0);
+        return 4;
+    case 52: /* IO_RW_DIRECT (R5) */
+        function = extract32(arg, 28, 3);
+        addr = extract32(arg, 9, 17);
+        value = extract32(arg, 0, 8);
+        stl_be_p(resp, 0);
+        if (function > 1) {
+            resp[2] |= 0x02;
+            return 4;
+        }
+        if (arg & (1u << 31)) {
+            bcm43430_sdio_writeb(sd, function, addr, value);
+            if (!(arg & (1u << 27))) {
+                resp[3] = value;
+                return 4;
+            }
+        }
+        resp[3] = bcm43430_sdio_readb(sd, function, addr);
+        return 4;
+    case 53: /* IO_RW_EXTENDED (R5 + data phase) */
+        function = extract32(arg, 28, 3);
+        stl_be_p(resp, 0);
+        if (function > 1 || (function == 1 && !(sd->sdio_io_enable & 2))) {
+            resp[2] |= 0x02;
+            return 4;
+        }
+        count = extract32(arg, 0, 9);
+        count = count ? count : 512;
+        if (arg & (1u << 27)) {
+            count *= sd->sdio_block_size ? sd->sdio_block_size : 64;
+        }
+        sd->sdio_xfer_func = function;
+        sd->sdio_xfer_write = arg & (1u << 31);
+        sd->sdio_xfer_increment = arg & (1u << 26);
+        sd->sdio_xfer_addr = extract32(arg, 9, 17);
+        sd->sdio_xfer_len = count;
+        sd->sdio_xfer_pos = 0;
+        return 4;
+    default:
+        return 0;
+    }
+}
+
+static void bcm43430_sdio_write_byte(SDState *sd, uint8_t value)
+{
+    uint32_t addr;
+
+    if (!sd->sdio_xfer_write || sd->sdio_xfer_pos >= sd->sdio_xfer_len) {
+        return;
+    }
+    addr = sd->sdio_xfer_addr +
+           (sd->sdio_xfer_increment ? sd->sdio_xfer_pos : 0);
+    bcm43430_sdio_writeb(sd, sd->sdio_xfer_func, addr, value);
+    sd->sdio_xfer_pos++;
+}
+
+static uint8_t bcm43430_sdio_read_byte(SDState *sd)
+{
+    uint32_t addr;
+
+    if (sd->sdio_xfer_write || sd->sdio_xfer_pos >= sd->sdio_xfer_len) {
+        return 0;
+    }
+    addr = sd->sdio_xfer_addr +
+           (sd->sdio_xfer_increment ? sd->sdio_xfer_pos : 0);
+    sd->sdio_xfer_pos++;
+    return bcm43430_sdio_readb(sd, sd->sdio_xfer_func, addr);
+}
+
+static void bcm43430_sdio_reset(DeviceState *dev)
+{
+    SDState *sd = SDMMC_COMMON(dev);
+
+    sd->rca = 0;
+    sd->sdio_selected = false;
+    sd->sdio_io_enable = 0;
+    sd->sdio_int_enable = 0;
+    sd->sdio_bus_if = 0;
+    sd->sdio_speed = 1;
+    sd->sdio_block_size = 64;
+    sd->sdio_xfer_len = 0;
+    sd->sdio_xfer_pos = 0;
+    memset(sd->sdio_target_mem, 0, sizeof(sd->sdio_target_mem));
+    qemu_set_irq(sd->sdio_irq, 0);
+    sd->dat_lines = 0xf;
+    sd->cmd_line = true;
+}
+
+static void bcm43430_sdio_power(void *opaque, int n, int level)
+{
+    SDState *sd = opaque;
+    SDBus *bus;
+
+    level = !!level;
+    if (sd->sdio_powered == level) {
+        return;
+    }
+    sd->sdio_powered = level;
+    bcm43430_sdio_reset(DEVICE(sd));
+    bus = SD_BUS(qdev_get_parent_bus(DEVICE(sd)));
+    sdbus_set_inserted(bus, level);
+    if (level) {
+        sdbus_set_readonly(bus, false);
+    }
+}
+
+static void bcm43430_sdio_instance_init(Object *obj)
+{
+    SDState *sd = SDMMC_COMMON(obj);
+
+    qdev_init_gpio_in_named(DEVICE(sd), bcm43430_sdio_power, "power", 1);
+    qdev_init_gpio_out_named(DEVICE(sd), &sd->sdio_irq, "irq", 1);
 }
 
 static bool sd_is_spi(SDState *sd)
@@ -4333,6 +4583,23 @@ static void ar6003_sdio_class_init(ObjectClass *klass, const void *data)
     sc->get_readonly = ar6003_sdio_get_readonly;
 }
 
+static void bcm43430_sdio_class_init(ObjectClass *klass, const void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+    SDCardClass *sc = SDMMC_COMMON_CLASS(klass);
+
+    dc->desc = "Broadcom BCM43430 SDIO Wi-Fi transport";
+    device_class_set_legacy_reset(dc, bcm43430_sdio_reset);
+
+    sc->do_command = bcm43430_sdio_do_command;
+    sc->write_byte = bcm43430_sdio_write_byte;
+    sc->read_byte = bcm43430_sdio_read_byte;
+    sc->receive_ready = ar6003_sdio_receive_ready;
+    sc->data_ready = ar6003_sdio_data_ready;
+    sc->get_inserted = ar6003_sdio_get_inserted;
+    sc->get_readonly = ar6003_sdio_get_readonly;
+}
+
 static const TypeInfo sd_types[] = {
     {
         .name           = TYPE_SDMMC_COMMON,
@@ -4364,6 +4631,12 @@ static const TypeInfo sd_types[] = {
         .parent         = TYPE_SDMMC_COMMON,
         .instance_init  = ar6003_sdio_instance_init,
         .class_init     = ar6003_sdio_class_init,
+    },
+    {
+        .name           = TYPE_BCM43430_SDIO,
+        .parent         = TYPE_SDMMC_COMMON,
+        .instance_init  = bcm43430_sdio_instance_init,
+        .class_init     = bcm43430_sdio_class_init,
     },
 };
 
