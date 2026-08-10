@@ -78,8 +78,11 @@ struct FslIMX6State {
     MemoryRegion       rom;
     MemoryRegion       caam;
     MemoryRegion       ocram;
-    MemoryRegion       ocram_alias;
+    /* Quad has four 256 KiB views; SoloLite has eight 128 KiB views. */
+    MemoryRegion       ocram_alias[7];
     uint32_t           phy_num;
+    bool               sololite;
+    bool               has_el3;
 };
 
 

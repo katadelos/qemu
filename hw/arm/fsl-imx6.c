@@ -124,6 +124,8 @@ static void fsl_imx6_realize(DeviceState *dev, Error **errp)
         snprintf(name, NAME_SIZE, "cpu%d", i);
         object_initialize_child(OBJECT(dev), name, &s->cpu[i],
                                 ARM_CPU_TYPE_NAME("cortex-a9"));
+        object_property_set_bool(OBJECT(&s->cpu[i]), "has_el3", s->has_el3,
+                                 &error_abort);
     }
 
     for (i = 0; i < smp_cpus; i++) {
@@ -166,6 +168,8 @@ static void fsl_imx6_realize(DeviceState *dev, Error **errp)
     /* L2 cache controller */
     sysbus_create_simple("l2x0", FSL_IMX6_PL310_ADDR, NULL);
 
+    object_property_set_bool(OBJECT(&s->ccm), "sololite", s->sololite,
+                             &error_abort);
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->ccm), errp)) {
         return;
     }
@@ -188,6 +192,11 @@ static void fsl_imx6_realize(DeviceState *dev, Error **errp)
             { FSL_IMX6_UART4_ADDR, FSL_IMX6_UART4_IRQ },
             { FSL_IMX6_UART5_ADDR, FSL_IMX6_UART5_IRQ },
         };
+        static const hwaddr sololite_uart_addr[FSL_IMX6_NUM_UARTS] = {
+            0x02020000, 0x02024000, 0x02034000, 0x02038000, 0x02018000,
+        };
+        hwaddr addr = s->sololite ? sololite_uart_addr[i]
+                                  : serial_table[i].addr;
 
         qdev_prop_set_chr(DEVICE(&s->uart[i]), "chardev", serial_hd(i));
 
@@ -195,7 +204,7 @@ static void fsl_imx6_realize(DeviceState *dev, Error **errp)
             return;
         }
 
-        sysbus_mmio_map(SYS_BUS_DEVICE(&s->uart[i]), 0, serial_table[i].addr);
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->uart[i]), 0, addr);
         sysbus_connect_irq(SYS_BUS_DEVICE(&s->uart[i]), 0,
                            qdev_get_gpio_in(gic, serial_table[i].irq));
     }
@@ -340,18 +349,23 @@ static void fsl_imx6_realize(DeviceState *dev, Error **errp)
                         FSL_IMX6_USBPHY1_ADDR + i * 0x1000);
     }
     for (i = 0; i < FSL_IMX6_NUM_USBS; i++) {
-        static const int FSL_IMX6_USBn_IRQ[] = {
+        static const int imx6_usb_irq[] = {
             FSL_IMX6_USB_OTG_IRQ,
             FSL_IMX6_USB_HOST1_IRQ,
             FSL_IMX6_USB_HOST2_IRQ,
             FSL_IMX6_USB_HOST3_IRQ,
+        };
+        static const int imx6sl_usb_irq[] = {
+            FSL_IMX6_USB_OTG_IRQ, 74, 72, 73,
         };
 
         sysbus_realize(SYS_BUS_DEVICE(&s->usb[i]), &error_abort);
         sysbus_mmio_map(SYS_BUS_DEVICE(&s->usb[i]), 0,
                         FSL_IMX6_USBOH3_USB_ADDR + i * 0x200);
         sysbus_connect_irq(SYS_BUS_DEVICE(&s->usb[i]), 0,
-                           qdev_get_gpio_in(gic, FSL_IMX6_USBn_IRQ[i]));
+                           qdev_get_gpio_in(gic, s->sololite ?
+                                           imx6sl_usb_irq[i] :
+                                           imx6_usb_irq[i]));
     }
 
     /* Initialize all ECSPI */
@@ -370,6 +384,11 @@ static void fsl_imx6_realize(DeviceState *dev, Error **errp)
         /* Initialize the SPI */
         if (!sysbus_realize(SYS_BUS_DEVICE(&s->spi[i]), errp)) {
             return;
+        }
+
+        /* ECSPI5's slot is occupied by UART5 on i.MX6SoloLite. */
+        if (s->sololite && i == 4) {
+            continue;
         }
 
         sysbus_mmio_map(SYS_BUS_DEVICE(&s->spi[i]), 0, spi_table[i].addr);
@@ -417,35 +436,42 @@ static void fsl_imx6_realize(DeviceState *dev, Error **errp)
                            qdev_get_gpio_in(gic, FSL_IMX6_WDOGn_IRQ[i]));
     }
 
-    /*
-     * PCIe
-     */
-    sysbus_realize(SYS_BUS_DEVICE(&s->pcie), &error_abort);
-    sysbus_mmio_map(SYS_BUS_DEVICE(&s->pcie), 0, FSL_IMX6_PCIe_REG_ADDR);
+    /* PCIe is present on i.MX6Q/DL, not i.MX6SoloLite. */
+    if (!s->sololite) {
+        sysbus_realize(SYS_BUS_DEVICE(&s->pcie), &error_abort);
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->pcie), 0, FSL_IMX6_PCIe_REG_ADDR);
 
-    object_property_set_int(OBJECT(&s->pcie4_msi_irq), "num-lines", 2,
-                            &error_abort);
-    qdev_realize(DEVICE(&s->pcie4_msi_irq), NULL, &error_abort);
+        object_property_set_int(OBJECT(&s->pcie4_msi_irq), "num-lines", 2,
+                                &error_abort);
+        qdev_realize(DEVICE(&s->pcie4_msi_irq), NULL, &error_abort);
 
-    irq = qdev_get_gpio_in(DEVICE(&s->a9mpcore), FSL_IMX6_PCIE4_MSI_IRQ);
-    qdev_connect_gpio_out(DEVICE(&s->pcie4_msi_irq), 0, irq);
+        irq = qdev_get_gpio_in(DEVICE(&s->a9mpcore), FSL_IMX6_PCIE4_MSI_IRQ);
+        qdev_connect_gpio_out(DEVICE(&s->pcie4_msi_irq), 0, irq);
 
-    irq = qdev_get_gpio_in(DEVICE(&s->a9mpcore), FSL_IMX6_PCIE1_IRQ);
-    sysbus_connect_irq(SYS_BUS_DEVICE(&s->pcie), 0, irq);
-    irq = qdev_get_gpio_in(DEVICE(&s->a9mpcore), FSL_IMX6_PCIE2_IRQ);
-    sysbus_connect_irq(SYS_BUS_DEVICE(&s->pcie), 1, irq);
-    irq = qdev_get_gpio_in(DEVICE(&s->a9mpcore), FSL_IMX6_PCIE3_IRQ);
-    sysbus_connect_irq(SYS_BUS_DEVICE(&s->pcie), 2, irq);
-    irq = qdev_get_gpio_in(DEVICE(&s->pcie4_msi_irq), 0);
-    sysbus_connect_irq(SYS_BUS_DEVICE(&s->pcie), 3, irq);
-    irq = qdev_get_gpio_in(DEVICE(&s->pcie4_msi_irq), 1);
-    sysbus_connect_irq(SYS_BUS_DEVICE(&s->pcie), 4, irq);
+        irq = qdev_get_gpio_in(DEVICE(&s->a9mpcore), FSL_IMX6_PCIE1_IRQ);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->pcie), 0, irq);
+        irq = qdev_get_gpio_in(DEVICE(&s->a9mpcore), FSL_IMX6_PCIE2_IRQ);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->pcie), 1, irq);
+        irq = qdev_get_gpio_in(DEVICE(&s->a9mpcore), FSL_IMX6_PCIE3_IRQ);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->pcie), 2, irq);
+        irq = qdev_get_gpio_in(DEVICE(&s->pcie4_msi_irq), 0);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->pcie), 3, irq);
+        irq = qdev_get_gpio_in(DEVICE(&s->pcie4_msi_irq), 1);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->pcie), 4, irq);
 
     /*
      * PCIe PHY
      */
-    create_unimplemented_device("pcie-phy", FSL_IMX6_PCIe_ADDR,
-                                FSL_IMX6_PCIe_SIZE);
+        create_unimplemented_device("pcie-phy", FSL_IMX6_PCIe_ADDR,
+                                    FSL_IMX6_PCIe_SIZE);
+    } else {
+        /* Embedded child objects must be realized with their parent, but
+         * SoloLite exposes neither PCIe register nor PHY address space. */
+        sysbus_realize(SYS_BUS_DEVICE(&s->pcie), &error_abort);
+        object_property_set_int(OBJECT(&s->pcie4_msi_irq), "num-lines", 2,
+                                &error_abort);
+        qdev_realize(DEVICE(&s->pcie4_msi_irq), NULL, &error_abort);
+    }
 
     /* ROM memory */
     if (!memory_region_init_rom(&s->rom, OBJECT(dev), "imx6.rom",
@@ -456,30 +482,43 @@ static void fsl_imx6_realize(DeviceState *dev, Error **errp)
                                 &s->rom);
 
     /* CAAM memory */
-    if (!memory_region_init_rom(&s->caam, OBJECT(dev), "imx6.caam",
-                                FSL_IMX6_CAAM_MEM_SIZE, errp)) {
-        return;
+    if (!s->sololite) {
+        if (!memory_region_init_rom(&s->caam, OBJECT(dev), "imx6.caam",
+                                    FSL_IMX6_CAAM_MEM_SIZE, errp)) {
+            return;
+        }
+        memory_region_add_subregion(get_system_memory(), FSL_IMX6_CAAM_MEM_ADDR,
+                                    &s->caam);
     }
-    memory_region_add_subregion(get_system_memory(), FSL_IMX6_CAAM_MEM_ADDR,
-                                &s->caam);
 
     /* OCRAM memory */
-    if (!memory_region_init_ram(&s->ocram, NULL, "imx6.ocram",
-                                FSL_IMX6_OCRAM_SIZE, errp)) {
+    hwaddr ocram_size = s->sololite ? 0x20000 : FSL_IMX6_OCRAM_SIZE;
+    unsigned ocram_aliases = s->sololite ? 7 : 3;
+
+    if (!memory_region_init_ram(&s->ocram, NULL, "imx6.ocram", ocram_size,
+                                errp)) {
         return;
     }
     memory_region_add_subregion(get_system_memory(), FSL_IMX6_OCRAM_ADDR,
                                 &s->ocram);
 
-    /* internal OCRAM (256 KB) is aliased over 1 MB */
-    memory_region_init_alias(&s->ocram_alias, OBJECT(dev), "imx6.ocram_alias",
-                             &s->ocram, 0, FSL_IMX6_OCRAM_ALIAS_SIZE);
-    memory_region_add_subregion(get_system_memory(), FSL_IMX6_OCRAM_ALIAS_ADDR,
-                                &s->ocram_alias);
+    /* Internal OCRAM is mirrored three times across the 0x0094xxxx window. */
+    for (i = 0; i < ocram_aliases; i++) {
+        g_autofree char *name = g_strdup_printf("imx6.ocram_alias[%d]", i);
+
+        memory_region_init_alias(&s->ocram_alias[i], OBJECT(dev), name,
+                                 &s->ocram, 0, ocram_size);
+        memory_region_add_subregion(get_system_memory(),
+                                    FSL_IMX6_OCRAM_ADDR +
+                                    (i + 1) * ocram_size,
+                                    &s->ocram_alias[i]);
+    }
 }
 
 static const Property fsl_imx6_properties[] = {
     DEFINE_PROP_UINT32("fec-phy-num", FslIMX6State, phy_num, 0),
+    DEFINE_PROP_BOOL("sololite", FslIMX6State, sololite, false),
+    DEFINE_PROP_BOOL("has-el3", FslIMX6State, has_el3, true),
 };
 
 static void fsl_imx6_class_init(ObjectClass *oc, const void *data)
