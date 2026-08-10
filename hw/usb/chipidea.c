@@ -17,6 +17,8 @@
 enum {
     CHIPIDEA_USBx_DCIVERSION   = 0x000,
     CHIPIDEA_USBx_DCCPARAMS    = 0x004,
+    CHIPIDEA_USBx_DCCPARAMS_DEN = 8,
+    CHIPIDEA_USBx_DCCPARAMS_DC = BIT(7),
     CHIPIDEA_USBx_DCCPARAMS_HC = BIT(8),
 };
 
@@ -56,12 +58,13 @@ static uint64_t chipidea_dc_read(void *opaque, hwaddr offset,
         return 0x1;
     case CHIPIDEA_USBx_DCCPARAMS:
         /*
-         * Real hardware (at least i.MX7) will also report the
-         * controller as "Device Capable" (and 8 supported endpoints),
-         * but there doesn't seem to be much point in doing so, since
-         * we don't emulate that part.
+         * i.MX6 USB OTG is dual-role and reports eight bidirectional
+         * endpoints.  Reporting host-only makes the Freescale UDC driver
+         * reject the controller before it can finish probing.
          */
-        return CHIPIDEA_USBx_DCCPARAMS_HC;
+        return CHIPIDEA_USBx_DCCPARAMS_HC |
+               CHIPIDEA_USBx_DCCPARAMS_DC |
+               CHIPIDEA_USBx_DCCPARAMS_DEN;
     }
 
     return 0;
