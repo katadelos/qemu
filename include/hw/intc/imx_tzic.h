@@ -14,6 +14,7 @@ struct IMXTZICState {
     MemoryRegion iomem;
     uint32_t enabled[4];
     uint32_t pending[4];
+    uint32_t intsec[4];
     uint32_t priority[32];
     uint32_t intcntl;
     uint32_t dsmint;

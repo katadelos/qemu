@@ -42,6 +42,10 @@ static uint64_t imx_tzic_read(void *opaque, hwaddr offset, unsigned size)
     case 0x00c: return 0x1f;
     case 0x014: return s->dsmint;
     default:
+        if (offset >= 0x080 && offset < 0x090) {
+            index = (offset - 0x080) / 4;
+            return s->intsec[index];
+        }
         if (offset >= 0x100 && offset < 0x110) {
             index = (offset - 0x100) / 4;
             return s->enabled[index];
@@ -79,7 +83,10 @@ static void imx_tzic_write(void *opaque, hwaddr offset, uint64_t value,
         s->dsmint = value & 1;
         break;
     default:
-        if (offset >= 0x100 && offset < 0x110) {
+        if (offset >= 0x080 && offset < 0x090) {
+            index = (offset - 0x080) / 4;
+            s->intsec[index] = value;
+        } else if (offset >= 0x100 && offset < 0x110) {
             index = (offset - 0x100) / 4;
             s->enabled[index] |= value;
         } else if (offset >= 0x180 && offset < 0x190) {
@@ -123,6 +130,7 @@ static const VMStateDescription vmstate_imx_tzic = {
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(enabled, IMXTZICState, 4),
         VMSTATE_UINT32_ARRAY(pending, IMXTZICState, 4),
+        VMSTATE_UINT32_ARRAY(intsec, IMXTZICState, 4),
         VMSTATE_UINT32_ARRAY(priority, IMXTZICState, 32),
         VMSTATE_UINT32(intcntl, IMXTZICState),
         VMSTATE_UINT32(dsmint, IMXTZICState),
