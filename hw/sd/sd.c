@@ -50,6 +50,7 @@
 #include "qemu/log.h"
 #include "qemu/guest-random.h"
 #include "qemu/module.h"
+#include "net/net.h"
 #include "sdmmc-internal.h"
 #include "trace.h"
 #include "crypto/hmac.h"
@@ -166,6 +167,9 @@ struct SDState {
     uint64_t rpmb_part_size;
     BlockBackend *blk;
     uint8_t boot_config;
+    bool boot_parts_in_memory;
+    uint8_t *boot_parts;
+    uint32_t boot_parts_size;
 
     const SDProto *proto;
 
@@ -205,12 +209,952 @@ struct SDState {
     QEMUTimer *ocr_power_timer;
     uint8_t dat_lines;
     bool cmd_line;
+
+    /* AR6003 SDIO transport state. */
+    bool sdio_powered;
+    bool sdio_selected;
+    uint8_t sdio_io_enable;
+    uint8_t sdio_int_enable;
+    uint8_t sdio_bus_if;
+    uint8_t sdio_irq_mode;
+    uint8_t sdio_speed;
+    uint16_t sdio_block_size;
+    uint8_t sdio_xfer_func;
+    bool sdio_xfer_write;
+    bool sdio_xfer_increment;
+    uint32_t sdio_xfer_addr;
+    uint32_t sdio_xfer_len;
+    uint32_t sdio_xfer_pos;
+    /*
+     * Function 1 mailbox 0 is 0x800 bytes wide.  A normal 1500-byte
+     * Ethernet frame becomes a 1664-byte block-aligned HTC transfer, so a
+     * 512-byte staging buffer silently truncated precisely the traffic that
+     * exercises a full MTU.  Bundling is disabled in ar6003_htc_ready(),
+     * therefore one complete physical mailbox is the required upper bound.
+     */
+    uint8_t sdio_tx[2 * KiB];
+    /* HTC message bundling is disabled, so preserve one padded target packet
+     * per slot.  This keeps a completed CMD53 from consuming the beginning of
+     * a later packet while the interrupt handler is still processing the
+     * previous look-ahead. */
+    uint8_t sdio_htc_rx[32][4 * KiB];
+    uint16_t sdio_htc_rx_len[32];
+    uint16_t sdio_htc_rx_pos;
+    uint8_t sdio_htc_rx_head;
+    uint8_t sdio_htc_rx_count;
+    bool sdio_htc_xfer_exhausted;
+    uint8_t sdio_rx[4096];
+    uint32_t sdio_rx_len;
+    uint32_t sdio_rx_pos;
+    uint8_t sdio_target_mem[2 * MiB];
+    uint32_t sdio_lz_addr;
+    bool sdio_bmi_done;
+    qemu_irq sdio_irq;
+    QEMUTimer *sdio_scan_timer;
+    QEMUTimer *sdio_connect_timer;
+    QEMUTimer *sdio_credit_timer;
+    uint8_t sdio_scan_credit_ep;
+    uint8_t sdio_scan_credits;
+    uint16_t sdio_pending_credits[8];
+    NICConf sdio_nic_conf;
+    NICState *sdio_nic;
 };
 
 static void sd_realize(DeviceState *dev, Error **errp);
 
 static const SDProto sd_proto_spi;
 static const SDProto sd_proto_emmc;
+
+#define AR6003_SDIO_OCR       0x90ff8000u
+#define AR6003_SDIO_RCA       1
+#define AR6003_SDIO_CIS0      0x1000
+#define AR6003_SDIO_CIS1      0x1100
+#define AR6003_MBOX_BASE       0x0800
+#define AR6003_MBOX_END        0x1000
+#define AR6003_RX_LOOKAHEAD    0x0405
+#define AR6003_BMI_CREDIT      0x0450
+
+enum {
+    AR6003_BMI_DONE = 1,
+    AR6003_BMI_READ_MEMORY = 2,
+    AR6003_BMI_WRITE_MEMORY = 3,
+    AR6003_BMI_EXECUTE = 4,
+    AR6003_BMI_SET_APP_START = 5,
+    AR6003_BMI_READ_SOC_REGISTER = 6,
+    AR6003_BMI_WRITE_SOC_REGISTER = 7,
+    AR6003_BMI_GET_TARGET_INFO = 8,
+    AR6003_BMI_ROMPATCH_INSTALL = 9,
+    AR6003_BMI_LZ_STREAM_START = 13,
+    AR6003_BMI_LZ_DATA = 14,
+};
+
+static void ar6003_update_irq(SDState *sd);
+
+static bool ar6003_rx_pending(SDState *sd)
+{
+    return sd->sdio_bmi_done ? sd->sdio_htc_rx_count != 0 :
+                               sd->sdio_rx_pos < sd->sdio_rx_len;
+}
+
+static uint8_t ar6003_rx_peek(SDState *sd, uint32_t offset)
+{
+    if (!sd->sdio_bmi_done) {
+        uint32_t pos = sd->sdio_rx_pos + offset;
+
+        return pos < sd->sdio_rx_len ? sd->sdio_rx[pos] : 0;
+    }
+    if (!sd->sdio_htc_rx_count ||
+        sd->sdio_htc_rx_pos + offset >=
+        sd->sdio_htc_rx_len[sd->sdio_htc_rx_head]) {
+        return 0;
+    }
+    return sd->sdio_htc_rx[sd->sdio_htc_rx_head]
+                          [sd->sdio_htc_rx_pos + offset];
+}
+
+static uint8_t ar6003_rx_read(SDState *sd)
+{
+    uint8_t value;
+
+    if (!sd->sdio_bmi_done) {
+        return sd->sdio_rx_pos < sd->sdio_rx_len ?
+               sd->sdio_rx[sd->sdio_rx_pos++] : 0;
+    }
+    if (!sd->sdio_htc_rx_count || sd->sdio_htc_xfer_exhausted) {
+        return 0;
+    }
+
+    value = sd->sdio_htc_rx[sd->sdio_htc_rx_head]
+                            [sd->sdio_htc_rx_pos++];
+    if (sd->sdio_htc_rx_pos ==
+        sd->sdio_htc_rx_len[sd->sdio_htc_rx_head]) {
+        sd->sdio_htc_rx_head = (sd->sdio_htc_rx_head + 1) %
+                               ARRAY_SIZE(sd->sdio_htc_rx);
+        sd->sdio_htc_rx_count--;
+        sd->sdio_htc_rx_pos = 0;
+        sd->sdio_htc_xfer_exhausted = true;
+    }
+    return value;
+}
+
+static void ar6003_htc_enqueue(SDState *sd, const uint8_t *header,
+                               const void *payload, size_t payload_len)
+{
+    size_t packet_len = 6 + payload_len;
+    size_t padded_len = ROUND_UP(packet_len, 128);
+    unsigned tail;
+
+    if (padded_len > sizeof(sd->sdio_htc_rx[0]) ||
+        sd->sdio_htc_rx_count == ARRAY_SIZE(sd->sdio_htc_rx)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "ar6003-sdio: HTC receive queue overflow\n");
+        return;
+    }
+
+    tail = (sd->sdio_htc_rx_head + sd->sdio_htc_rx_count) %
+           ARRAY_SIZE(sd->sdio_htc_rx);
+    memcpy(sd->sdio_htc_rx[tail], header, 6);
+    memcpy(sd->sdio_htc_rx[tail] + 6, payload, payload_len);
+    memset(sd->sdio_htc_rx[tail] + packet_len, 0,
+           padded_len - packet_len);
+    sd->sdio_htc_rx_len[tail] = padded_len;
+    sd->sdio_htc_rx_count++;
+    ar6003_update_irq(sd);
+}
+
+static uint8_t *ar6003_target_ptr(SDState *sd, uint32_t addr)
+{
+    return &sd->sdio_target_mem[addr & (sizeof(sd->sdio_target_mem) - 1)];
+}
+
+static void ar6003_update_irq(SDState *sd)
+{
+    bool pending = sd->sdio_powered && sd->sdio_bmi_done &&
+                   ar6003_rx_pending(sd) &&
+                   (sd->sdio_int_enable & 3) == 3 &&
+                   (*ar6003_target_ptr(sd, 0x418) & 1);
+
+    qemu_set_irq(sd->sdio_irq, pending);
+}
+
+static uint32_t ar6003_target_ldl(SDState *sd, uint32_t addr)
+{
+    uint8_t data[4];
+    unsigned i;
+
+    for (i = 0; i < sizeof(data); i++) {
+        data[i] = *ar6003_target_ptr(sd, addr + i);
+    }
+    return ldl_le_p(data);
+}
+
+static void ar6003_target_stl(SDState *sd, uint32_t addr, uint32_t value)
+{
+    uint8_t data[4];
+    unsigned i;
+
+    stl_le_p(data, value);
+    for (i = 0; i < sizeof(data); i++) {
+        *ar6003_target_ptr(sd, addr + i) = data[i];
+    }
+}
+
+static void ar6003_bmi_reply(SDState *sd, const void *data, size_t len)
+{
+    if (sd->sdio_rx_pos == sd->sdio_rx_len) {
+        sd->sdio_rx_pos = 0;
+        sd->sdio_rx_len = 0;
+    }
+    if (len > sizeof(sd->sdio_rx) - sd->sdio_rx_len) {
+        qemu_log_mask(LOG_GUEST_ERROR, "ar6003-sdio: BMI reply overflow\n");
+        return;
+    }
+    memcpy(sd->sdio_rx + sd->sdio_rx_len, data, len);
+    sd->sdio_rx_len += len;
+    ar6003_update_irq(sd);
+}
+
+static void ar6003_bmi_reply_u32(SDState *sd, uint32_t value)
+{
+    uint8_t data[4];
+
+    stl_le_p(data, value);
+    ar6003_bmi_reply(sd, data, sizeof(data));
+}
+
+static void ar6003_htc_packet(SDState *sd, uint8_t endpoint,
+                              const void *payload, uint16_t payload_len)
+{
+    uint8_t header[6] = { endpoint, 0, 0, 0, 0, 0 };
+
+    stw_le_p(header + 2, payload_len);
+    ar6003_htc_enqueue(sd, header, payload, payload_len);
+}
+
+static void ar6003_htc_ready(SDState *sd)
+{
+    uint8_t ready[10] = { 0 };
+
+    stw_le_p(ready, 1);       /* HTC_MSG_READY_ID */
+    /*
+     * Give the synthetic target a generous command budget.  Returning a
+     * separate credit-only HTC packet for every WMI command can strand a
+     * later event behind a packet without a lookahead record.  Scan and data
+     * events still return the credits that matter for sustained traffic.
+     */
+    stw_le_p(ready + 2, 256); /* target credits */
+    stw_le_p(ready + 4, 256); /* bytes per credit */
+    ready[6] = 8;             /* maximum endpoints */
+    ready[8] = 1;             /* HTC protocol 2.1 */
+    ready[9] = 0;             /* disable message bundling */
+    ar6003_htc_packet(sd, 0, ready, sizeof(ready));
+}
+
+static void ar6003_wmi_ready(SDState *sd)
+{
+    uint8_t event[21] = { 0 };
+
+    stw_le_p(event, 0x1001);       /* WMI_READY_EVENTID */
+    stl_le_p(event + 6, 0x3400009e); /* firmware 3.4.0.158 */
+    stl_le_p(event + 10, 1);       /* ATH6KL_ABI_VERSION */
+    memcpy(event + 14, sd->sdio_nic_conf.macaddr.a, 6);
+    event[20] = 0x01;              /* 2.4 GHz capability */
+    ar6003_htc_packet(sd, 1, event, sizeof(event));
+}
+
+static void ar6003_htc_credit_timer(void *opaque)
+{
+    SDState *sd = opaque;
+    uint8_t header[6] = { 0, 1 << 1, 4, 0, 4, 0 };
+    uint8_t trailer[4] = { 1, 2, 0, 0 };
+    unsigned endpoint;
+
+    if (ar6003_rx_pending(sd)) {
+        timer_mod(sd->sdio_credit_timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 10);
+        return;
+    }
+    for (endpoint = 1; endpoint < ARRAY_SIZE(sd->sdio_pending_credits);
+         endpoint++) {
+        if (sd->sdio_pending_credits[endpoint]) {
+            break;
+        }
+    }
+    if (endpoint == ARRAY_SIZE(sd->sdio_pending_credits)) {
+        return;
+    }
+    trailer[2] = endpoint;
+    trailer[3] = MIN(sd->sdio_pending_credits[endpoint], UINT8_MAX);
+    sd->sdio_pending_credits[endpoint] -= trailer[3];
+    ar6003_htc_enqueue(sd, header, trailer, sizeof(trailer));
+}
+
+static void ar6003_htc_credit(SDState *sd, uint8_t endpoint, uint8_t credits)
+{
+    if (endpoint >= ARRAY_SIZE(sd->sdio_pending_credits)) {
+        return;
+    }
+    sd->sdio_pending_credits[endpoint] += credits;
+    timer_mod(sd->sdio_credit_timer,
+              qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 10);
+}
+
+static void ar6003_wmi_event(SDState *sd, uint16_t id,
+                             const void *data, size_t len)
+{
+    uint8_t event[256] = { 0 };
+
+    if (len > sizeof(event) - 6) {
+        return;
+    }
+    stw_le_p(event, id);
+    memcpy(event + 6, data, len);
+    ar6003_htc_packet(sd, 1, event, len + 6);
+}
+
+static void ar6003_data_packet(SDState *sd, const uint8_t *frame, size_t len)
+{
+    uint8_t payload[2048] = { 0 };
+    uint8_t header[6] = { 2, 0, 0, 0, 0, 0 };
+    size_t payload_len;
+
+    if (len < 14 || len + 14 > sizeof(payload)) {
+        return;
+    }
+    trace_ar6003_data_rx(len, lduw_be_p(frame + 12));
+    payload[0] = -40; /* WMI data header RSSI */
+    memcpy(payload + 6, frame, 12);
+    stw_be_p(payload + 18, len - 14 + 8);
+    payload[20] = 0xaa;
+    payload[21] = 0xaa;
+    payload[22] = 0x03;
+    memcpy(payload + 26, frame + 12, 2);
+    memcpy(payload + 28, frame + 14, len - 14);
+    payload_len = len + 14;
+
+    stw_le_p(header + 2, payload_len);
+    ar6003_htc_enqueue(sd, header, payload, payload_len);
+}
+
+static ssize_t ar6003_net_receive(NetClientState *nc, const uint8_t *buf,
+                                  size_t size)
+{
+    SDState *sd = qemu_get_nic_opaque(nc);
+
+    if (!sd->sdio_powered || !sd->sdio_bmi_done) {
+        return -1;
+    }
+    ar6003_data_packet(sd, buf, size);
+    return size;
+}
+
+static bool ar6003_net_can_receive(NetClientState *nc)
+{
+    SDState *sd = qemu_get_nic_opaque(nc);
+
+    return sd->sdio_powered && sd->sdio_bmi_done &&
+           !ar6003_rx_pending(sd);
+}
+
+static bool ar6003_data_tx(SDState *sd, uint8_t endpoint,
+                           const uint8_t *buf, size_t len)
+{
+    uint8_t frame[2048];
+    const uint8_t *dot3, *llc;
+    size_t frame_len;
+
+    if (endpoint < 2 || endpoint > 5 || len < 6 + 14 + 8 || !sd->sdio_nic) {
+        return false;
+    }
+    dot3 = buf + 6;
+    llc = dot3 + 14;
+    if (llc[0] != 0xaa || llc[1] != 0xaa || llc[2] != 0x03) {
+        return false;
+    }
+    frame_len = len - 6 - 8;
+    if (frame_len > sizeof(frame)) {
+        return false;
+    }
+    memcpy(frame, dot3, 12);
+    memcpy(frame + 12, llc + 6, 2);
+    memcpy(frame + 14, llc + 8, len - 6 - 14 - 8);
+    trace_ar6003_data_tx(endpoint, frame_len, lduw_be_p(frame + 12));
+    qemu_send_packet(qemu_get_queue(sd->sdio_nic), frame, frame_len);
+    return true;
+}
+
+static void ar6003_wmi_scan_results(SDState *sd, uint8_t credit_ep,
+                                    uint8_t credits)
+{
+    static const char ssid[] = "Kindle-QEMU";
+    uint8_t bss[96] = { 0 };
+    uint8_t complete[4] = { 0 };
+    uint8_t event[256] = { 0 };
+    uint8_t header[6] = { 1, 1 << 1, 0, 0, 12, 0 };
+    size_t event_len;
+    size_t pos = 12;
+
+    stw_le_p(bss, 2412);
+    bss[2] = 1;  /* BEACON_FTYPE */
+    bss[3] = 55; /* -40 dBm */
+    bss[4] = 0x02;
+    bss[9] = 0x02;
+    /* Timestamp, beacon interval and capability follow the BSS header. */
+    stw_le_p(bss + pos + 8, 100);
+    stw_le_p(bss + pos + 10, 0x0001); /* ESS, open network */
+    pos += 12;
+    bss[pos++] = 0; /* WLAN_EID_SSID */
+    bss[pos++] = sizeof(ssid) - 1;
+    memcpy(bss + pos, ssid, sizeof(ssid) - 1);
+    pos += sizeof(ssid) - 1;
+    bss[pos++] = 1; /* WLAN_EID_SUPP_RATES */
+    bss[pos++] = 4;
+    bss[pos++] = 0x82;
+    bss[pos++] = 0x84;
+    bss[pos++] = 0x8b;
+    bss[pos++] = 0x96;
+    bss[pos++] = 3; /* WLAN_EID_DS_PARAMS */
+    bss[pos++] = 1;
+    bss[pos++] = 1;
+
+    stw_le_p(event, 0x1004);
+    memcpy(event + 6, bss, pos);
+    event_len = 6 + pos;
+    event[event_len++] = 1; /* HTC_RECORD_CREDITS */
+    event[event_len++] = 2;
+    event[event_len++] = credit_ep;
+    event[event_len++] = credits;
+    event[event_len++] = 2; /* HTC_RECORD_LOOKAHEAD */
+    event[event_len++] = 6;
+    event[event_len++] = 0xaa;
+    event[event_len++] = 1; /* endpoint 1 */
+    event[event_len++] = 0;
+    event[event_len++] = 10; /* WMI header + scan status */
+    event[event_len++] = 0;
+    event[event_len++] = 0x55;
+    stw_le_p(header + 2, event_len);
+    ar6003_htc_enqueue(sd, header, event, event_len);
+    ar6003_wmi_event(sd, 0x100a, complete, sizeof(complete));
+}
+
+static void ar6003_wmi_scan_timer(void *opaque)
+{
+    SDState *sd = opaque;
+
+    if (ar6003_rx_pending(sd)) {
+        timer_mod(sd->sdio_scan_timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 10);
+        return;
+    }
+    ar6003_wmi_scan_results(sd, sd->sdio_scan_credit_ep,
+                            sd->sdio_scan_credits);
+}
+
+static void ar6003_wmi_connect_timer(void *opaque)
+{
+    SDState *sd = opaque;
+    /* API 4 advertises the large-connect-IE event with 16-bit lengths. */
+    uint8_t event[32] = { 0 };
+
+    if (ar6003_rx_pending(sd)) {
+        timer_mod(sd->sdio_connect_timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 10);
+        return;
+    }
+    stw_le_p(event, 2412);
+    event[2] = 0x02;
+    event[7] = 0x02;
+    stw_le_p(event + 8, 100);
+    stw_le_p(event + 10, 100);
+    stl_le_p(event + 12, 1); /* INFRA_NETWORK */
+    stw_le_p(event + 16, 0); /* beacon IE length */
+    stw_le_p(event + 18, 4); /* assoc request fixed fields */
+    stw_le_p(event + 20, 6); /* assoc response fixed fields */
+    ar6003_wmi_event(sd, 0x1002, event, sizeof(event));
+}
+
+static void ar6003_htc_command(SDState *sd, const uint8_t *buf, size_t len)
+{
+    uint16_t payload_len, msg_id, service;
+    uint8_t response[10] = { 0 };
+    uint8_t endpoint;
+
+    if (len < 8) {
+        return;
+    }
+    payload_len = lduw_le_p(buf + 2);
+    if (payload_len < 2 || payload_len + 6 > len) {
+        return;
+    }
+    msg_id = lduw_le_p(buf + 6);
+    if (buf[0] != 0) {
+        uint8_t credits = DIV_ROUND_UP(payload_len + 6, 256);
+
+        if (buf[0] != 1 && ar6003_data_tx(sd, buf[0], buf + 6,
+                                         payload_len)) {
+            /* Credits acknowledge accepted host-to-target transfers; they
+             * must not depend on a corresponding network reply arriving. */
+            ar6003_htc_credit(sd, buf[0], credits);
+            return;
+        }
+        trace_ar6003_wmi_command(msg_id);
+        if (msg_id == 0xf08b) { /* WMI_BEGIN_SCAN_CMDID */
+            sd->sdio_scan_credit_ep = buf[0];
+            sd->sdio_scan_credits = credits;
+            timer_mod(sd->sdio_scan_timer,
+                      qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 250);
+        } else {
+            ar6003_htc_credit(sd, buf[0], credits);
+            if (msg_id == 1) { /* WMI_CONNECT_CMDID */
+                timer_mod(sd->sdio_connect_timer,
+                          qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 250);
+            }
+        }
+        return;
+    }
+    if (msg_id == 4 || msg_id == 5) { /* HTC setup complete */
+        ar6003_wmi_ready(sd);
+        return;
+    }
+    if (msg_id != 2 || payload_len < 8) { /* HTC_MSG_CONN_SVC_ID */
+        return;
+    }
+
+    service = lduw_le_p(buf + 8);
+    if (service >= 0x100 && service <= 0x104) {
+        endpoint = 1 + (service - 0x100);
+    } else {
+        endpoint = 6;
+    }
+    stw_le_p(response, 3);       /* HTC_MSG_CONN_SVC_RESP_ID */
+    stw_le_p(response + 2, service);
+    response[4] = 0;             /* HTC_SERVICE_SUCCESS */
+    response[5] = endpoint;
+    stw_le_p(response + 6, 1536);
+    ar6003_htc_packet(sd, 0, response, sizeof(response));
+}
+
+static void ar6003_bmi_command(SDState *sd, const uint8_t *buf, size_t len)
+{
+    uint32_t cmd, addr, count, value;
+    size_t i;
+
+    if (len < 4 || sd->sdio_bmi_done) {
+        return;
+    }
+    cmd = ldl_le_p(buf);
+    switch (cmd) {
+    case AR6003_BMI_DONE:
+        sd->sdio_bmi_done = true;
+        ar6003_htc_ready(sd);
+        break;
+    case AR6003_BMI_GET_TARGET_INFO:
+        /* New-style response is needed so the driver learns target_type. */
+        ar6003_bmi_reply_u32(sd, UINT32_MAX);
+        ar6003_bmi_reply_u32(sd, 12);
+        ar6003_bmi_reply_u32(sd, 0x30000582); /* AR6003 hw 2.1.1 */
+        ar6003_bmi_reply_u32(sd, 3);          /* TARGET_TYPE_AR6003 */
+        break;
+    case AR6003_BMI_READ_MEMORY:
+        if (len < 12) {
+            break;
+        }
+        addr = ldl_le_p(buf + 4);
+        count = ldl_le_p(buf + 8);
+        for (i = 0; i < count; i++) {
+            value = *ar6003_target_ptr(sd, addr + i);
+            ar6003_bmi_reply(sd, &value, 1);
+        }
+        break;
+    case AR6003_BMI_WRITE_MEMORY:
+        if (len < 12) {
+            break;
+        }
+        addr = ldl_le_p(buf + 4);
+        count = MIN(ldl_le_p(buf + 8), len - 12);
+        for (i = 0; i < count; i++) {
+            *ar6003_target_ptr(sd, addr + i) = buf[12 + i];
+        }
+        break;
+    case AR6003_BMI_EXECUTE:
+        ar6003_bmi_reply_u32(sd, len >= 12 ? ldl_le_p(buf + 8) : 0);
+        break;
+    case AR6003_BMI_READ_SOC_REGISTER:
+        if (len >= 8) {
+            ar6003_bmi_reply_u32(sd,
+                                ar6003_target_ldl(sd, ldl_le_p(buf + 4)));
+        }
+        break;
+    case AR6003_BMI_WRITE_SOC_REGISTER:
+        if (len >= 12) {
+            ar6003_target_stl(sd, ldl_le_p(buf + 4), ldl_le_p(buf + 8));
+        }
+        break;
+    case AR6003_BMI_ROMPATCH_INSTALL:
+        ar6003_bmi_reply_u32(sd, 1);
+        break;
+    case AR6003_BMI_LZ_STREAM_START:
+        if (len >= 8) {
+            sd->sdio_lz_addr = ldl_le_p(buf + 4);
+        }
+        break;
+    case AR6003_BMI_LZ_DATA:
+        /* Firmware contents are opaque to the synthetic target. */
+        break;
+    case AR6003_BMI_SET_APP_START:
+    default:
+        break;
+    }
+}
+
+static uint8_t ar6003_sdio_cis_byte(uint32_t addr)
+{
+    static const uint8_t common_cis[] = {
+        0x20, 0x04, 0x71, 0x02, 0x00, 0x03,
+        0x21, 0x02, 0x0c, 0x00,
+        0x22, 0x04, 0x00, 0x00, 0x02, 0x32,
+        0xff,
+    };
+    static const uint8_t function_cis[] = {
+        0x20, 0x04, 0x71, 0x02, 0x00, 0x03,
+        0x21, 0x02, 0x0c, 0x00,
+        0x22, 42,
+        0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0x00, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 100, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0,
+        0xff,
+    };
+
+    if (addr >= AR6003_SDIO_CIS0 &&
+        addr < AR6003_SDIO_CIS0 + sizeof(common_cis)) {
+        return common_cis[addr - AR6003_SDIO_CIS0];
+    }
+    if (addr >= AR6003_SDIO_CIS1 &&
+        addr < AR6003_SDIO_CIS1 + sizeof(function_cis)) {
+        return function_cis[addr - AR6003_SDIO_CIS1];
+    }
+    return 0xff;
+}
+
+static uint8_t ar6003_sdio_readb(SDState *sd, unsigned function,
+                                  uint32_t addr)
+{
+    if (function == 1) {
+        if (addr == AR6003_BMI_CREDIT) {
+            return 1;
+        }
+        if (addr == AR6003_RX_LOOKAHEAD) {
+            return ar6003_rx_pending(sd) ? 1 : 0;
+        }
+        if (addr == 0x400) {
+            return ar6003_rx_pending(sd) ? 1 : 0;
+        }
+        if (addr >= 0x408 && addr < 0x40c) {
+            return ar6003_rx_peek(sd, addr - 0x408);
+        }
+        if (addr >= AR6003_MBOX_BASE && addr < AR6003_MBOX_END &&
+            ar6003_rx_pending(sd)) {
+            return ar6003_rx_read(sd);
+        }
+        return *ar6003_target_ptr(sd, addr);
+    }
+    if (function != 0) {
+        return 0;
+    }
+
+    switch (addr) {
+    case 0x00: return 0x32; /* CCCR/FBR 1.20, SDIO 2.00 */
+    case 0x02: return sd->sdio_io_enable;
+    case 0x03: return sd->sdio_io_enable;
+    case 0x04: return sd->sdio_int_enable;
+    case 0x05: return 0;
+    case 0x07: return sd->sdio_bus_if;
+    case 0x08: return 0x1e; /* SMB, SRW, SBS and S4MI */
+    case 0x09: return extract32(AR6003_SDIO_CIS0, 0, 8);
+    case 0x0a: return extract32(AR6003_SDIO_CIS0, 8, 8);
+    case 0x0b: return extract32(AR6003_SDIO_CIS0, 16, 8);
+    case 0x13: return sd->sdio_speed;
+    case 0xf0: return sd->sdio_irq_mode;
+    case 0x100: return 0x07; /* Standard SDIO WLAN interface. */
+    case 0x109: return extract32(AR6003_SDIO_CIS1, 0, 8);
+    case 0x10a: return extract32(AR6003_SDIO_CIS1, 8, 8);
+    case 0x10b: return extract32(AR6003_SDIO_CIS1, 16, 8);
+    case 0x110: return extract32(sd->sdio_block_size, 0, 8);
+    case 0x111: return extract32(sd->sdio_block_size, 8, 8);
+    default:
+        return ar6003_sdio_cis_byte(addr);
+    }
+}
+
+static void ar6003_sdio_writeb(SDState *sd, unsigned function,
+                                uint32_t addr, uint8_t value)
+{
+    if (function == 1) {
+        *ar6003_target_ptr(sd, addr) = value;
+        ar6003_update_irq(sd);
+        return;
+    }
+    if (function != 0) {
+        return;
+    }
+
+    switch (addr) {
+    case 0x02:
+        sd->sdio_io_enable = value & 0x02;
+        break;
+    case 0x04:
+        sd->sdio_int_enable = value & 0x03;
+        ar6003_update_irq(sd);
+        break;
+    case 0x06:
+        if (value & 0x08) {
+            sd->sdio_io_enable = 0;
+        }
+        break;
+    case 0x07:
+        sd->sdio_bus_if = value;
+        break;
+    case 0x13:
+        sd->sdio_speed = 1 | (value & 2);
+        break;
+    case 0x110:
+        sd->sdio_block_size = deposit32(sd->sdio_block_size, 0, 8, value);
+        break;
+    case 0x111:
+        sd->sdio_block_size = deposit32(sd->sdio_block_size, 8, 8, value);
+        break;
+    case 0xf0:
+        sd->sdio_irq_mode = value & 1;
+        break;
+    default:
+        break;
+    }
+}
+
+static void ar6003_sdio_r5(uint8_t *resp, uint8_t data)
+{
+    stl_be_p(resp, data);
+}
+
+static size_t ar6003_sdio_do_command(SDState *sd, SDRequest *req,
+                                     uint8_t *resp, size_t respsz)
+{
+    uint32_t arg = req->arg;
+    unsigned function;
+    uint32_t addr;
+    uint32_t count;
+    uint8_t value;
+
+    if (!sd->sdio_powered) {
+        return 0;
+    }
+    if (req->cmd != 0 && respsz < 4) {
+        return 0;
+    }
+
+    switch (req->cmd) {
+    case 0: /* GO_IDLE_STATE */
+        sd->sdio_selected = false;
+        sd->sdio_io_enable = 0;
+        return 0;
+    case 5: /* IO_SEND_OP_COND (R4) */
+        stl_be_p(resp, AR6003_SDIO_OCR | (arg & 0x00ffffff));
+        return 4;
+    case 3: /* SEND_RELATIVE_ADDR (R6) */
+        sd->rca = AR6003_SDIO_RCA;
+        stl_be_p(resp, sd->rca << 16);
+        return 4;
+    case 7: /* SELECT_CARD (R1) */
+        sd->sdio_selected = (arg >> 16) == sd->rca;
+        stl_be_p(resp, 0);
+        return 4;
+    case 52: /* IO_RW_DIRECT (R5) */
+        function = extract32(arg, 28, 3);
+        addr = extract32(arg, 9, 17);
+        value = extract32(arg, 0, 8);
+        if (function > 1) {
+            ar6003_sdio_r5(resp, 0);
+            resp[2] |= 0x02; /* R5 FUNCTION_NUMBER error. */
+            return 4;
+        }
+        if (arg & (1u << 31)) {
+            ar6003_sdio_writeb(sd, function, addr, value);
+            if (!(arg & (1u << 27))) {
+                ar6003_sdio_r5(resp, value);
+                return 4;
+            }
+        }
+        ar6003_sdio_r5(resp, ar6003_sdio_readb(sd, function, addr));
+        return 4;
+    case 53: /* IO_RW_EXTENDED (R5 + data phase) */
+        function = extract32(arg, 28, 3);
+        if (function > 1 || (function == 1 && !(sd->sdio_io_enable & 2))) {
+            ar6003_sdio_r5(resp, 0);
+            resp[2] |= 0x02;
+            return 4;
+        }
+        count = extract32(arg, 0, 9);
+        count = count ? count : 512;
+        if (arg & (1u << 27)) {
+            count *= sd->sdio_block_size ? sd->sdio_block_size : 128;
+        }
+        sd->sdio_xfer_func = function;
+        sd->sdio_xfer_write = arg & (1u << 31);
+        sd->sdio_xfer_increment = arg & (1u << 26);
+        sd->sdio_xfer_addr = extract32(arg, 9, 17);
+        sd->sdio_xfer_len = count;
+        sd->sdio_xfer_pos = 0;
+        sd->sdio_htc_xfer_exhausted = false;
+        ar6003_sdio_r5(resp, 0);
+        return 4;
+    default:
+        return 0;
+    }
+}
+
+static void ar6003_sdio_write_byte(SDState *sd, uint8_t value)
+{
+    uint32_t addr;
+
+    if (!sd->sdio_xfer_write || sd->sdio_xfer_pos >= sd->sdio_xfer_len) {
+        return;
+    }
+    addr = sd->sdio_xfer_addr +
+           (sd->sdio_xfer_increment ? sd->sdio_xfer_pos : 0);
+    ar6003_sdio_writeb(sd, sd->sdio_xfer_func, addr, value);
+    if (sd->sdio_xfer_func == 1 && sd->sdio_xfer_pos < sizeof(sd->sdio_tx)) {
+        sd->sdio_tx[sd->sdio_xfer_pos] = value;
+    }
+    sd->sdio_xfer_pos++;
+    if (sd->sdio_xfer_func == 1 &&
+        sd->sdio_xfer_addr < AR6003_MBOX_END &&
+        sd->sdio_xfer_addr + sd->sdio_xfer_len >= AR6003_MBOX_END &&
+        sd->sdio_xfer_pos == sd->sdio_xfer_len) {
+        if (sd->sdio_bmi_done) {
+            ar6003_htc_command(sd, sd->sdio_tx,
+                               MIN(sizeof(sd->sdio_tx), sd->sdio_xfer_len));
+        } else {
+            ar6003_bmi_command(sd, sd->sdio_tx,
+                              MIN(sizeof(sd->sdio_tx), sd->sdio_xfer_len));
+        }
+    }
+}
+
+static uint8_t ar6003_sdio_read_byte(SDState *sd)
+{
+    uint32_t addr;
+
+    if (sd->sdio_xfer_write || sd->sdio_xfer_pos >= sd->sdio_xfer_len) {
+        return 0;
+    }
+    addr = sd->sdio_xfer_addr +
+           (sd->sdio_xfer_increment ? sd->sdio_xfer_pos : 0);
+    sd->sdio_xfer_pos++;
+    uint8_t value = ar6003_sdio_readb(sd, sd->sdio_xfer_func, addr);
+
+    if (!ar6003_rx_pending(sd) && sd->sdio_nic) {
+        qemu_flush_queued_packets(qemu_get_queue(sd->sdio_nic));
+    }
+    if (!ar6003_rx_pending(sd)) {
+        timer_mod(sd->sdio_credit_timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 10);
+    }
+    ar6003_update_irq(sd);
+    return value;
+}
+
+static bool ar6003_sdio_receive_ready(SDState *sd)
+{
+    return sd->sdio_powered && sd->sdio_xfer_write &&
+           sd->sdio_xfer_pos < sd->sdio_xfer_len;
+}
+
+static bool ar6003_sdio_data_ready(SDState *sd)
+{
+    return sd->sdio_powered && !sd->sdio_xfer_write &&
+           sd->sdio_xfer_pos < sd->sdio_xfer_len;
+}
+
+static bool ar6003_sdio_get_inserted(SDState *sd)
+{
+    return sd->sdio_powered;
+}
+
+static bool ar6003_sdio_get_readonly(SDState *sd)
+{
+    return false;
+}
+
+static void ar6003_sdio_reset(DeviceState *dev)
+{
+    SDState *sd = SDMMC_COMMON(dev);
+
+    sd->rca = 0;
+    sd->sdio_selected = false;
+    sd->sdio_io_enable = 0;
+    sd->sdio_int_enable = 0;
+    sd->sdio_bus_if = 0;
+    sd->sdio_irq_mode = 0;
+    sd->sdio_speed = 1;
+    sd->sdio_block_size = 128;
+    sd->sdio_xfer_len = 0;
+    sd->sdio_xfer_pos = 0;
+    sd->sdio_rx_len = 0;
+    sd->sdio_rx_pos = 0;
+    sd->sdio_htc_rx_head = 0;
+    sd->sdio_htc_rx_count = 0;
+    sd->sdio_htc_rx_pos = 0;
+    sd->sdio_htc_xfer_exhausted = false;
+    sd->sdio_lz_addr = 0;
+    sd->sdio_bmi_done = false;
+    if (sd->sdio_scan_timer) {
+        timer_del(sd->sdio_scan_timer);
+    }
+    if (sd->sdio_connect_timer) {
+        timer_del(sd->sdio_connect_timer);
+    }
+    if (sd->sdio_credit_timer) {
+        timer_del(sd->sdio_credit_timer);
+    }
+    memset(sd->sdio_pending_credits, 0, sizeof(sd->sdio_pending_credits));
+    memset(sd->sdio_target_mem, 0, sizeof(sd->sdio_target_mem));
+    qemu_set_irq(sd->sdio_irq, 0);
+    sd->dat_lines = 0xf;
+    sd->cmd_line = true;
+}
+
+static void ar6003_sdio_power(void *opaque, int n, int level)
+{
+    SDState *sd = opaque;
+    SDBus *bus;
+
+    level = !!level;
+    if (sd->sdio_powered == level) {
+        return;
+    }
+    sd->sdio_powered = level;
+    ar6003_sdio_reset(DEVICE(sd));
+    bus = SD_BUS(qdev_get_parent_bus(DEVICE(sd)));
+    sdbus_set_inserted(bus, level);
+    if (level) {
+        sdbus_set_readonly(bus, false);
+    }
+}
+
+static void ar6003_sdio_instance_init(Object *obj)
+{
+    SDState *sd = SDMMC_COMMON(obj);
+
+    qdev_init_gpio_in_named(DEVICE(sd), ar6003_sdio_power, "power", 1);
+    qdev_init_gpio_out_named(DEVICE(sd), &sd->sdio_irq, "irq", 1);
+    sd->sdio_scan_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
+                                        ar6003_wmi_scan_timer, sd);
+    sd->sdio_connect_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
+                                           ar6003_wmi_connect_timer, sd);
+    sd->sdio_credit_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
+                                          ar6003_htc_credit_timer, sd);
+}
 
 static bool sd_is_spi(SDState *sd)
 {
@@ -862,12 +1806,7 @@ static uint32_t sd_blk_len(SDState *sd)
     return sd->blk_len;
 }
 
-/*
- * This requires a disk image that has two boot partitions inserted at the
- * beginning of it, followed by an RPMB partition. The size of the boot
- * partitions is the "boot-partition-size" property, the one of the RPMB
- * partition is 'rpmb-partition-size'.
- */
+/* Locate partitions stored in the block backend rather than volatile RAM. */
 static uint32_t sd_part_offset(SDState *sd)
 {
     unsigned partition_access;
@@ -880,13 +1819,14 @@ static uint32_t sd_part_offset(SDState *sd)
                                  & EXT_CSD_PART_CONFIG_ACC_MASK;
     switch (partition_access) {
     case EXT_CSD_PART_CONFIG_ACC_DEFAULT:
-        return sd->boot_part_size * 2 + sd->rpmb_part_size;
+        return sd->boot_parts_in_memory ? sd->rpmb_part_size :
+               sd->boot_part_size * 2 + sd->rpmb_part_size;
     case EXT_CSD_PART_CONFIG_ACC_BOOT1:
         return 0;
     case EXT_CSD_PART_CONFIG_ACC_BOOT2:
         return sd->boot_part_size * 1;
     case EXT_CSD_PART_CONFIG_ACC_RPMB:
-        return sd->boot_part_size * 2;
+        return sd->boot_parts_in_memory ? 0 : sd->boot_part_size * 2;
     default:
          g_assert_not_reached();
     }
@@ -924,8 +1864,10 @@ static void sd_reset(DeviceState *dev)
         sect = 0;
     }
     size = sect << HWBLOCK_SHIFT;
-    if (sd_is_emmc(sd)) {
+    if (sd_is_emmc(sd) && !sd->boot_parts_in_memory) {
         size -= sd->boot_part_size * 2 + sd->rpmb_part_size;
+    } else if (sd_is_emmc(sd)) {
+        size -= sd->rpmb_part_size;
     }
 
     sect = sd_addr_to_wpnum(size) + 1;
@@ -1059,6 +2001,25 @@ static const VMStateDescription emmc_extcsd_vmstate = {
     },
 };
 
+static bool vmstate_needed_for_emmc_boot_parts(void *opaque)
+{
+    SDState *sd = opaque;
+
+    return sd->boot_parts_in_memory;
+}
+
+static const VMStateDescription emmc_boot_parts_vmstate = {
+    .name = "sd-card/boot-partitions",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = vmstate_needed_for_emmc_boot_parts,
+    .fields = (const VMStateField[]) {
+        VMSTATE_VBUFFER_UINT32(boot_parts, SDState, 1, NULL,
+                               boot_parts_size),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static int sd_vmstate_pre_load(void *opaque)
 {
     SDState *sd = opaque;
@@ -1108,13 +2069,30 @@ static const VMStateDescription sd_vmstate = {
         &sd_ocr_vmstate,
         &emmc_extcsd_vmstate,
         &emmc_rpmb_vmstate,
+        &emmc_boot_parts_vmstate,
         NULL
     },
 };
 
 static void sd_blk_read(SDState *sd, uint64_t addr, uint32_t len)
 {
+    unsigned int partition_access;
+
     trace_sdcard_read_block(addr, len);
+    partition_access = sd->ext_csd[EXT_CSD_PART_CONFIG]
+            & EXT_CSD_PART_CONFIG_ACC_MASK;
+    if (sd->boot_parts_in_memory &&
+        (partition_access == EXT_CSD_PART_CONFIG_ACC_BOOT1 ||
+         partition_access == EXT_CSD_PART_CONFIG_ACC_BOOT2)) {
+        uint64_t offset = (partition_access - 1) * sd->boot_part_size + addr;
+
+        if (addr + len <= sd->boot_part_size) {
+            memcpy(sd->data, sd->boot_parts + offset, len);
+        } else {
+            fprintf(stderr, "sd_blk_read: boot partition read out of range\n");
+        }
+        return;
+    }
     addr += sd_part_offset(sd);
     if (!sd->blk || blk_pread(sd->blk, addr, len, sd->data, 0) < 0) {
         fprintf(stderr, "sd_blk_read: read error on host side\n");
@@ -1123,7 +2101,24 @@ static void sd_blk_read(SDState *sd, uint64_t addr, uint32_t len)
 
 static void sd_blk_write(SDState *sd, uint64_t addr, uint32_t len)
 {
+    unsigned int partition_access;
+
     trace_sdcard_write_block(addr, len);
+    partition_access = sd->ext_csd[EXT_CSD_PART_CONFIG]
+            & EXT_CSD_PART_CONFIG_ACC_MASK;
+    if (sd->boot_parts_in_memory &&
+        (partition_access == EXT_CSD_PART_CONFIG_ACC_BOOT1 ||
+         partition_access == EXT_CSD_PART_CONFIG_ACC_BOOT2)) {
+        uint64_t offset = (partition_access - 1) * sd->boot_part_size + addr;
+
+        if (addr + len <= sd->boot_part_size) {
+            memcpy(sd->boot_parts + offset, sd->data, len);
+        } else {
+            fprintf(stderr,
+                    "sd_blk_write: boot partition write out of range\n");
+        }
+        return;
+    }
     addr += sd_part_offset(sd);
     if (!sd->blk || blk_pwrite(sd->blk, addr, len, sd->data, 0) < 0) {
         fprintf(stderr, "sd_blk_write: write error on host side\n");
@@ -3032,7 +4027,20 @@ static void sd_instance_finalize(Object *obj)
 {
     SDState *sd = SDMMC_COMMON(obj);
 
+    if (sd->sdio_nic) {
+        qemu_del_nic(sd->sdio_nic);
+    }
     timer_free(sd->ocr_power_timer);
+    if (sd->sdio_scan_timer) {
+        timer_free(sd->sdio_scan_timer);
+    }
+    if (sd->sdio_connect_timer) {
+        timer_free(sd->sdio_connect_timer);
+    }
+    if (sd->sdio_credit_timer) {
+        timer_free(sd->sdio_credit_timer);
+    }
+    g_free(sd->boot_parts);
 }
 
 static void sd_blk_size_error(SDState *sd, int64_t blk_size,
@@ -3081,7 +4089,11 @@ static void sd_realize(DeviceState *dev, Error **errp)
         blk_size = blk_getlength(sd->blk);
     }
     if (blk_size >= 0) {
-        blk_size -= sd->boot_part_size * 2 + sd->rpmb_part_size;
+        if (sd->boot_parts_in_memory) {
+            blk_size -= sd->rpmb_part_size;
+        } else {
+            blk_size -= sd->boot_part_size * 2 + sd->rpmb_part_size;
+        }
         if (blk_size > SDSC_MAX_CAPACITY) {
             if (sd_is_emmc(sd) &&
                 !QEMU_IS_ALIGNED(blk_size, 1 << HWBLOCK_SHIFT)) {
@@ -3121,6 +4133,7 @@ static void sd_realize(DeviceState *dev, Error **errp)
         error_append_hint(errp,
                           "The boot partition size must be multiples of 128K"
                           "and not larger than 32640K.\n");
+        return;
     }
     if (!QEMU_IS_ALIGNED(sd->rpmb_part_size, 128 * KiB) ||
         sd->rpmb_part_size > 128 * 128 * KiB) {
@@ -3131,7 +4144,35 @@ static void sd_realize(DeviceState *dev, Error **errp)
         error_append_hint(errp,
                           "The RPMB partition size must be multiples of 128K"
                           "and not larger than 16384K.\n");
+        return;
     }
+    if (sd->boot_parts_in_memory) {
+        if (!sd->boot_part_size) {
+            error_setg(errp, "In-memory eMMC boot partitions require a size");
+            return;
+        }
+        sd->boot_parts_size = sd->boot_part_size * 2;
+        sd->boot_parts = g_malloc0(sd->boot_parts_size);
+    }
+}
+
+void emmc_boot_partition_write(DeviceState *dev, unsigned int partition,
+                               uint64_t offset, const void *data, size_t len,
+                               Error **errp)
+{
+    SDState *sd = EMMC(dev);
+
+    if (!sd->boot_parts_in_memory || !sd->boot_parts) {
+        error_setg(errp, "eMMC boot partitions are not backed by memory");
+        return;
+    }
+    if (partition < 1 || partition > 2 ||
+        offset > sd->boot_part_size || len > sd->boot_part_size - offset) {
+        error_setg(errp, "eMMC boot partition write is out of range");
+        return;
+    }
+    memcpy(sd->boot_parts + (partition - 1) * sd->boot_part_size + offset,
+           data, len);
 }
 
 static void emmc_realize(DeviceState *dev, Error **errp)
@@ -3154,6 +4195,8 @@ static const Property sd_properties[] = {
 
 static const Property emmc_properties[] = {
     DEFINE_PROP_UINT64("boot-partition-size", SDState, boot_part_size, 0),
+    DEFINE_PROP_BOOL("boot-partitions-in-memory", SDState,
+                     boot_parts_in_memory, false),
     DEFINE_PROP_UINT8("boot-config", SDState, boot_config, 0x0),
     DEFINE_PROP_UINT64("rpmb-partition-size", SDState, rpmb_part_size, 0),
 };
@@ -3226,6 +4269,48 @@ static void emmc_class_init(ObjectClass *klass, const void *data)
     sc->set_csd = emmc_set_csd;
 }
 
+static NetClientInfo ar6003_net_info = {
+    .type = NET_CLIENT_DRIVER_NIC,
+    .size = sizeof(NICState),
+    .can_receive = ar6003_net_can_receive,
+    .receive = ar6003_net_receive,
+};
+
+static void ar6003_sdio_realize(DeviceState *dev, Error **errp)
+{
+    SDState *sd = SDMMC_COMMON(dev);
+
+    qemu_macaddr_default_if_unset(&sd->sdio_nic_conf.macaddr);
+    sd->sdio_nic = qemu_new_nic(&ar6003_net_info, &sd->sdio_nic_conf,
+                                object_get_typename(OBJECT(dev)), dev->id,
+                                &dev->mem_reentrancy_guard, sd);
+    qemu_format_nic_info_str(qemu_get_queue(sd->sdio_nic),
+                             sd->sdio_nic_conf.macaddr.a);
+}
+
+static const Property ar6003_sdio_properties[] = {
+    DEFINE_NIC_PROPERTIES(SDState, sdio_nic_conf),
+};
+
+static void ar6003_sdio_class_init(ObjectClass *klass, const void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+    SDCardClass *sc = SDMMC_COMMON_CLASS(klass);
+
+    dc->desc = "Atheros AR6003 SDIO Wi-Fi transport";
+    dc->realize = ar6003_sdio_realize;
+    device_class_set_legacy_reset(dc, ar6003_sdio_reset);
+    device_class_set_props(dc, ar6003_sdio_properties);
+
+    sc->do_command = ar6003_sdio_do_command;
+    sc->write_byte = ar6003_sdio_write_byte;
+    sc->read_byte = ar6003_sdio_read_byte;
+    sc->receive_ready = ar6003_sdio_receive_ready;
+    sc->data_ready = ar6003_sdio_data_ready;
+    sc->get_inserted = ar6003_sdio_get_inserted;
+    sc->get_readonly = ar6003_sdio_get_readonly;
+}
+
 static const TypeInfo sd_types[] = {
     {
         .name           = TYPE_SDMMC_COMMON,
@@ -3251,6 +4336,12 @@ static const TypeInfo sd_types[] = {
         .name           = TYPE_EMMC,
         .parent         = TYPE_SDMMC_COMMON,
         .class_init     = emmc_class_init,
+    },
+    {
+        .name           = TYPE_AR6003_SDIO,
+        .parent         = TYPE_SDMMC_COMMON,
+        .instance_init  = ar6003_sdio_instance_init,
+        .class_init     = ar6003_sdio_class_init,
     },
 };
 

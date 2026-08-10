@@ -90,6 +90,15 @@ DECLARE_INSTANCE_CHECKER(SDState, SD_CARD_SPI, TYPE_SD_CARD_SPI)
 #define TYPE_EMMC "emmc"
 DECLARE_INSTANCE_CHECKER(SDState, EMMC, TYPE_EMMC)
 
+/* Populate a realized eMMC boot partition backed by volatile memory. */
+void emmc_boot_partition_write(DeviceState *dev, unsigned int partition,
+                               uint64_t offset, const void *data, size_t len,
+                               Error **errp);
+
+/* Atheros AR6003 Wi-Fi function used by the Lab126 Wario board. */
+#define TYPE_AR6003_SDIO "ar6003-sdio"
+DECLARE_INSTANCE_CHECKER(SDState, AR6003_SDIO, TYPE_AR6003_SDIO)
+
 struct SDCardClass {
     /*< private >*/
     DeviceClass parent_class;
