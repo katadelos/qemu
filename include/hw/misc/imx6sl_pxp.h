@@ -22,4 +22,18 @@ struct IMX6SLPXPState {
     bool running;
 };
 
+typedef struct IMX6SLPXPFetch {
+    uint64_t addr;
+    uint32_t pitch;
+    uint32_t left;
+    uint32_t top;
+    uint32_t width;
+    uint32_t height;
+} IMX6SLPXPFetch;
+
+bool imx6sl_pxp_get_wfe_a_fetch(IMX6SLPXPState *s,
+                                IMX6SLPXPFetch *fetch);
+bool imx6sl_pxp_get_wfe_b_store(IMX6SLPXPState *s,
+                                IMX6SLPXPFetch *store);
+
 #endif

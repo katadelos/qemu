@@ -31,7 +31,22 @@
 #define PXP_LUT_ADDR      0x250
 #define PXP_LUT_DATA      0x260
 #define PXP_HIST_CTRL     0x290
+#define PXP_CTRL2         0x310
+#define PXP_IRQ           0x3a0
+#define PXP_IRQ_SET       0x3a4
+#define PXP_IRQ_CLR       0x3a8
+#define PXP_IRQ_TOG       0x3ac
 #define PXP_VERSION       0x430
+#define PXP_WFA_FETCH1_ADDR  0x0c50
+#define PXP_WFA_FETCH1_PITCH 0x0c60
+#define PXP_WFA_FETCH1_SIZE  0x0c70
+#define PXP_WFA_FETCH1_CORD  0x0db0
+#define PXP_WFB_STORE_CTRL0  0x1340
+#define PXP_WFB_STORE_SIZE0  0x1380
+#define PXP_WFB_STORE_PITCH  0x13a0
+#define PXP_WFB_STORE_SHIFT0 0x13b0
+#define PXP_WFB_STORE_ADDR0  0x1410
+#define PXP_WFB_STORE_FILL0  0x1430
 
 #define CTRL_SFTRST       BIT(31)
 #define CTRL_CLKGATE      BIT(30)
@@ -44,9 +59,12 @@
 #define STAT_AXI_READ     BIT(2)
 #define STAT_AXI_WRITE    BIT(1)
 #define LUT_BYPASS        BIT(31)
+#define CTRL2_ENABLE      BIT(0)
+#define CTRL2_WFE_B       BIT(19)
+#define WFB_FILL_ENABLE   BIT(11)
+#define WFB_STORE_ENABLE  BIT(9)
+#define IRQ_WFB_CH0       BIT(10)
 
-#define PXP_CLOCK_HZ      198000000ULL
-#define PXP_MIN_LATENCY_NS 1000ULL
 #define PXP_MAX_DMA_BYTES (32 * MiB)
 
 static inline uint32_t *pxp_reg(IMX6SLPXPState *s, hwaddr offset)
@@ -54,10 +72,84 @@ static inline uint32_t *pxp_reg(IMX6SLPXPState *s, hwaddr offset)
     return &s->regs[offset >> 2];
 }
 
+bool imx6sl_pxp_get_wfe_a_fetch(IMX6SLPXPState *s,
+                                IMX6SLPXPFetch *fetch)
+{
+    uint32_t size = *pxp_reg(s, PXP_WFA_FETCH1_SIZE);
+    uint32_t cord = *pxp_reg(s, PXP_WFA_FETCH1_CORD);
+
+    fetch->addr = *pxp_reg(s, PXP_WFA_FETCH1_ADDR);
+    fetch->pitch = *pxp_reg(s, PXP_WFA_FETCH1_PITCH) & 0xffff;
+    fetch->left = cord & 0x3fff;
+    fetch->top = (cord >> 16) & 0x3fff;
+    fetch->width = (size & 0x3fff) + 1;
+    fetch->height = ((size >> 16) & 0x3fff) + 1;
+
+    return fetch->addr && fetch->pitch && fetch->width && fetch->height &&
+           fetch->left + fetch->width <= fetch->pitch;
+}
+
+bool imx6sl_pxp_get_wfe_b_store(IMX6SLPXPState *s,
+                                IMX6SLPXPFetch *store)
+{
+    uint32_t size = *pxp_reg(s, PXP_WFB_STORE_SIZE0);
+    unsigned bpp = 1U << ((*pxp_reg(s, PXP_WFB_STORE_SHIFT0) >> 2) & 3);
+
+    store->addr = *pxp_reg(s, PXP_WFB_STORE_ADDR0);
+    store->pitch = *pxp_reg(s, PXP_WFB_STORE_PITCH) & 0xffff;
+    store->left = 0;
+    store->top = 0;
+    store->width = (size & 0xffff) + 1;
+    store->height = (size >> 16) + 1;
+
+    return bpp == 1 && store->addr && store->pitch && store->width &&
+           store->height && store->width <= store->pitch;
+}
+
+static bool pxp_wfe_b_fill(IMX6SLPXPState *s)
+{
+    uint32_t ctrl = *pxp_reg(s, PXP_WFB_STORE_CTRL0);
+    uint32_t size = *pxp_reg(s, PXP_WFB_STORE_SIZE0);
+    uint32_t pitch = *pxp_reg(s, PXP_WFB_STORE_PITCH) & 0xffff;
+    uint32_t width = (size & 0xffff) + 1;
+    uint32_t height = (size >> 16) + 1;
+    uint32_t value = *pxp_reg(s, PXP_WFB_STORE_FILL0);
+    unsigned bpp = 1U << ((*pxp_reg(s, PXP_WFB_STORE_SHIFT0) >> 2) & 3);
+    size_t bytes;
+    g_autofree uint8_t *buffer = NULL;
+    unsigned x, y;
+
+    if (bpp > sizeof(value) ||
+        !(ctrl & WFB_FILL_ENABLE) || !(ctrl & WFB_STORE_ENABLE) ||
+        !pitch || !width || !height || width > pitch / bpp) {
+        return false;
+    }
+    bytes = (size_t)pitch * height;
+    if (bytes > PXP_MAX_DMA_BYTES) {
+        return false;
+    }
+    buffer = g_malloc(bytes);
+    for (y = 0; y < height; y++) {
+        uint8_t *row = buffer + (size_t)y * pitch;
+
+        memset(row, 0, pitch);
+        for (x = 0; x < width; x++) {
+            memcpy(row + (size_t)x * bpp, &value, bpp);
+        }
+    }
+    return dma_memory_write(&address_space_memory,
+                            *pxp_reg(s, PXP_WFB_STORE_ADDR0),
+                            buffer, bytes, MEMTXATTRS_UNSPECIFIED) == MEMTX_OK;
+}
+
 static void imx6sl_pxp_update_irq(IMX6SLPXPState *s)
 {
-    qemu_set_irq(s->irq, !!((*pxp_reg(s, PXP_STAT) & STAT_IRQ) &&
-                            (*pxp_reg(s, PXP_CTRL) & CTRL_IRQ_ENABLE)));
+    /*
+     * The i.MX6ULL/v3P driver rewrites CTRL as it selects its data path and
+     * can clear the legacy IRQ_ENABLE bit after arming the transaction.  Its
+     * normal completion output remains level-sensitive to STAT.IRQ.
+     */
+    qemu_set_irq(s->irq, !!(*pxp_reg(s, PXP_STAT) & STAT_IRQ));
 }
 
 static unsigned pxp_bytes_per_pixel(unsigned format)
@@ -275,16 +367,14 @@ static void imx6sl_pxp_complete(void *opaque)
 
 static void imx6sl_pxp_start(IMX6SLPXPState *s)
 {
-    uint32_t lrc = *pxp_reg(s, PXP_OUT_LRC);
-    uint64_t pixels = (uint64_t)(((lrc >> 16) & 0x3fff) + 1) *
-                      ((lrc & 0x3fff) + 1);
-    uint64_t duration = MAX(PXP_MIN_LATENCY_NS,
-                            muldiv64(pixels, NANOSECONDS_PER_SECOND,
-                                     PXP_CLOCK_HZ));
-
     s->running = true;
-    timer_mod(&s->completion_timer,
-              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + duration);
+    /*
+     * Finish after the enabling MMIO transaction returns.  A zero-delay
+     * virtual timer preserves the hardware's asynchronous IRQ edge without
+     * introducing enough emulated latency for the dispatch kthread to park
+     * before completion becomes runnable.
+     */
+    timer_mod(&s->completion_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
 }
 
 static bool pxp_alias_base(hwaddr offset, hwaddr *base, unsigned *op)
@@ -320,6 +410,30 @@ static void imx6sl_pxp_write(void *opaque, hwaddr offset, uint64_t value,
     hwaddr base;
     unsigned op;
     uint32_t old, val = value;
+
+    if (offset == PXP_IRQ_SET || offset == PXP_IRQ_CLR ||
+        offset == PXP_IRQ_TOG) {
+        uint32_t *irq = pxp_reg(s, PXP_IRQ);
+
+        if (offset == PXP_IRQ_SET) {
+            *irq |= val;
+        } else if (offset == PXP_IRQ_CLR) {
+            *irq &= ~val;
+        } else {
+            *irq ^= val;
+        }
+        return;
+    }
+
+    if (offset == PXP_CTRL2) {
+        *pxp_reg(s, offset) = val;
+        if ((val & (CTRL2_ENABLE | CTRL2_WFE_B)) ==
+            (CTRL2_ENABLE | CTRL2_WFE_B)) {
+            pxp_wfe_b_fill(s);
+            *pxp_reg(s, PXP_IRQ) |= IRQ_WFB_CH0;
+        }
+        return;
+    }
 
     if (offset == PXP_VERSION) {
         return;
