@@ -61,3 +61,10 @@ pca954x_read_data(uint8_t value) "PCA954X read data: 0x%02x"
 
 imx_i2c_read(const char *id, const char *reg, uint64_t ofs, uint64_t value) "%s:[%s (0x%" PRIx64 ")] -> 0x%02" PRIx64
 imx_i2c_write(const char *id, const char *reg, uint64_t ofs, uint64_t value) "%s:[%s (0x%" PRIx64 ")] <- 0x%02" PRIx64
+
+# zforce.c
+
+zforce_queue(uint8_t type, unsigned len, unsigned count, bool reading) "type=0x%02x len=%u count=%u reading=%d"
+zforce_queue_coalesce(uint8_t state, unsigned count, bool reading) "state=%u count=%u reading=%d"
+zforce_queue_drop(uint8_t type, unsigned count, bool reading) "type=0x%02x count=%u reading=%d"
+zforce_pop(uint8_t type, unsigned count) "type=0x%02x remaining=%u"
