@@ -359,6 +359,9 @@ static void fsl_imx6_realize(DeviceState *dev, Error **errp)
             FSL_IMX6_USB_OTG_IRQ, 74, 72, 73,
         };
 
+        if (s->sololite && i == 0) {
+            qdev_prop_set_bit(DEVICE(&s->usb[i]), "gadget", true);
+        }
         sysbus_realize(SYS_BUS_DEVICE(&s->usb[i]), &error_abort);
         sysbus_mmio_map(SYS_BUS_DEVICE(&s->usb[i]), 0,
                         FSL_IMX6_USBOH3_USB_ADDR + i * 0x200);
