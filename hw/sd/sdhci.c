@@ -1922,7 +1922,19 @@ esdhc_write(void *opaque, hwaddr offset, uint64_t val, unsigned size)
          * cached value from s->trnmod and let the SDHCI
          * infrastructure handle the rest
          */
-        sdhci_write(opaque, offset, val | s->trnmod, size);
+        /*
+         * Older i.MX eSDHC drivers, including the i.MX50 Lab126
+         * driver, write the transfer mode and command together as a
+         * single 32-bit value.  In that case the low halfword is
+         * authoritative.  Only use MIX_CTRL's cached mode when the
+         * command write did not supply one; otherwise a READ bit from
+         * the preceding command can leak into CMD24/CMD25.
+         */
+        if (val & UINT16_MAX) {
+            sdhci_write(opaque, offset, val, size);
+        } else {
+            sdhci_write(opaque, offset, val | s->trnmod, size);
+        }
         break;
     case SDHC_BLKSIZE:
         /*
