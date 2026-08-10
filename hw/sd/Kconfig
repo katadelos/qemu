@@ -10,6 +10,10 @@ config SSI_SD
 config SD
     bool
 
+config MTK_MSDC
+    bool
+    select SD
+
 config SDHCI
     bool
     select SD
