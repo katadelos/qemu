@@ -1,5 +1,9 @@
 # aspeed_smc.c
 
+# mc13892.c
+whitney_mc13892_power(bool down, uint32_t sense1, uint32_t status1, uint32_t mask1) "down=%d sense1=0x%06x status1=0x%06x mask1=0x%06x"
+whitney_mc13892_irq(bool pending, uint32_t status1, uint32_t mask1) "pending=%d status1=0x%06x mask1=0x%06x"
+
 aspeed_smc_flash_set_segment(int cs, uint64_t reg, uint64_t start, uint64_t end) "CS%d segreg=0x%"PRIx64" [ 0x%"PRIx64" - 0x%"PRIx64" ]"
 aspeed_smc_flash_read(int cs, uint64_t addr,  uint32_t size, uint64_t data, int mode) "CS%d @0x%" PRIx64 " size %u: 0x%" PRIx64" mode:%d"
 aspeed_smc_do_snoop(int cs, int index, int dummies, int data) "CS%d index:0x%x dummies:%d data:0x%x"

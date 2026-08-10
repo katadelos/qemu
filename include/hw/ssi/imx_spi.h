@@ -103,6 +103,8 @@ struct IMXSPIState {
 
     int16_t burst_length;
     bool legacy_cspi;
+    uint32_t transfer_completion_reads;
+    uint32_t transfer_reads_remaining;
 };
 
 #endif /* IMX_SPI_H */

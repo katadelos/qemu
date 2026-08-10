@@ -61,13 +61,14 @@ static const char *imx_spi_reg_name(uint32_t reg)
 
 static const VMStateDescription vmstate_imx_spi = {
     .name = TYPE_IMX_SPI,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_FIFO32(tx_fifo, IMXSPIState),
         VMSTATE_FIFO32(rx_fifo, IMXSPIState),
         VMSTATE_INT16(burst_length, IMXSPIState),
         VMSTATE_UINT32_ARRAY(regs, IMXSPIState, ECSPI_MAX),
+        VMSTATE_UINT32_V(transfer_reads_remaining, IMXSPIState, 2),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -171,6 +172,13 @@ static bool imx_spi_is_multiple_master_burst(IMXSPIState *s)
            ((wave & (1 << imx_spi_selected_channel(s))) ? true : false);
 }
 
+static void imx_spi_transfer_complete(IMXSPIState *s)
+{
+    s->regs[ECSPI_STATREG] |= ECSPI_STATREG_TC;
+    s->regs[ECSPI_CONREG] &= ~ECSPI_CONREG_XCH;
+    imx_spi_update_irq(s);
+}
+
 static void imx_spi_flush_txfifo(IMXSPIState *s)
 {
     uint32_t tx;
@@ -238,6 +246,14 @@ static void imx_spi_flush_txfifo(IMXSPIState *s)
         s->regs[ECSPI_CONREG] &= ~ECSPI_CONREG_XCH;
     }
 
+    if (s->transfer_completion_reads &&
+        (s->regs[ECSPI_STATREG] & ECSPI_STATREG_TC)) {
+        /* A physical controller cannot finish a serial burst instantly. */
+        s->regs[ECSPI_STATREG] &= ~ECSPI_STATREG_TC;
+        s->regs[ECSPI_CONREG] |= ECSPI_CONREG_XCH;
+        s->transfer_reads_remaining = s->transfer_completion_reads;
+    }
+
     /* TODO: We should also use TDR and RDR bits */
 
     DPRINTF("End: TX Fifo Size = %d, RX Fifo Size = %d\n",
@@ -266,6 +282,7 @@ static void imx_spi_common_reset(IMXSPIState *s)
     imx_spi_txfifo_reset(s);
 
     s->burst_length = 0;
+    s->transfer_reads_remaining = 0;
 }
 
 static void imx_spi_soft_reset(IMXSPIState *s)
@@ -318,6 +335,11 @@ static uint64_t imx_spi_read(void *opaque, hwaddr offset, unsigned size)
         qemu_log_mask(LOG_GUEST_ERROR, "[%s]%s: Bad register at offset 0x%"
                       HWADDR_PRIx "\n", TYPE_IMX_SPI, __func__, offset);
         return 0;
+    }
+
+    if (index == ECSPI_STATREG && s->transfer_reads_remaining &&
+        !--s->transfer_reads_remaining) {
+        imx_spi_transfer_complete(s);
     }
 
     value = s->regs[index];
@@ -527,6 +549,8 @@ static void imx_spi_realize(DeviceState *dev, Error **errp)
 
 static const Property imx_spi_properties[] = {
     DEFINE_PROP_BOOL("legacy-cspi", IMXSPIState, legacy_cspi, false),
+    DEFINE_PROP_UINT32("transfer-completion-reads", IMXSPIState,
+                       transfer_completion_reads, 0),
 };
 
 static void imx_spi_class_init(ObjectClass *klass, const void *data)
