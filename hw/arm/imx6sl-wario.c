@@ -48,6 +48,10 @@
 #define BOURBON_FB_WIDTH     600
 #define BOURBON_FB_HEIGHT    800
 #define BOURBON_FB_STRIDE    608
+#define PINOT_FB_ADDR        0x80c00000
+#define PINOT_FB_WIDTH       758
+#define PINOT_FB_HEIGHT      1024
+#define PINOT_FB_STRIDE      768
 #define WARIO_PXP_ADDR       0x020f0000
 /* Linux IRQ 130 minus the GIC SPI base (32). */
 #define WARIO_PXP_GIC_IRQ    98
@@ -85,6 +89,15 @@ static bool wario_is_bourbon(const WarioMachineState *wms)
      */
     return g_str_has_prefix(wms->idme_pcbsn, "051") ||
            g_str_has_prefix(wms->idme_pcbsn, "062");
+}
+
+static bool wario_is_pinot(const WarioMachineState *wms)
+{
+    /* 027/02e are Wi-Fi Pinot boards; 02a/02f are WAN variants. */
+    return g_str_has_prefix(wms->idme_pcbsn, "027") ||
+           g_ascii_strncasecmp(wms->idme_pcbsn, "02a", 3) == 0 ||
+           g_ascii_strncasecmp(wms->idme_pcbsn, "02e", 3) == 0 ||
+           g_ascii_strncasecmp(wms->idme_pcbsn, "02f", 3) == 0;
 }
 
 static void wario_firmware_reset(void *opaque)
@@ -241,6 +254,7 @@ static void wario_init(MachineState *machine)
     DeviceState *pmic;
     I2CBus *i2c;
     bool bourbon = wario_is_bourbon(wms);
+    bool pinot = wario_is_pinot(wms);
 
     if (machine->ram_size > WARIO_RAM_MAX) {
         error_report("RAM size " RAM_ADDR_FMT " exceeds i.MX6SL maximum",
@@ -322,6 +336,12 @@ static void wario_init(MachineState *machine)
         qdev_prop_set_uint32(epdc, "fb-width", BOURBON_FB_WIDTH);
         qdev_prop_set_uint32(epdc, "fb-height", BOURBON_FB_HEIGHT);
         qdev_prop_set_uint32(epdc, "fb-stride", BOURBON_FB_STRIDE);
+    } else if (pinot) {
+        /* Pinot's 256 MiB layout and 758x1024 E60 panel. */
+        qdev_prop_set_uint64(epdc, "fb-addr", PINOT_FB_ADDR);
+        qdev_prop_set_uint32(epdc, "fb-width", PINOT_FB_WIDTH);
+        qdev_prop_set_uint32(epdc, "fb-height", PINOT_FB_HEIGHT);
+        qdev_prop_set_uint32(epdc, "fb-stride", PINOT_FB_STRIDE);
     } else {
         /* Icewine's fixed 512 MiB layout places the framebuffer here. */
         qdev_prop_set_uint64(epdc, "fb-addr", WARIO_FB_ADDR);
