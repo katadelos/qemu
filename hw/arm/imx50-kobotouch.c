@@ -127,9 +127,6 @@ static void kobotouch_init(MachineState *machine)
 
     soc = FSL_IMX50(object_new(TYPE_FSL_IMX50));
     object_property_add_child(OBJECT(machine), "soc", OBJECT(soc));
-    /* Trilogy stores RGB888 pixels in fb0's 32-bit XRGB container. */
-    object_property_set_bool(OBJECT(soc), "pxp-rgb888-xrgb32", true,
-                             &error_fatal);
     /* PxP already rotates Kobo's portrait framebuffer into panel scan order. */
     object_property_set_bool(OBJECT(&soc->epdc), "rotate-ccw", false,
                              &error_fatal);
