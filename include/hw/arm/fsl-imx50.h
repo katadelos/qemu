@@ -12,6 +12,7 @@
 #include "hw/ssi/imx_spi.h"
 #include "hw/timer/imx_epit.h"
 #include "hw/timer/imx_gpt.h"
+#include "hw/usb/chipidea.h"
 #include "hw/watchdog/wdt_imx2.h"
 #include "cpu.h"
 
@@ -36,6 +37,8 @@ struct FslIMX50State {
     IMXGPIOState gpio[FSL_IMX50_NUM_GPIOS];
     SDHCIState esdhc[FSL_IMX50_NUM_ESDHC];
     IMXSPIState spi[FSL_IMX50_NUM_SPI];
+    ChipideaState usb_otg;
+    ChipideaState usb_h1;
     IMX2WdtState wdt;
     IMX50EPDCState epdc;
     MemoryRegion iram;
@@ -46,6 +49,7 @@ struct FslIMX50State {
     MemoryRegion pxp_iomem;
     qemu_irq sdma_irq;
     qemu_irq pxp_irq;
+    QEMUTimer *pxp_completion_timer;
     uint32_t databahn[0x400 / 4];
     uint32_t sdma[0x1000 / 4];
     uint32_t srtc[0x40 / 4];

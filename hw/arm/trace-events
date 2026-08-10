@@ -1,5 +1,12 @@
 # See docs/devel/tracing.rst for syntax documentation.
 
+# fsl-imx50.c
+whitney_pxp_begin(unsigned src_width, unsigned src_height, unsigned result_width, unsigned result_height) "source=%ux%u result=%ux%u"
+whitney_pxp_process(unsigned src_width, unsigned src_height, unsigned result_width, unsigned result_height, int64_t duration_ns) "source=%ux%u result=%ux%u duration=%"PRId64"ns"
+
+# imx50-yoshi.c
+whitney_heartbeat(int64_t host_ns, int64_t virtual_ns, uint64_t pc, bool halted) "host=%"PRId64"ns virtual=%"PRId64"ns pc=0x%"PRIx64" halted=%d"
+
 # omap1.c
 omap1_pwl_clocking_scheme(const char *scheme) "omap1 CLKM: clocking scheme set to %s"
 omap1_pwl_backlight(int output) "omap1 PWL: backlight now at %d/256"

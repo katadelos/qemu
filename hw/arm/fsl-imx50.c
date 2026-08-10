@@ -5,10 +5,12 @@
 #include "hw/arm/fsl-imx50.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/misc/unimp.h"
+#include "qemu/timer.h"
 #include "qemu/module.h"
 #include "system/dma.h"
 #include "system/system.h"
 #include "target/arm/cpu-qom.h"
+#include "trace.h"
 
 #define IMX50_ESDHC_CAPABILITIES 0x07e20000
 #define IMX50_SDMA_C0PTR         0x00
@@ -24,6 +26,16 @@
 #define IMX50_ANATOP_FRAC0        0x10
 #define IMX50_ANATOP_FRAC1        0x20
 #define IMX50_ANATOP_PLLCTRL      0x70
+#define IMX50_DATABAHN_CTL19       0x4c
+#define IMX50_DATABAHN_CTL20       0x50
+#define IMX50_DATABAHN_CTL42       0xa8
+#define IMX50_DATABAHN_CTL63       0xfc
+#define IMX50_DATABAHN_CTL79       0x13c
+#define IMX50_DATABAHN_SELF_REFRESH (1U << 0)
+#define IMX50_DATABAHN_LPM_MODE    0x1fU
+#define IMX50_DATABAHN_DLL_LOCKED  (1U << 8)
+#define IMX50_DATABAHN_CKE         (1U << 16)
+#define IMX50_DATABAHN_BUSY        (1U << 8)
 #define IMX50_PXP_CTRL            0x000
 #define IMX50_PXP_STAT            0x010
 #define IMX50_PXP_OUTBUF          0x020
@@ -97,7 +109,16 @@ static void imx50_sdma_write(void *opaque, hwaddr offset, uint64_t value,
             unsigned channel = ctz32(channels);
 
             channels &= channels - 1;
-            imx50_sdma_complete(s, channel);
+            /*
+             * Channel 0 carries the host-to-SDMA control protocol used by
+             * the legacy Freescale I.API during setup.  We can acknowledge
+             * those commands without executing SDMA scripts.  Claiming
+             * completion for a peripheral channel is unsafe, however: its
+             * callback assumes that the requested transfer really happened.
+             */
+            if (channel == 0) {
+                imx50_sdma_complete(s, channel);
+            }
         }
         break;
     case IMX50_SDMA_RESET:
@@ -149,6 +170,7 @@ static void imx50_pxp_process(FslIMX50State *s)
     unsigned result_height;
     g_autofree uint8_t *input = NULL;
     g_autofree uint8_t *result = NULL;
+    int64_t started_ns;
     unsigned x, y;
 
     /*
@@ -194,6 +216,9 @@ static void imx50_pxp_process(FslIMX50State *s)
         result_height = out_height;
     }
 
+    trace_whitney_pxp_begin(src_width, src_height,
+                            result_width, result_height);
+    started_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     input = g_malloc((size_t)src_width * src_height * input_bpp);
     result = g_malloc0((size_t)result_width * result_height);
     if (dma_memory_read(&address_space_memory, source, input,
@@ -248,6 +273,10 @@ static void imx50_pxp_process(FslIMX50State *s)
     dma_memory_write(&address_space_memory, output, result,
                      (size_t)result_width * result_height,
                      MEMTXATTRS_UNSPECIFIED);
+    trace_whitney_pxp_process(src_width, src_height,
+                              result_width, result_height,
+                              qemu_clock_get_ns(QEMU_CLOCK_REALTIME) -
+                              started_ns);
 }
 
 static uint64_t imx50_pxp_read(void *opaque, hwaddr offset, unsigned size)
@@ -264,6 +293,20 @@ static uint64_t imx50_pxp_read(void *opaque, hwaddr offset, unsigned size)
         return value;
     }
     return s->pxp[offset / 4];
+}
+
+static void imx50_pxp_complete(void *opaque)
+{
+    FslIMX50State *s = opaque;
+    uint32_t *ctrl = &s->pxp[IMX50_PXP_CTRL / 4];
+
+    if (!(*ctrl & IMX50_PXP_CTRL_ENABLE)) {
+        return;
+    }
+    imx50_pxp_process(s);
+    *ctrl &= ~IMX50_PXP_CTRL_ENABLE;
+    s->pxp[IMX50_PXP_STAT / 4] |= IMX50_PXP_STAT_IRQ;
+    imx50_pxp_update_irq(s);
 }
 
 static void imx50_pxp_write(void *opaque, hwaddr offset, uint64_t value,
@@ -302,11 +345,12 @@ static void imx50_pxp_write(void *opaque, hwaddr offset, uint64_t value,
     if (base == IMX50_PXP_CTRL && (*reg & IMX50_PXP_CTRL_ENABLE)) {
         /*
          * The stock display path uses PxP to crop/rotate its grayscale
-         * framebuffer into a transient EPDC update buffer.
+         * framebuffer into a transient EPDC update buffer.  Completion must
+         * be asynchronous: the DMA driver finishes publishing its active
+         * descriptor after writing CTRL.ENABLE.
          */
-        imx50_pxp_process(s);
-        *reg &= ~IMX50_PXP_CTRL_ENABLE;
-        s->pxp[IMX50_PXP_STAT / 4] |= IMX50_PXP_STAT_IRQ;
+        timer_mod(s->pxp_completion_timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1000000);
     }
 
     if (base == IMX50_PXP_CTRL || base == IMX50_PXP_STAT) {
@@ -400,8 +444,28 @@ static uint64_t imx50_databahn_read(void *opaque, hwaddr offset,
     FslIMX50State *s = opaque;
     uint32_t value = s->databahn[offset / 4];
 
-    /* CTL42.INT_STATUS: DRAM initialization has completed. */
-    return offset == 0xa8 ? value | 0x10 : value;
+    switch (offset) {
+    case IMX50_DATABAHN_CTL42:
+        /* DRAM initialization and DLL relock complete immediately. */
+        return value | 0x10 | IMX50_DATABAHN_DLL_LOCKED;
+    case IMX50_DATABAHN_CTL63:
+        /*
+         * CKE follows the self-refresh request.  The IRAM frequency-change
+         * routine polls both transitions with normal memory inaccessible.
+         */
+        if ((s->databahn[IMX50_DATABAHN_CTL19 / 4] &
+             IMX50_DATABAHN_SELF_REFRESH) ||
+            (s->databahn[IMX50_DATABAHN_CTL20 / 4] &
+             IMX50_DATABAHN_LPM_MODE)) {
+            return value & ~IMX50_DATABAHN_CKE;
+        }
+        return value | IMX50_DATABAHN_CKE;
+    case IMX50_DATABAHN_CTL79:
+        /* No outstanding DRAM transaction. */
+        return value & ~IMX50_DATABAHN_BUSY;
+    default:
+        return value;
+    }
 }
 
 static void imx50_databahn_write(void *opaque, hwaddr offset, uint64_t value,
@@ -459,6 +523,8 @@ static void fsl_imx50_init(Object *obj)
         snprintf(name, sizeof(name), "spi%u", i + 1);
         object_initialize_child(obj, name, &s->spi[i], TYPE_IMX_SPI);
     }
+    object_initialize_child(obj, "usb-otg", &s->usb_otg, TYPE_CHIPIDEA);
+    object_initialize_child(obj, "usb-h1", &s->usb_h1, TYPE_CHIPIDEA);
     object_initialize_child(obj, "wdt", &s->wdt, TYPE_IMX2_WDT);
     object_initialize_child(obj, "epdc", &s->epdc, TYPE_IMX50_EPDC);
 }
@@ -604,6 +670,24 @@ static void fsl_imx50_realize(DeviceState *dev, Error **errp)
                           &imx50_anatop_ops, s, "imx50.anatop", 0x100);
     memory_region_add_subregion(get_system_memory(), 0x41018000,
                                 &s->anatop_iomem);
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->usb_otg), errp)) {
+        return;
+    }
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->usb_otg), 0, 0x53f80000);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->usb_otg), 0,
+                       qdev_get_gpio_in(DEVICE(&s->tzic), 18));
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->usb_h1), errp)) {
+        return;
+    }
+    /*
+     * Lab126 registers Host 1 at OTG_BASE + 0x200 with its own IRQ.  The
+     * ChipIdea sysbus region is larger than the i.MX platform resource, so
+     * give this instance priority over the overlapping tail of USB OTG.
+     */
+    sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&s->usb_h1), 0,
+                            0x53f80200, 1);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->usb_h1), 0,
+                       qdev_get_gpio_in(DEVICE(&s->tzic), 14));
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->epdc), errp)) {
         return;
     }
@@ -611,6 +695,8 @@ static void fsl_imx50_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->epdc), 0,
                        qdev_get_gpio_in(DEVICE(&s->tzic), 27));
     s->pxp_irq = qdev_get_gpio_in(DEVICE(&s->tzic), 21);
+    s->pxp_completion_timer =
+        timer_new_ns(QEMU_CLOCK_VIRTUAL, imx50_pxp_complete, s);
     memory_region_init_io(&s->pxp_iomem, OBJECT(dev), &imx50_pxp_ops, s,
                           "imx50.pxp", 0x1000);
     memory_region_add_subregion(get_system_memory(), 0x4100c000,
