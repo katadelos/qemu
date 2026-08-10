@@ -288,6 +288,7 @@ static const Property imx_gpio_properties[] = {
     DEFINE_PROP_BOOL("has-edge-sel", IMXGPIOState, has_edge_sel, true),
     DEFINE_PROP_BOOL("has-upper-pin-irq", IMXGPIOState, has_upper_pin_irq,
                      false),
+    DEFINE_PROP_UINT32("reset-psr", IMXGPIOState, reset_psr, 0),
 };
 
 static void imx_gpio_reset(DeviceState *dev)
@@ -296,7 +297,7 @@ static void imx_gpio_reset(DeviceState *dev)
 
     s->dr       = 0;
     s->gdir     = 0;
-    s->psr      = 0;
+    s->psr      = s->reset_psr;
     s->icr      = 0;
     s->imr      = 0;
     s->isr      = 0;
