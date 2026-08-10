@@ -9,6 +9,7 @@
 
 #define MMDC_SIZE   0x4000
 #define MDSCR       0x001c
+#define MDMISC      0x0018
 #define MDMRR       0x0034
 #define MAPSR       0x0404
 #define MPRDDLCTL   0x083c
@@ -18,6 +19,7 @@
 #define MDSCR_MRR_VALID (1U << 10)
 #define MAPSR_DVFS      (1U << 21)
 #define MAPSR_DVACK     (1U << 25)
+#define MAPSR_PSS       (1U << 4)
 #define MPMUR0_FRC_MSR  (1U << 11)
 #define MPRDDLCTL_RST_RD_FIFO (1U << 31)
 
@@ -98,6 +100,10 @@ static void imx6sl_mmdc_reset(DeviceState *dev)
     IMX6SLMMDCState *s = IMX6SL_MMDC(dev);
 
     memset(s->regs, 0, sizeof(s->regs));
+    /* Rex boot firmware configures Hynix LPDDR3 with this MDMISC value. */
+    s->regs[MDMISC >> 2] = 0x00201718;
+    /* Automatic power saving is immediately active in the timing-free model. */
+    s->regs[MAPSR >> 2] = MAPSR_PSS;
 }
 
 static void imx6sl_mmdc_init(Object *obj)
