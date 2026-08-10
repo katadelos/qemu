@@ -38,6 +38,9 @@
 #define IMX50_PXP_STAT_IRQ        (1U << 0)
 #define IMX50_PXP_LUT_BYPASS      (1U << 31)
 #define IMX50_PXP_MAX_DIMENSION   2048
+#define IMX50_PXP_RGB888          1
+#define IMX50_PXP_YUV420          9
+#define IMX50_PXP_MONOC8          8
 
 static void imx50_sdma_complete(FslIMX50State *s, unsigned channel)
 {
@@ -141,6 +144,7 @@ static void imx50_pxp_process(FslIMX50State *s)
     unsigned rotation = extract32(ctrl, 8, 2);
     unsigned input_format = extract32(ctrl, 12, 4);
     unsigned output_format = extract32(ctrl, 4, 4);
+    unsigned input_bpp;
     unsigned result_width;
     unsigned result_height;
     g_autofree uint8_t *input = NULL;
@@ -148,9 +152,9 @@ static void imx50_pxp_process(FslIMX50State *s)
     unsigned x, y;
 
     /*
-     * Tequila's EPDC path programs PxP as an 8-bit GREY (Y-plane) source
-     * and MONOC8 output.  Implement that path, including the crop and four
-     * orthogonal rotations used by fb_var_screeninfo.
+     * The EPDC driver uses MONOC8 output.  Kobo's stock kernel supplies an
+     * RGB888 framebuffer, whereas other i.MX50 EPDC kernels use the Y plane
+     * of a YUV420 buffer.  Both paths use the same crop/rotation machinery.
      */
     if (!source || !output || !out_width || !out_height ||
         !src_width || !src_height ||
@@ -158,9 +162,13 @@ static void imx50_pxp_process(FslIMX50State *s)
         src_height > IMX50_PXP_MAX_DIMENSION ||
         out_width > IMX50_PXP_MAX_DIMENSION ||
         out_height > IMX50_PXP_MAX_DIMENSION ||
-        input_format != 9 || output_format != 8) {
+        (input_format != IMX50_PXP_RGB888 &&
+         input_format != IMX50_PXP_YUV420) ||
+        output_format != IMX50_PXP_MONOC8) {
         return;
     }
+    input_bpp = input_format == IMX50_PXP_RGB888 ?
+                (s->pxp_rgb888_xrgb32 ? 4 : 3) : 1;
     if (!crop_width) {
         crop_width = src_width;
     }
@@ -186,10 +194,10 @@ static void imx50_pxp_process(FslIMX50State *s)
         result_height = out_height;
     }
 
-    input = g_malloc((size_t)src_width * src_height);
+    input = g_malloc((size_t)src_width * src_height * input_bpp);
     result = g_malloc0((size_t)result_width * result_height);
     if (dma_memory_read(&address_space_memory, source, input,
-                        (size_t)src_width * src_height,
+                        (size_t)src_width * src_height * input_bpp,
                         MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
         return;
     }
@@ -217,7 +225,17 @@ static void imx50_pxp_process(FslIMX50State *s)
                 break;
             }
             if (sx < src_width && sy < src_height) {
-                uint8_t gray = input[(size_t)sy * src_width + sx];
+                uint8_t gray;
+
+                if (input_format == IMX50_PXP_RGB888) {
+                    const uint8_t *pixel = input +
+                        ((size_t)sy * src_width + sx) * input_bpp;
+
+                    /* The guest's RGB byte order is irrelevant to a mean. */
+                    gray = ((unsigned)pixel[0] + pixel[1] + pixel[2]) / 3;
+                } else {
+                    gray = input[(size_t)sy * src_width + sx];
+                }
 
                 if (!(s->pxp[IMX50_PXP_LUT_CTRL / 4] &
                       IMX50_PXP_LUT_BYPASS)) {
@@ -407,6 +425,11 @@ static void fsl_imx50_init(Object *obj)
     unsigned i;
     char name[12];
 
+    /* PxP's power-on LUT is a pass-through table, not an all-black map. */
+    for (i = 0; i < ARRAY_SIZE(s->pxp_lut); i++) {
+        s->pxp_lut[i] = i;
+    }
+
     object_initialize_child(obj, "cpu", &s->cpu,
                             ARM_CPU_TYPE_NAME("cortex-a8"));
     object_initialize_child(obj, "tzic", &s->tzic, TYPE_IMX_TZIC);
@@ -595,12 +618,19 @@ static void fsl_imx50_realize(DeviceState *dev, Error **errp)
     fsl_imx50_map_unimplemented();
 }
 
+static const Property fsl_imx50_properties[] = {
+    DEFINE_PROP_BOOL("pxp-rgb888-xrgb32", FslIMX50State,
+                     pxp_rgb888_xrgb32, false),
+};
+
 static void fsl_imx50_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
+
     dc->realize = fsl_imx50_realize;
     dc->desc = "Freescale i.MX50 / i.MX508 SoC";
     dc->user_creatable = false;
+    device_class_set_props(dc, fsl_imx50_properties);
 }
 static const TypeInfo fsl_imx50_info = {
     .name = TYPE_FSL_IMX50, .parent = TYPE_DEVICE,
