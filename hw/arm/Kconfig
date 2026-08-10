@@ -203,7 +203,51 @@ config IMX6SL_WARIO
     default y
     depends on TCG && ARM
     select FSL_IMX6
+    select NEONODE_ZFORCE
     select SD
+
+config IMX6SLL_REX
+    bool
+    default y
+    depends on TCG && ARM
+    select FSL_IMX6
+    select IMX6SL_WARIO
+    select SD
+    select SSI_M25P80
+
+config MT8113
+    bool
+    select ARM_GIC
+    select MT8113_GPIO
+    select MTK_I2C
+    select MTK_MSDC
+    select SERIAL_MM
+
+config MT8113_COLOURSOFT
+    bool
+    default y
+    depends on TCG && AARCH64
+    select MT8113
+
+config IMX50_YOSHI
+    bool
+    default y
+    depends on TCG && ARM
+    select FSL_IMX50
+    select NEONODE_ZFORCE
+    select SD
+
+config IMX50_KOBOTOUCH
+    bool
+    default y
+    depends on TCG && ARM
+    select FSL_IMX50
+    select NEONODE_ZFORCE
+    select SD
+
+config NEONODE_ZFORCE
+    bool
+    depends on I2C
 
 config STELLARIS
     bool
@@ -502,7 +546,6 @@ config FSL_IMX25
     select IMX
     select IMX_FEC
     select IMX_I2C
-    select USB_CHIPIDEA
     select WDT_IMX2
     select SDHCI
 
@@ -532,6 +575,16 @@ config FSL_IMX6
     select SDHCI
     select USB_CHIPIDEA
     select OR_IRQ
+
+config FSL_IMX50
+    bool
+    imply I2C_DEVICES
+    select IMX
+    select IMX_I2C
+    select IMX_TZIC
+    select SDHCI
+    select USB_CHIPIDEA
+    select WDT_IMX2
 
 config ASPEED_SOC
     bool

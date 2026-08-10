@@ -19,6 +19,11 @@ arm_common_ss.add(when: 'CONFIG_STM32VLDISCOVERY', if_true: files('stm32vldiscov
 arm_common_ss.add(when: 'CONFIG_ZYNQ', if_true: files('xilinx_zynq.c'))
 arm_common_ss.add(when: 'CONFIG_SABRELITE', if_true: files('sabrelite.c'))
 arm_common_ss.add(when: 'CONFIG_IMX6SL_WARIO', if_true: files('imx6sl-wario.c'))
+arm_common_ss.add(when: 'CONFIG_IMX6SLL_REX', if_true: files('imx6sll-rex.c'))
+arm_common_ss.add(when: 'CONFIG_MT8113', if_true: files('mt8113.c'))
+arm_common_ss.add(when: 'CONFIG_MT8113_COLOURSOFT', if_true: files('mt8113-coloursoft.c'))
+arm_common_ss.add(when: 'CONFIG_IMX50_YOSHI', if_true: files('imx50-yoshi.c'))
+arm_common_ss.add(when: 'CONFIG_IMX50_KOBOTOUCH', if_true: files('imx50-kobotouch.c'))
 
 arm_common_ss.add(when: 'CONFIG_ARM_V7M', if_true: files('armv7m.c'))
 arm_common_ss.add(when: 'CONFIG_EXYNOS4', if_true: files('exynos4210.c'))
@@ -40,6 +45,7 @@ arm_common_ss.add(when: 'CONFIG_XLNX_VERSAL', if_true: files('xlnx-versal.c', 'x
 arm_common_ss.add(when: 'CONFIG_FSL_IMX25', if_true: files('fsl-imx25.c', 'imx25_pdk.c'))
 arm_common_ss.add(when: 'CONFIG_FSL_IMX31', if_true: files('fsl-imx31.c', 'kzm.c'))
 arm_common_ss.add(when: 'CONFIG_FSL_IMX6', if_true: files('fsl-imx6.c'))
+arm_common_ss.add(when: 'CONFIG_FSL_IMX50', if_true: files('fsl-imx50.c'))
 arm_ss.add(when: 'CONFIG_ASPEED_SOC', if_true: files(
   'aspeed.c',
   'aspeed_soc_common.c',
