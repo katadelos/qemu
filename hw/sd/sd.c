@@ -458,7 +458,7 @@ static void ar6003_wmi_ready(SDState *sd)
     stl_le_p(event + 6, 0x3400009e); /* firmware 3.4.0.158 */
     stl_le_p(event + 10, 1);       /* ATH6KL_ABI_VERSION */
     memcpy(event + 14, sd->sdio_nic_conf.macaddr.a, 6);
-    event[20] = 0x01;              /* 2.4 GHz capability */
+    event[20] = 0x02;              /* WMI_11G_CAPABILITY */
     ar6003_htc_packet(sd, 1, event, sizeof(event));
 }
 
@@ -599,6 +599,12 @@ static void ar6003_wmi_scan_results(SDState *sd, uint8_t credit_ep,
     bss[3] = 55; /* -40 dBm */
     bss[4] = 0x02;
     bss[9] = 0x02;
+    /*
+     * Lab126's multi-device AR6003 driver uses the high nibble of ieMask as
+     * a device bitmap and asserts that the primary device is selected.
+     * Upstream ath6kl ignores these otherwise-unused high bits.
+     */
+    stw_le_p(bss + 10, 0x1000);
     /* Timestamp, beacon interval and capability follow the BSS header. */
     stw_le_p(bss + pos + 8, 100);
     stw_le_p(bss + pos + 10, 0x0001); /* ESS, open network */
@@ -698,12 +704,21 @@ static void ar6003_htc_command(SDState *sd, const uint8_t *buf, size_t len)
             return;
         }
         trace_ar6003_wmi_command(msg_id);
-        if (msg_id == 0xf08b) { /* WMI_BEGIN_SCAN_CMDID */
+        if (msg_id == 0xf08b || msg_id == 0x0007) {
+            /* WMI_BEGIN_SCAN_CMDID (ath6kl) / WMI_START_SCAN_CMDID */
             sd->sdio_scan_credit_ep = buf[0];
             sd->sdio_scan_credits = credits;
             timer_mod(sd->sdio_scan_timer,
-                      qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 250);
+                      qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 10);
         } else {
+            if (msg_id == 0x000e) { /* WMI_GET_CHANNEL_LIST_CMDID */
+                uint8_t channels[] = {
+                    0, 1,       /* reserved, number of channels */
+                    0x6c, 0x09, /* 2412 MHz, little endian */
+                };
+
+                ar6003_wmi_event(sd, msg_id, channels, sizeof(channels));
+            }
             ar6003_htc_credit(sd, buf[0], credits);
             if (msg_id == 1) { /* WMI_CONNECT_CMDID */
                 timer_mod(sd->sdio_connect_timer,
