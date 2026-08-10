@@ -377,6 +377,13 @@ static void ar6003_update_irq(SDState *sd)
     qemu_set_irq(sd->sdio_irq, pending);
 }
 
+static bool ar6003_function_irq_pending(SDState *sd)
+{
+    return sd->sdio_powered && sd->sdio_bmi_done &&
+           ar6003_rx_pending(sd) &&
+           (*ar6003_target_ptr(sd, 0x418) & 1);
+}
+
 static uint32_t ar6003_target_ldl(SDState *sd, uint32_t addr)
 {
     uint8_t data[4];
@@ -507,6 +514,7 @@ static void ar6003_wmi_event(SDState *sd, uint16_t id,
     if (len > sizeof(event) - 6) {
         return;
     }
+    trace_ar6003_wmi_event(id, len);
     stw_le_p(event, id);
     memcpy(event + 6, data, len);
     ar6003_htc_packet(sd, 1, event, len + 6);
@@ -659,8 +667,7 @@ static void ar6003_wmi_scan_timer(void *opaque)
 static void ar6003_wmi_connect_timer(void *opaque)
 {
     SDState *sd = opaque;
-    /* API 4 advertises the large-connect-IE event with 16-bit lengths. */
-    uint8_t event[32] = { 0 };
+    uint8_t event[20] = { 0 };
 
     if (ar6003_rx_pending(sd)) {
         timer_mod(sd->sdio_connect_timer,
@@ -670,12 +677,8 @@ static void ar6003_wmi_connect_timer(void *opaque)
     stw_le_p(event, 2412);
     event[2] = 0x02;
     event[7] = 0x02;
-    stw_le_p(event + 8, 100);
-    stw_le_p(event + 10, 100);
     stl_le_p(event + 12, 1); /* INFRA_NETWORK */
-    stw_le_p(event + 16, 0); /* beacon IE length */
-    stw_le_p(event + 18, 4); /* assoc request fixed fields */
-    stw_le_p(event + 20, 6); /* assoc response fixed fields */
+    /* beaconIeLen, assocReqLen and assocRespLen remain zero. */
     ar6003_wmi_event(sd, 0x1002, event, sizeof(event));
 }
 
@@ -693,6 +696,7 @@ static void ar6003_htc_command(SDState *sd, const uint8_t *buf, size_t len)
         return;
     }
     msg_id = lduw_le_p(buf + 6);
+    trace_ar6003_htc_command(buf[0], msg_id, payload_len);
     if (buf[0] != 0) {
         uint8_t credits = DIV_ROUND_UP(payload_len + 6, 256);
 
@@ -883,7 +887,7 @@ static uint8_t ar6003_sdio_readb(SDState *sd, unsigned function,
     case 0x02: return sd->sdio_io_enable;
     case 0x03: return sd->sdio_io_enable;
     case 0x04: return sd->sdio_int_enable;
-    case 0x05: return 0;
+    case 0x05: return ar6003_function_irq_pending(sd) ? 0x02 : 0;
     case 0x07: return sd->sdio_bus_if;
     case 0x08: return 0x1e; /* SMB, SRW, SBS and S4MI */
     case 0x09: return extract32(AR6003_SDIO_CIS0, 0, 8);
@@ -917,6 +921,7 @@ static void ar6003_sdio_writeb(SDState *sd, unsigned function,
     switch (addr) {
     case 0x02:
         sd->sdio_io_enable = value & 0x02;
+        ar6003_update_irq(sd);
         break;
     case 0x04:
         sd->sdio_int_enable = value & 0x03;
@@ -925,6 +930,7 @@ static void ar6003_sdio_writeb(SDState *sd, unsigned function,
     case 0x06:
         if (value & 0x08) {
             sd->sdio_io_enable = 0;
+            ar6003_update_irq(sd);
         }
         break;
     case 0x07:
@@ -941,6 +947,7 @@ static void ar6003_sdio_writeb(SDState *sd, unsigned function,
         break;
     case 0xf0:
         sd->sdio_irq_mode = value & 1;
+        ar6003_update_irq(sd);
         break;
     default:
         break;
