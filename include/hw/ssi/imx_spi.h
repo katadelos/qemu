@@ -102,6 +102,7 @@ struct IMXSPIState {
     Fifo32 tx_fifo;
 
     int16_t burst_length;
+    bool legacy_cspi;
 };
 
 #endif /* IMX_SPI_H */

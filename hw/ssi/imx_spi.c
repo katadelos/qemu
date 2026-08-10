@@ -9,6 +9,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/core/irq.h"
 #include "hw/ssi/imx_spi.h"
 #include "migration/vmstate.h"
@@ -89,6 +90,7 @@ static void imx_spi_rxfifo_reset(IMXSPIState *s)
 static void imx_spi_update_irq(IMXSPIState *s)
 {
     int level;
+    unsigned rx_count = fifo32_num_used(&s->rx_fifo);
 
     if (fifo32_is_empty(&s->rx_fifo)) {
         s->regs[ECSPI_STATREG] &= ~ECSPI_STATREG_RR;
@@ -114,6 +116,10 @@ static void imx_spi_update_irq(IMXSPIState *s)
         s->regs[ECSPI_STATREG] &= ~ECSPI_STATREG_TF;
     }
 
+    /* eCSPI TESTREG.RX_CNT mirrors the number of words in the RX FIFO. */
+    s->regs[ECSPI_TESTREG] =
+        deposit32(s->regs[ECSPI_TESTREG], 8, 7, rx_count);
+
     level = s->regs[ECSPI_STATREG] & s->regs[ECSPI_INTREG] ? 1 : 0;
 
     qemu_set_irq(s->irq, level);
@@ -123,6 +129,9 @@ static void imx_spi_update_irq(IMXSPIState *s)
 
 static uint8_t imx_spi_selected_channel(IMXSPIState *s)
 {
+    if (s->legacy_cspi) {
+        return extract32(s->regs[ECSPI_CONREG], 12, 2);
+    }
     return EXTRACT(s->regs[ECSPI_CONREG], ECSPI_CONREG_CHANNEL_SELECT);
 }
 
@@ -145,6 +154,9 @@ static bool imx_spi_is_enabled(IMXSPIState *s)
 
 static bool imx_spi_channel_is_master(IMXSPIState *s)
 {
+    if (s->legacy_cspi) {
+        return s->regs[ECSPI_CONREG] & ECSPI_CONREG_HT;
+    }
     uint8_t mode = EXTRACT(s->regs[ECSPI_CONREG], ECSPI_CONREG_CHANNEL_MODE);
 
     return (mode & (1 << imx_spi_selected_channel(s))) ? true : false;
@@ -283,6 +295,25 @@ static uint64_t imx_spi_read(void *opaque, hwaddr offset, unsigned size)
     IMXSPIState *s = opaque;
     uint32_t index = offset >> 2;
 
+    if (s->legacy_cspi) {
+        switch (offset) {
+        case 0x0c:
+            index = ECSPI_INTREG;
+            break;
+        case 0x14:
+            index = ECSPI_STATREG;
+            break;
+        case 0x18:
+            index = ECSPI_PERIODREG;
+            break;
+        case 0x1c:
+            index = ECSPI_TESTREG;
+            break;
+        default:
+            break;
+        }
+    }
+
     if (index >=  ECSPI_MAX) {
         qemu_log_mask(LOG_GUEST_ERROR, "[%s]%s: Bad register at offset 0x%"
                       HWADDR_PRIx "\n", TYPE_IMX_SPI, __func__, offset);
@@ -333,6 +364,25 @@ static void imx_spi_write(void *opaque, hwaddr offset, uint64_t value,
     uint32_t index = offset >> 2;
     uint32_t change_mask;
     uint32_t burst;
+
+    if (s->legacy_cspi) {
+        switch (offset) {
+        case 0x0c:
+            index = ECSPI_INTREG;
+            break;
+        case 0x14:
+            index = ECSPI_STATREG;
+            break;
+        case 0x18:
+            index = ECSPI_PERIODREG;
+            break;
+        case 0x1c:
+            index = ECSPI_TESTREG;
+            break;
+        default:
+            break;
+        }
+    }
 
     if (index >=  ECSPI_MAX) {
         qemu_log_mask(LOG_GUEST_ERROR, "[%s]%s: Bad register at offset 0x%"
@@ -475,6 +525,10 @@ static void imx_spi_realize(DeviceState *dev, Error **errp)
     fifo32_create(&s->rx_fifo, ECSPI_FIFO_SIZE);
 }
 
+static const Property imx_spi_properties[] = {
+    DEFINE_PROP_BOOL("legacy-cspi", IMXSPIState, legacy_cspi, false),
+};
+
 static void imx_spi_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -483,6 +537,7 @@ static void imx_spi_class_init(ObjectClass *klass, const void *data)
     dc->vmsd = &vmstate_imx_spi;
     device_class_set_legacy_reset(dc, imx_spi_reset);
     dc->desc = "i.MX SPI Controller";
+    device_class_set_props(dc, imx_spi_properties);
 }
 
 static const TypeInfo imx_spi_info = {
