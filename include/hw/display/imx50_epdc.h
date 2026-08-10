@@ -26,6 +26,7 @@ struct IMX50EPDCState {
     QemuConsole *console;
     uint32_t regs[IMX50_EPDC_MMIO_SIZE / sizeof(uint32_t)];
     uint32_t pending_luts;
+    bool rotate_ccw;
 };
 
 #endif

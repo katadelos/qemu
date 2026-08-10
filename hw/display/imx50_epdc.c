@@ -85,13 +85,12 @@ static DisplaySurface *imx50_epdc_prepare_surface(IMX50EPDCState *s,
     return surface;
 }
 
-static void imx50_epdc_render_update(IMX50EPDCState *s)
+static void imx50_epdc_render_update(IMX50EPDCState *s,
+                                     uint32_t source, uint32_t cord,
+                                     uint32_t size)
 {
     DisplaySurface *surface;
     g_autofree uint8_t *update = NULL;
-    uint32_t cord = *epdc_reg(s, EPDC_UPD_CORD);
-    uint32_t size = *epdc_reg(s, EPDC_UPD_SIZE);
-    uint32_t source = *epdc_reg(s, EPDC_UPD_ADDR);
     unsigned panel_width, panel_height;
     unsigned left = extract32(cord, 0, 13);
     unsigned top = extract32(cord, 16, 13);
@@ -127,22 +126,31 @@ static void imx50_epdc_render_update(IMX50EPDCState *s)
         return;
     }
 
-    /*
-     * E60_V220 is scanned in landscape order.  The Tequila product mounts
-     * that panel counter-clockwise and exposes a 600x800 portrait display.
-     */
+    /* The panel scan is landscape; boards select their physical mounting. */
     display_width = panel_height;
     display_height = panel_width;
     surface = imx50_epdc_prepare_surface(s, display_width, display_height);
-    display_left = top;
-    display_top = panel_width - left - width;
+    if (s->rotate_ccw) {
+        display_left = top;
+        display_top = panel_width - left - width;
+    } else {
+        display_left = panel_height - top - height;
+        display_top = left;
+    }
 
     for (y = 0; y < height; y++) {
         for (x = 0; x < width; x++) {
-            unsigned dest_x = top + y;
-            unsigned dest_y = panel_width - 1 - (left + x);
+            unsigned dest_x;
+            unsigned dest_y;
             uint8_t gray = update[(size_t)y * stride + x];
 
+            if (s->rotate_ccw) {
+                dest_x = top + y;
+                dest_y = panel_width - 1 - (left + x);
+            } else {
+                dest_x = panel_height - 1 - (top + y);
+                dest_y = left + x;
+            }
             pixels = (uint32_t *)((uint8_t *)surface_data(surface) +
                                   (size_t)dest_y * surface_stride(surface));
             pixels[dest_x] = 0xff000000U | gray * 0x00010101U;
@@ -169,9 +177,6 @@ static void imx50_epdc_wb_complete(void *opaque)
 {
     IMX50EPDCState *s = opaque;
 
-    if (!(*epdc_reg(s, EPDC_UPD_CTRL) & EPDC_UPD_CTRL_USE_FIXED)) {
-        imx50_epdc_render_update(s);
-    }
     *epdc_reg(s, EPDC_STATUS) &= ~EPDC_STATUS_WB_BUSY;
     *epdc_reg(s, EPDC_IRQ) |= EPDC_IRQ_WB_CMPLT;
     imx50_epdc_update_irq(s);
@@ -248,6 +253,16 @@ static void imx50_epdc_write(void *opaque, hwaddr offset, uint64_t value,
         unsigned lut = extract32(value, EPDC_UPD_LUT_SHIFT,
                                  ctpop32(EPDC_UPD_LUT_MASK));
 
+        /*
+         * PxP has completed before the guest submits this update.  Snapshot
+         * the DMA buffer now, before the driver can reuse the same LUT and
+         * transient output buffer for a later rectangle.
+         */
+        if (!(value & EPDC_UPD_CTRL_USE_FIXED)) {
+            imx50_epdc_render_update(s, *epdc_reg(s, EPDC_UPD_ADDR),
+                                     *epdc_reg(s, EPDC_UPD_CORD),
+                                     *epdc_reg(s, EPDC_UPD_SIZE));
+        }
         *epdc_reg(s, EPDC_STATUS) |= EPDC_STATUS_WB_BUSY;
         *epdc_reg(s, EPDC_STATUS_LUTS) |= 1U << lut;
         s->pending_luts |= 1U << lut;
@@ -326,6 +341,10 @@ static void imx50_epdc_init(Object *obj)
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
 }
 
+static const Property imx50_epdc_properties[] = {
+    DEFINE_PROP_BOOL("rotate-ccw", IMX50EPDCState, rotate_ccw, true),
+};
+
 static void imx50_epdc_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -335,6 +354,7 @@ static void imx50_epdc_class_init(ObjectClass *klass, const void *data)
     device_class_set_legacy_reset(dc, imx50_epdc_reset);
     dc->vmsd = &vmstate_imx50_epdc;
     dc->desc = "i.MX50 electrophoretic display controller";
+    device_class_set_props(dc, imx50_epdc_properties);
 }
 
 static const TypeInfo imx50_epdc_info = {
