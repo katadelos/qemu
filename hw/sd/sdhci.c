@@ -1325,6 +1325,18 @@ sdhci_write(void *opaque, hwaddr offset, uint64_t val, unsigned size)
         }
         s->norintsts &= mask | ~value;
         s->errintsts &= (mask >> 16) | ~(value >> 16);
+        /*
+         * A PIO multi-block read can fill the next FIFO block before an
+         * i.MX guest acknowledges RBUFRDY for the preceding block.  RBUFRDY
+         * is level-like while unread data remains available; do not let that
+         * acknowledgement hide the already-filled next block.  Kobolabs
+         * U-Boot waits for one RBUFRDY indication per block.
+         */
+        if ((value & SDHC_NIS_RBUFRDY) &&
+            (s->prnsts & SDHC_DATA_AVAILABLE) &&
+            (s->norintstsen & SDHC_NISEN_RBUFRDY)) {
+            s->norintsts |= SDHC_NIS_RBUFRDY;
+        }
         if (s->errintsts) {
             s->norintsts |= SDHC_NIS_ERR;
         } else {
