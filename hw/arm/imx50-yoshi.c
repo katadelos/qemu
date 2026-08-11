@@ -9,6 +9,7 @@
 #include "hw/core/loader.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/i2c/i2c.h"
+#include "hw/i2c/cyttsp.h"
 #include "hw/i2c/zforce.h"
 #include "hw/input/tequila-keyboard.h"
 #include "hw/sd/sd.h"
@@ -48,10 +49,12 @@
 #define TYPE_YOSHI_MACHINE MACHINE_TYPE_NAME("imx50-yoshi-base")
 #define TYPE_TEQUILA_MACHINE MACHINE_TYPE_NAME("imx50-tequila")
 #define TYPE_WHITNEY_MACHINE MACHINE_TYPE_NAME("imx50-whitney")
+#define TYPE_CELESTE_MACHINE MACHINE_TYPE_NAME("imx50-celeste")
 OBJECT_DECLARE_SIMPLE_TYPE(YoshiMachineState, YOSHI_MACHINE)
 
 #define TYPE_YOSHI_BATTERY "yoshi-battery"
 #define TYPE_WHITNEY_BATTERY "whitney-battery"
+#define TYPE_CELESTE_BATTERY "celeste-battery"
 OBJECT_DECLARE_SIMPLE_TYPE(YoshiBatteryState, YOSHI_BATTERY)
 
 #define TYPE_YOSHI_PAPYRUS "yoshi-papyrus"
@@ -66,6 +69,7 @@ struct YoshiBatteryState {
     uint8_t pointer;
     bool pointer_valid;
     bool whitney;
+    bool celeste;
 };
 
 struct YoshiPapyrusState {
@@ -94,6 +98,7 @@ struct YoshiMachineState {
     char *idme_bootmode;
     char *idme_postmode;
     bool whitney;
+    bool celeste;
     FslIMX50State *soc;
     QEMUTimer *diagnostic_timer;
 };
@@ -148,8 +153,8 @@ static void yoshi_battery_reset(DeviceState *dev)
     s->regs[0x10] = capacity_raw;
     s->regs[0x11] = capacity_raw >> 8;
     s->regs[0x2c] = 80;
-    /* Production Tequila and Whitney gauges have distinct accepted IDs. */
-    s->regs[0x7e] = s->whitney ? 8 : 12;
+    /* Production board families validate different one-wire resistor IDs. */
+    s->regs[0x7e] = s->celeste ? 10 : (s->whitney ? 8 : 12);
 }
 
 static int yoshi_battery_event(I2CSlave *i2c, enum i2c_event event)
@@ -227,6 +232,19 @@ static const TypeInfo whitney_battery_type = {
     .instance_init = whitney_battery_init,
 };
 
+static void celeste_battery_init(Object *obj)
+{
+    YoshiBatteryState *s = YOSHI_BATTERY(obj);
+
+    s->celeste = true;
+}
+
+static const TypeInfo celeste_battery_type = {
+    .name = TYPE_CELESTE_BATTERY,
+    .parent = TYPE_YOSHI_BATTERY,
+    .instance_init = celeste_battery_init,
+};
+
 static void yoshi_papyrus_reset(DeviceState *dev)
 {
     YoshiPapyrusState *s = YOSHI_PAPYRUS(dev);
@@ -236,6 +254,8 @@ static void yoshi_papyrus_reset(DeviceState *dev)
     s->regs[0x05] = 25;
     s->regs[0x07] = 0x45; /* TPS65180 product ID. */
     s->regs[0x10] = 0x01;
+    s->regs[0x0c] = 0x20;
+    s->regs[0x0d] = 0x20;
     s->pointer = 0;
     s->pointer_valid = false;
     qemu_set_irq(s->pwrgood, 0);
@@ -265,11 +285,13 @@ static int yoshi_papyrus_send(I2CSlave *i2c, uint8_t data)
     if (s->pointer == 0x01) {
         bool enabled = data & 0x80;
 
-        s->regs[0x0f] = enabled ? 1 : 0;
+        /* TPS65185/Papyrus V2 reports all expected rails as 0xfa. */
+        s->regs[0x0f] = enabled ? 0xfa : 0;
         qemu_set_irq(s->pwrgood, enabled);
-    } else if (s->pointer == 0x0c && (data & 0x80)) {
-        /* Temperature conversion completes immediately. */
-        s->regs[0x0c] |= 0x20;
+    } else if ((s->pointer == 0x0c || s->pointer == 0x0d) &&
+               (data & 0x80)) {
+        /* Support both Papyrus V1 (0x0c) and Celeste V2 (0x0d). */
+        s->regs[s->pointer] |= 0x20;
     }
     s->pointer++;
     return 0;
@@ -640,6 +662,25 @@ static void whitney_attach_input(FslIMX50State *soc)
         qemu_irq_invert(qdev_get_gpio_in(DEVICE(&soc->gpio[0]), 0)));
 }
 
+static void celeste_attach_input(FslIMX50State *soc)
+{
+    I2CSlave *cyttsp;
+
+    /*
+     * Production Celeste revisions use a Cypress Gen3 controller on the
+     * 400 kHz I2C3 bus.  KEY_COL1 (GPIO4_2) is the active-low interrupt and
+     * KEY_COL0 (GPIO4_0) drives the hardware reset sequence.
+     */
+    cyttsp = i2c_slave_create_simple(soc->i2c[2].bus, TYPE_CYTTSP, 0x24);
+    qdev_connect_gpio_out(DEVICE(cyttsp), 0,
+        qdev_get_gpio_in(DEVICE(&soc->gpio[3]), 2));
+    qdev_connect_gpio_out(DEVICE(&soc->gpio[3]), 0,
+        qdev_get_gpio_in(DEVICE(cyttsp), 0));
+
+    /* SD2_WP (GPIO5_16) is high while the magnetic cover is open. */
+    qemu_set_irq(qdev_get_gpio_in(DEVICE(&soc->gpio[4]), 16), 1);
+}
+
 static void yoshi_init(MachineState *machine)
 {
     YoshiMachineState *tms = YOSHI_MACHINE(machine);
@@ -657,19 +698,41 @@ static void yoshi_init(MachineState *machine)
         /* Whitney's 256 MiB mobile-DDR is reported in DATAbahn CTL0. */
         object_property_set_uint(OBJECT(soc), "ddr-type", 0x100,
                                  &error_fatal);
+    }
+    if (tms->whitney || tms->celeste) {
+        /* Whitney and Celeste mount the landscape panel scan clockwise. */
         object_property_set_bool(OBJECT(&soc->epdc), "rotate-ccw", false,
                                  &error_fatal);
+    }
+    if (tms->celeste) {
+        /*
+         * Celeste's stock stack keeps a portrait 8-bit shadow framebuffer;
+         * use it for host presentation while EPDC still owns update timing.
+         */
+        object_property_set_bool(OBJECT(&soc->epdc), "direct-framebuffer",
+                                 true, &error_fatal);
+        object_property_set_uint(OBJECT(&soc->epdc), "framebuffer-address",
+                                 0x75800000, &error_fatal);
+        object_property_set_uint(OBJECT(&soc->epdc), "framebuffer-stride",
+                                 768, &error_fatal);
+        object_property_set_uint(OBJECT(&soc->epdc), "framebuffer-width",
+                                 758, &error_fatal);
+        object_property_set_uint(OBJECT(&soc->epdc), "framebuffer-height",
+                                 1024, &error_fatal);
+        DEVICE(&soc->epdc)->id = g_strdup("celeste-epdc");
     }
     qdev_realize(DEVICE(soc), NULL, &error_fatal);
     memory_region_add_subregion(get_system_memory(), YOSHI_RAM_BASE,
                                 machine->ram);
 
-    i2c_slave_create_simple(soc->i2c[1].bus,
-                            tms->whitney ? TYPE_WHITNEY_BATTERY :
-                                           TYPE_YOSHI_BATTERY,
-                            0x55);
+    i2c_slave_create_simple(
+        soc->i2c[1].bus,
+        tms->celeste ? TYPE_CELESTE_BATTERY :
+        (tms->whitney ? TYPE_WHITNEY_BATTERY : TYPE_YOSHI_BATTERY),
+        0x55);
     papyrus = i2c_slave_create_simple(soc->i2c[1].bus,
-                                      TYPE_YOSHI_PAPYRUS, 0x48);
+                                      TYPE_YOSHI_PAPYRUS,
+                                      tms->celeste ? 0x68 : 0x48);
     qdev_connect_gpio_out_named(DEVICE(papyrus), "pwrgood", 0,
                                 qdev_get_gpio_in(DEVICE(&soc->gpio[2]), 28));
 
@@ -677,10 +740,12 @@ static void yoshi_init(MachineState *machine)
     yoshi_attach_emmc(soc, tms, 2, 0);
     yoshi_attach_wifi(soc);
     yoshi_attach_panel_flash(soc);
-    /* Tequila and Whitney both use the MC13892 system PMIC on CSPI3. */
+    /* The production Yoshi-family boards use MC13892 on CSPI3. */
     whitney_attach_pmic(soc);
     if (tms->whitney) {
         whitney_attach_input(soc);
+    } else if (tms->celeste) {
+        celeste_attach_input(soc);
     } else {
         tequila_attach_keyboard(soc);
     }
@@ -773,6 +838,19 @@ static void whitney_machine_instance_init(Object *obj)
     yoshi_idme_set(&tms->idme_pcbsn, "0060600000000001");
 }
 
+static void celeste_machine_instance_init(Object *obj)
+{
+    YoshiMachineState *tms = YOSHI_MACHINE(obj);
+
+    tms->celeste = true;
+    yoshi_idme_set(&tms->idme_serial, "B024000000000001");
+    yoshi_idme_set(&tms->idme_accel, "0");
+    yoshi_idme_set(&tms->idme_mac, "020000000004");
+    yoshi_idme_set(&tms->idme_sec, "00000000000000000000");
+    /* 00A10 is the production Celeste WFO 256 MiB EVT3 board family. */
+    yoshi_idme_set(&tms->idme_pcbsn, "00A1000000000001");
+}
+
 static void yoshi_machine_instance_finalize(Object *obj)
 {
     YoshiMachineState *tms = YOSHI_MACHINE(obj);
@@ -858,15 +936,33 @@ static const TypeInfo whitney_machine_type = {
     .class_init = whitney_machine_init,
 };
 
+static void celeste_machine_init(ObjectClass *oc, const void *data)
+{
+    MachineClass *mc = MACHINE_CLASS(oc);
+
+    mc->desc = "Amazon Kindle Paperwhite Celeste (i.MX508)";
+    mc->default_ram_size = 256 * MiB;
+    mc->default_ram_id = "celeste.ram";
+}
+
+static const TypeInfo celeste_machine_type = {
+    .name = TYPE_CELESTE_MACHINE,
+    .parent = TYPE_YOSHI_MACHINE,
+    .instance_init = celeste_machine_instance_init,
+    .class_init = celeste_machine_init,
+};
+
 static void yoshi_machine_register_types(void)
 {
     type_register_static(&yoshi_battery_type);
     type_register_static(&whitney_battery_type);
+    type_register_static(&celeste_battery_type);
     type_register_static(&yoshi_papyrus_type);
     type_register_static(&whitney_mma8453_type);
     type_register_static(&yoshi_machine_type);
     type_register_static(&tequila_machine_type);
     type_register_static(&whitney_machine_type);
+    type_register_static(&celeste_machine_type);
 }
 
 type_init(yoshi_machine_register_types)
