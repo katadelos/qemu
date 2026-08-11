@@ -1,10 +1,11 @@
 /*
- * Kobo Touch (Trilogy) board emulation.
+ * Kobo Touch (Trilogy) and Kobo Mini board emulation.
  *
  * The first-generation Kobo Touch stores U-Boot, its environment, the
  * Netronix hardware configuration, kernel, waveform and filesystems on an
  * internal SD card.  The ROM-loaded U-Boot image is supplied separately with
- * -bios while the reconstructed, partitioned card is attached to eSDHC1.
+ * -bios while the reconstructed, partitioned card is attached to the board's
+ * strapped eSDHC controller.
  */
 #include "qemu/osdep.h"
 #include "qapi/error.h"
@@ -17,6 +18,8 @@
 #include "hw/i2c/i2c.h"
 #include "hw/i2c/zforce.h"
 #include "hw/sd/sd.h"
+#include "hw/ssi/mc13892.h"
+#include "hw/ssi/ssi.h"
 #include "qemu/error-report.h"
 #include "qemu/module.h"
 #include "qemu/units.h"
@@ -32,10 +35,12 @@
 #define KOBOTOUCH_UBOOT_MAX      0x000c0000
 
 #define TYPE_KOBOTOUCH_MACHINE MACHINE_TYPE_NAME("imx50-kobotouch")
+#define TYPE_KOBOMINI_MACHINE MACHINE_TYPE_NAME("imx50-kobomini")
 OBJECT_DECLARE_SIMPLE_TYPE(KoboTouchMachineState, KOBOTOUCH_MACHINE)
 
 struct KoboTouchMachineState {
     MachineState parent_obj;
+    bool mini;
 };
 
 static struct arm_boot_info kobotouch_binfo;
@@ -58,14 +63,15 @@ static void kobotouch_load_firmware(MachineState *machine)
     size = load_image_targphys(machine->firmware, KOBOTOUCH_UBOOT_ADDR,
                                KOBOTOUCH_UBOOT_MAX, NULL);
     if (size < 0) {
-        error_report("Unable to load Kobo Touch firmware '%s'",
+        error_report("Unable to load Kobo firmware '%s'",
                      machine->firmware);
         exit(EXIT_FAILURE);
     }
     kobotouch_binfo.entry = KOBOTOUCH_UBOOT_ENTRY;
 }
 
-static void kobotouch_attach_sd(FslIMX50State *soc)
+static void kobotouch_attach_sd(FslIMX50State *soc,
+                                KoboTouchMachineState *tms)
 {
     DriveInfo *di = drive_get(IF_SD, 0, 0);
     BlockBackend *blk = di ? blk_by_legacy_dinfo(di) : NULL;
@@ -73,15 +79,31 @@ static void kobotouch_attach_sd(FslIMX50State *soc)
     DeviceState *card;
 
     if (!blk) {
-        error_report("Kobo Touch requires its internal SD image");
+        error_report("Kobo machine requires its internal SD image");
         exit(EXIT_FAILURE);
     }
 
-    bus = qdev_get_child_bus(DEVICE(&soc->esdhc[0]), "sd-bus");
+    bus = qdev_get_child_bus(DEVICE(&soc->esdhc[tms->mini ? 2 : 0]),
+                             "sd-bus");
     card = qdev_new(TYPE_SD_CARD);
     qdev_prop_set_drive_err(card, "drive", blk, &error_fatal);
     qdev_realize(card, bus, &error_fatal);
     object_unref(OBJECT(card));
+}
+
+static void kobomini_attach_pmic(FslIMX50State *soc)
+{
+    SSIBus *bus;
+    DeviceState *pmic;
+
+    bus = (SSIBus *)qdev_get_child_bus(DEVICE(&soc->spi[2]), "spi");
+    pmic = qdev_new(TYPE_MC13892);
+    ssi_realize_and_unref(pmic, bus, &error_fatal);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&soc->spi[2]), 1,
+        qemu_irq_invert(qdev_get_gpio_in_named(pmic, SSI_GPIO_CS, 0)));
+    qdev_connect_gpio_out_named(
+        pmic, "irq", 0,
+        qdev_get_gpio_in(DEVICE(&soc->gpio[5]), 8));
 }
 
 static void kobotouch_create_peripherals(FslIMX50State *soc)
@@ -118,10 +140,11 @@ static void kobotouch_create_peripherals(FslIMX50State *soc)
 
 static void kobotouch_init(MachineState *machine)
 {
+    KoboTouchMachineState *tms = KOBOTOUCH_MACHINE(machine);
     FslIMX50State *soc;
 
     if (machine->ram_size > KOBOTOUCH_RAM_MAX) {
-        error_report("RAM size exceeds Kobo Touch's 512 MiB addressable SDRAM");
+        error_report("RAM size exceeds Kobo's 512 MiB addressable SDRAM");
         exit(EXIT_FAILURE);
     }
 
@@ -130,16 +153,25 @@ static void kobotouch_init(MachineState *machine)
     /* PxP already rotates Kobo's portrait framebuffer into panel scan order. */
     object_property_set_bool(OBJECT(&soc->epdc), "rotate-ccw", false,
                              &error_fatal);
+    if (tms->mini) {
+        /* SD boot with controller 2 selected for U-Boot's environment. */
+        object_property_set_uint(OBJECT(soc), "src-sbmr", 0x00200040,
+                                 &error_fatal);
+        /* E50610 straps EIM_WAIT:EIM_EB1 to binary 2 (internal SD3). */
+        qdev_prop_set_uint32(DEVICE(&soc->gpio[0]), "reset-psr", 1U << 21);
+        /* TLE4913 reads high while the magnetic cover is open. */
+        qdev_prop_set_uint32(DEVICE(&soc->gpio[4]), "reset-psr", 1U << 25);
+    }
     qdev_realize(DEVICE(soc), NULL, &error_fatal);
     kobotouch_create_peripherals(soc);
+    if (tms->mini) {
+        kobomini_attach_pmic(soc);
+    }
     memory_region_add_subregion(get_system_memory(), KOBOTOUCH_RAM_BASE,
                                 machine->ram);
 
-    /*
-     * The Trilogy environment boots /dev/mmcblk0p1.  Its Netronix SD-number
-     * straps read zero, making eSDHC1 the internal card and Linux mmcblk0.
-     */
-    kobotouch_attach_sd(soc);
+    /* Trilogy uses eSDHC1; Mini straps eSDHC3. Both become Linux mmcblk0. */
+    kobotouch_attach_sd(soc, tms);
 
     kobotouch_binfo = (struct arm_boot_info) {
         .loader_start = KOBOTOUCH_RAM_BASE,
@@ -154,6 +186,11 @@ static void kobotouch_init(MachineState *machine)
     }
 }
 
+static void kobomini_machine_instance_init(Object *obj)
+{
+    KOBOTOUCH_MACHINE(obj)->mini = true;
+}
+
 static void kobotouch_machine_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
@@ -166,6 +203,14 @@ static void kobotouch_machine_init(ObjectClass *oc, const void *data)
     mc->ignore_memory_transaction_failures = true;
 }
 
+static void kobomini_machine_init(ObjectClass *oc, const void *data)
+{
+    MachineClass *mc = MACHINE_CLASS(oc);
+
+    mc->desc = "Kobo Mini N705 (i.MX508)";
+    mc->default_ram_id = "kobomini.ram";
+}
+
 static const TypeInfo kobotouch_machine_type = {
     .name = TYPE_KOBOTOUCH_MACHINE,
     .parent = TYPE_MACHINE,
@@ -174,9 +219,17 @@ static const TypeInfo kobotouch_machine_type = {
     .interfaces = arm_machine_interfaces,
 };
 
+static const TypeInfo kobomini_machine_type = {
+    .name = TYPE_KOBOMINI_MACHINE,
+    .parent = TYPE_KOBOTOUCH_MACHINE,
+    .instance_init = kobomini_machine_instance_init,
+    .class_init = kobomini_machine_init,
+};
+
 static void kobotouch_machine_register_types(void)
 {
     type_register_static(&kobotouch_machine_type);
+    type_register_static(&kobomini_machine_type);
 }
 
 type_init(kobotouch_machine_register_types)
