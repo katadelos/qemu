@@ -664,6 +664,9 @@ static void fsl_imx50_realize(DeviceState *dev, Error **errp)
                                             gpio_irq[i] + 1));
     }
     for (i = 0; i < FSL_IMX50_NUM_ESDHC; i++) {
+        /* i.MX50 ROM/U-Boot polls CMD_COMPLETE even for a timed-out probe. */
+        qdev_prop_set_bit(DEVICE(&s->esdhc[i]),
+                          "timeout-command-complete", true);
         object_property_set_uint(OBJECT(&s->esdhc[i]), "capareg",
                                  IMX50_ESDHC_CAPABILITIES, &error_abort);
         if (!sysbus_realize(SYS_BUS_DEVICE(&s->esdhc[i]), errp)) {
