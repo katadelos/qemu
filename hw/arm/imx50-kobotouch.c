@@ -106,7 +106,8 @@ static void kobomini_attach_pmic(FslIMX50State *soc)
         qdev_get_gpio_in(DEVICE(&soc->gpio[5]), 8));
 }
 
-static void kobotouch_create_peripherals(FslIMX50State *soc)
+static void kobotouch_create_peripherals(FslIMX50State *soc,
+                                         KoboTouchMachineState *tms)
 {
     I2CSlave *zforce;
     I2CSlave *tps65185;
@@ -126,10 +127,17 @@ static void kobotouch_create_peripherals(FslIMX50State *soc)
         qdev_get_gpio_in_named(DEVICE(tps65185), "power-enable", 0));
 
     zforce = i2c_slave_create_simple(soc->i2c[0].bus, TYPE_ZFORCE, 0x50);
-    qdev_connect_gpio_out(DEVICE(zforce), 0,
-        qdev_get_gpio_in(DEVICE(&soc->gpio[5]), 11));
-    qdev_connect_gpio_out(DEVICE(&soc->gpio[5]), 10,
-        qdev_get_gpio_in(DEVICE(zforce), 0));
+    if (tms->mini) {
+        qdev_connect_gpio_out(DEVICE(zforce), 0,
+            qdev_get_gpio_in(DEVICE(&soc->gpio[4]), 15));
+        qdev_connect_gpio_out(DEVICE(&soc->gpio[4]), 26,
+            qdev_get_gpio_in(DEVICE(zforce), 0));
+    } else {
+        qdev_connect_gpio_out(DEVICE(zforce), 0,
+            qdev_get_gpio_in(DEVICE(&soc->gpio[5]), 11));
+        qdev_connect_gpio_out(DEVICE(&soc->gpio[5]), 10,
+            qdev_get_gpio_in(DEVICE(zforce), 0));
+    }
 
     /* The Netronix board controller is a 16-bit register device on I2C3. */
     msp430 = i2c_slave_create_simple(soc->i2c[2].bus,
@@ -163,7 +171,7 @@ static void kobotouch_init(MachineState *machine)
         qdev_prop_set_uint32(DEVICE(&soc->gpio[4]), "reset-psr", 1U << 25);
     }
     qdev_realize(DEVICE(soc), NULL, &error_fatal);
-    kobotouch_create_peripherals(soc);
+    kobotouch_create_peripherals(soc, tms);
     if (tms->mini) {
         kobomini_attach_pmic(soc);
     }
