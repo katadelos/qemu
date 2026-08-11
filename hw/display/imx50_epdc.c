@@ -14,6 +14,7 @@
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
+#include "qemu/error-report.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
@@ -49,6 +50,7 @@ enum {
 #define EPDC_MAX_DIMENSION      2048
 #define EPDC_WB_COMPLETE_NS     1000000
 #define EPDC_LUT_COMPLETE_NS    10000000
+#define EPDC_SCANOUT_REFRESH_MS 50
 
 static inline uint32_t *epdc_reg(IMX50EPDCState *s, hwaddr offset)
 {
@@ -90,6 +92,60 @@ static DisplaySurface *imx50_epdc_prepare_surface(IMX50EPDCState *s,
     return surface;
 }
 
+static bool imx50_epdc_render_direct(IMX50EPDCState *s,
+                                     unsigned surface_width,
+                                     unsigned surface_height)
+{
+    DisplaySurface *surface;
+    size_t buffer_size;
+    MemTxResult result;
+    unsigned x, y;
+
+    if (!s->direct_fb) {
+        return false;
+    }
+    if (!s->direct_fb_addr || s->direct_fb_stride < surface_width) {
+        warn_report_once("%s: invalid direct scanout 0x%" PRIx64
+                         " stride %u for %ux%u",
+                         TYPE_IMX50_EPDC, s->direct_fb_addr,
+                         s->direct_fb_stride, surface_width, surface_height);
+        return true;
+    }
+    s->scanout_refreshes++;
+
+    /*
+     * mxc_epdc_fb_check_var() aligns xres_virtual to 32 pixels and the
+     * Lab126 setup selects 8-bit grayscale before rotating Celeste CCW.
+     * Snapshot that complete software framebuffer, using fix.line_length
+     * exactly as the stock driver does when it feeds PxP.
+     */
+    buffer_size = (size_t)s->direct_fb_stride * surface_height;
+    s->direct_fb_buffer = g_realloc(s->direct_fb_buffer, buffer_size);
+    result = dma_memory_read(&address_space_memory, s->direct_fb_addr,
+                             s->direct_fb_buffer, buffer_size,
+                             MEMTXATTRS_UNSPECIFIED);
+    if (result != MEMTX_OK) {
+        warn_report_once("%s: cannot read direct scanout at 0x%" PRIx64,
+                         TYPE_IMX50_EPDC, s->direct_fb_addr);
+        return true;
+    }
+
+    surface = imx50_epdc_prepare_surface(s, surface_width, surface_height);
+    for (y = 0; y < surface_height; y++) {
+        uint32_t *pixels;
+        pixels = (uint32_t *)((uint8_t *)surface_data(surface) +
+                              (size_t)y * surface_stride(surface));
+        for (x = 0; x < surface_width; x++) {
+            uint8_t gray = s->direct_fb_buffer[
+                (size_t)y * s->direct_fb_stride + x];
+
+            pixels[x] = 0xff000000U | gray * 0x00010101U;
+        }
+    }
+    dpy_gfx_update_full(s->console);
+    return true;
+}
+
 static void imx50_epdc_render_update(IMX50EPDCState *s,
                                      uint32_t source, uint32_t cord,
                                      uint32_t size)
@@ -109,8 +165,19 @@ static void imx50_epdc_render_update(IMX50EPDCState *s,
     int64_t started_ns;
     unsigned x, y;
 
+    if (s->direct_fb) {
+        if (s->direct_fb_width && s->direct_fb_height) {
+            imx50_epdc_render_direct(s, s->direct_fb_width,
+                                     s->direct_fb_height);
+        } else if (imx50_epdc_geometry(s, &panel_width, &panel_height)) {
+            imx50_epdc_render_direct(s, panel_height, panel_width);
+        }
+        return;
+    }
+    if (!imx50_epdc_geometry(s, &panel_width, &panel_height)) {
+        return;
+    }
     if (!source ||
-        !imx50_epdc_geometry(s, &panel_width, &panel_height) ||
         !width || !height || left + width > panel_width ||
         top + height > panel_height) {
         return;
@@ -121,7 +188,7 @@ static void imx50_epdc_render_update(IMX50EPDCState *s,
      * 8-pixel blocks, while EPDC consumes only the requested rectangle.
      */
     stride = QEMU_ALIGN_UP(width, 8);
-    trace_whitney_epdc_begin(width, height);
+    trace_whitney_epdc_begin(source, left, top, width, height, stride);
     started_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     update = g_malloc((size_t)stride * height);
     result = dma_memory_read(&address_space_memory, source, update,
@@ -173,10 +240,33 @@ static void imx50_epdc_render_update(IMX50EPDCState *s,
 static void imx50_epdc_invalidate(void *opaque)
 {
     IMX50EPDCState *s = opaque;
+    unsigned panel_width, panel_height;
+
+    if (s->direct_fb && s->direct_fb_width && s->direct_fb_height) {
+        imx50_epdc_render_direct(s, s->direct_fb_width,
+                                 s->direct_fb_height);
+        return;
+    }
+    if (s->direct_fb &&
+        imx50_epdc_geometry(s, &panel_width, &panel_height)) {
+        imx50_epdc_render_direct(s, panel_height, panel_width);
+        return;
+    }
 
     if (s->console) {
         dpy_gfx_update_full(s->console);
     }
+}
+
+static void imx50_epdc_scanout_refresh(void *opaque)
+{
+    IMX50EPDCState *s = opaque;
+
+    /* Keep the next refresh armed even if a display listener re-enters. */
+    timer_mod(s->scanout_timer,
+              qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
+              EPDC_SCANOUT_REFRESH_MS);
+    imx50_epdc_invalidate(s);
 }
 
 static const GraphicHwOps imx50_epdc_gfx_ops = {
@@ -333,6 +423,11 @@ static void imx50_epdc_reset(DeviceState *dev)
     *epdc_reg(s, EPDC_CTRL) = EPDC_CTRL_CLKGATE;
     s->pending_luts = 0;
     qemu_set_irq(s->irq, 0);
+    if (s->direct_fb && s->scanout_timer) {
+        timer_mod(s->scanout_timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
+                  EPDC_SCANOUT_REFRESH_MS);
+    }
 }
 
 static const VMStateDescription vmstate_imx50_epdc = {
@@ -355,7 +450,13 @@ static void imx50_epdc_realize(DeviceState *dev, Error **errp)
                                imx50_epdc_wb_complete, s);
     s->lut_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                 imx50_epdc_lut_complete, s);
+    s->scanout_timer = timer_new_ms(QEMU_CLOCK_REALTIME,
+                                    imx50_epdc_scanout_refresh, s);
     s->console = graphic_console_init(dev, 0, &imx50_epdc_gfx_ops, s);
+    if (s->direct_fb) {
+        timer_mod(s->scanout_timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_REALTIME));
+    }
 }
 
 static void imx50_epdc_unrealize(DeviceState *dev)
@@ -364,6 +465,9 @@ static void imx50_epdc_unrealize(DeviceState *dev)
 
     timer_free(s->wb_timer);
     timer_free(s->lut_timer);
+    timer_free(s->scanout_timer);
+    g_free(s->direct_fb_buffer);
+    s->direct_fb_buffer = NULL;
 }
 
 static void imx50_epdc_init(Object *obj)
@@ -377,6 +481,17 @@ static void imx50_epdc_init(Object *obj)
 }
 
 static const Property imx50_epdc_properties[] = {
+    DEFINE_PROP_BOOL("direct-framebuffer", IMX50EPDCState, direct_fb, false),
+    DEFINE_PROP_UINT64("framebuffer-address", IMX50EPDCState,
+                       direct_fb_addr, 0),
+    DEFINE_PROP_UINT32("framebuffer-stride", IMX50EPDCState,
+                       direct_fb_stride, 0),
+    DEFINE_PROP_UINT32("framebuffer-width", IMX50EPDCState,
+                       direct_fb_width, 0),
+    DEFINE_PROP_UINT32("framebuffer-height", IMX50EPDCState,
+                       direct_fb_height, 0),
+    DEFINE_PROP_UINT64("scanout-refreshes", IMX50EPDCState,
+                       scanout_refreshes, 0),
     DEFINE_PROP_BOOL("rotate-ccw", IMX50EPDCState, rotate_ccw, true),
 };
 

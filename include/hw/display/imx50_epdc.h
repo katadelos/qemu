@@ -23,9 +23,17 @@ struct IMX50EPDCState {
     qemu_irq irq;
     QEMUTimer *wb_timer;
     QEMUTimer *lut_timer;
+    QEMUTimer *scanout_timer;
     QemuConsole *console;
     uint32_t regs[IMX50_EPDC_MMIO_SIZE / sizeof(uint32_t)];
     uint32_t pending_luts;
+    uint64_t direct_fb_addr;
+    uint32_t direct_fb_stride;
+    uint32_t direct_fb_width;
+    uint32_t direct_fb_height;
+    uint8_t *direct_fb_buffer;
+    uint64_t scanout_refreshes;
+    bool direct_fb;
     bool rotate_ccw;
 };
 
