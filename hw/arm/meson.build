@@ -19,6 +19,7 @@ arm_common_ss.add(when: 'CONFIG_STM32VLDISCOVERY', if_true: files('stm32vldiscov
 arm_common_ss.add(when: 'CONFIG_ZYNQ', if_true: files('xilinx_zynq.c'))
 arm_common_ss.add(when: 'CONFIG_SABRELITE', if_true: files('sabrelite.c'))
 arm_common_ss.add(when: 'CONFIG_IMX6SL_WARIO', if_true: files('imx6sl-wario.c'))
+arm_common_ss.add(when: 'CONFIG_IMX60_HEISENBERG', if_true: files('imx60_heisenberg.c'))
 arm_common_ss.add(when: 'CONFIG_IMX6SLL_REX', if_true: files('imx6sll-rex.c'))
 arm_common_ss.add(when: 'CONFIG_MT8113', if_true: files('mt8113.c'))
 arm_common_ss.add(when: 'CONFIG_MT8113_COLOURSOFT', if_true: files('mt8113-coloursoft.c'))
