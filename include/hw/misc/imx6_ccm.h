@@ -165,6 +165,8 @@
 /* CCM_CSCMR1 */
 #define PERCLK_PODF_SHIFT        (0)
 #define PERCLK_PODF_LENGTH       (6)
+#define PERCLK_CLK_SEL_SHIFT     (6)
+#define PERCLK_CLK_SEL_LENGTH    (1)
 
 /* CCM_ANALOG_PFD_528 */
 #define PFD0_FRAC_SHIFT          (0)

@@ -337,10 +337,14 @@ static uint64_t imx6_ccm_get_ipg_clk(IMX6CCMState *dev)
 
 static uint64_t imx6_ccm_get_per_clk(IMX6CCMState *dev)
 {
-    uint64_t freq = 0;
+    uint64_t freq;
 
-    freq = imx6_ccm_get_ipg_clk(dev)
-           / (1 + EXTRACT(dev->ccm[CCM_CSCMR1], PERCLK_PODF));
+    if (EXTRACT(dev->ccm[CCM_CSCMR1], PERCLK_CLK_SEL)) {
+        freq = CKIH_FREQ;
+    } else {
+        freq = imx6_ccm_get_ipg_clk(dev);
+    }
+    freq /= 1 + EXTRACT(dev->ccm[CCM_CSCMR1], PERCLK_PODF);
 
     trace_imx6_ccm_get_per_clk(freq);
 
