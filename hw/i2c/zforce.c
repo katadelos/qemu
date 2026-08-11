@@ -55,6 +55,7 @@ struct ZForceState {
     bool packed_protocol;
     bool kindle_protocol;
     bool kindle_v2_protocol;
+    bool kindle_ti_protocol;
     bool input_events;
     bool reset_level;
     uint16_t input_x;
@@ -76,12 +77,18 @@ static void zforce_update_irq(ZForceState *s)
     qemu_set_irq(s->irq, s->queue_count ? 0 : 1);
 }
 
+static bool zforce_data_is_touch_move(const uint8_t *data, size_t len)
+{
+    if (len >= 11 && data[0] == ZFORCE_TOUCH_DATA && data[1] == 1) {
+        return (data[6] & 0x0f) == 1;
+    }
+    return len >= 9 && data[0] == ZFORCE_TOUCH_DATA &&
+           data[1] == 1 && (data[6] >> 6) == 1;
+}
+
 static bool zforce_is_touch_move(const ZForcePacket *packet)
 {
-    return packet->len >= 9 &&
-           packet->data[0] == ZFORCE_TOUCH_DATA &&
-           packet->data[1] == 1 &&
-           (packet->data[6] >> 6) == 1;
+    return zforce_data_is_touch_move(packet->data, packet->len);
 }
 
 static bool zforce_read_in_progress(const ZForceState *s)
@@ -120,8 +127,7 @@ static void zforce_queue_packet(ZForceState *s, const uint8_t *data,
      * never replace queue_head while a read is in progress: the Lab126
      * driver fetches the header and payload in separate I2C transactions.
      */
-    is_move = len >= 9 && data[0] == ZFORCE_TOUCH_DATA &&
-              data[1] == 1 && (data[6] >> 6) == 1;
+    is_move = zforce_data_is_touch_move(data, len);
     if (is_move && s->queue_count) {
         tail = (s->queue_head + s->queue_count - 1) % ZFORCE_QUEUE_LEN;
         packet = &s->queue[tail];
@@ -408,7 +414,7 @@ static size_t zforce_build_touch_report(ZForceState *s, uint8_t *response,
         response[6] = (state << 6) | (1 << 2);
         response[7] = 0;
         response[8] = state == 2 ? 0 : 100;
-    } else if (s->packed_protocol) {
+    } else if (s->packed_protocol || s->kindle_ti_protocol) {
         /*
          * The captured Kobo kernel's framed protocol reports direct
          * portrait coordinates in a packed state/ID record.
@@ -437,7 +443,7 @@ static size_t zforce_build_touch_report(ZForceState *s, uint8_t *response,
     response[4] = native_y;
     response[5] = native_y >> 8;
 
-    return s->packed_protocol ? 11 : 9;
+    return (s->packed_protocol || s->kindle_ti_protocol) ? 11 : 9;
 }
 
 static int zforce_event(I2CSlave *i2c, enum i2c_event event)
@@ -640,12 +646,16 @@ static void kindle_zforce2_init(Object *obj)
 {
     ZForceState *s = ZFORCE(obj);
 
-    /*
-     * Bourbon ships zForce2 1.0b0r8.  Keep its framed 600x800 protocol,
-     * but advertise the production revision so ihbslupdater does not enter
-     * the controller's unimplemented serial bootloader.
-     */
+    /* Bourbon uses the second-generation framed controller protocol. */
     s->kindle_v2_protocol = true;
+}
+
+static void kindle_zforce2_ti_init(Object *obj)
+{
+    ZForceState *s = ZFORCE(obj);
+
+    /* Heisenberg's loader selects the TI protocol and I2C address 0x51. */
+    s->kindle_ti_protocol = true;
 }
 
 static void zforce_class_init(ObjectClass *oc, const void *data)
@@ -792,6 +802,10 @@ static const TypeInfo zforce_types[] = {
         .name = TYPE_KINDLE_ZFORCE2,
         .parent = TYPE_ZFORCE,
         .instance_init = kindle_zforce2_init,
+    }, {
+        .name = TYPE_KINDLE_ZFORCE2_TI,
+        .parent = TYPE_ZFORCE,
+        .instance_init = kindle_zforce2_ti_init,
     }, {
         .name = TYPE_TPS65185,
         .parent = TYPE_I2C_SLAVE,
