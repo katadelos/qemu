@@ -406,7 +406,8 @@ static void sdhci_send_command(SDHCIState *s)
         } else {
             timeout = true;
             trace_sdhci_error("timeout waiting for command response");
-            if (s->errintstsen & SDHC_EISEN_CMDTIMEOUT) {
+            if ((s->errintstsen & SDHC_EISEN_CMDTIMEOUT) ||
+                object_dynamic_cast(OBJECT(s), TYPE_IMX_USDHC)) {
                 s->errintsts |= SDHC_EIS_CMDTIMEOUT;
                 s->norintsts |= SDHC_NIS_ERR;
             }
@@ -419,8 +420,10 @@ static void sdhci_send_command(SDHCIState *s)
         }
     }
 
-    if ((s->norintstsen & SDHC_NISEN_CMDCMP) ||
-        object_dynamic_cast(OBJECT(s), TYPE_IMX_USDHC)) {
+    /* A response timeout is an error completion, not CMD_COMPLETE. */
+    if ((!timeout || s->timeout_command_complete) &&
+        ((s->norintstsen & SDHC_NISEN_CMDCMP) ||
+         object_dynamic_cast(OBJECT(s), TYPE_IMX_USDHC))) {
         s->norintsts |= SDHC_NIS_CMDCMP;
     }
 
@@ -1675,6 +1678,8 @@ static const Property sdhci_sysbus_properties[] = {
                      false),
     DEFINE_PROP_BOOL("defer-data-transfer", SDHCIState, defer_data_transfer,
                      true),
+    DEFINE_PROP_BOOL("timeout-command-complete", SDHCIState,
+                     timeout_command_complete, false),
     DEFINE_PROP_LINK("dma", SDHCIState,
                      dma_mr, TYPE_MEMORY_REGION, MemoryRegion *),
     DEFINE_PROP_BOOL("wp-inverted", SDHCIState,
