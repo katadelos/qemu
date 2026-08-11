@@ -1079,7 +1079,15 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
 - (void) handleMouseEvent:(NSEvent *)event button:(InputButton)button down:(bool)down
 {
     if (!isMouseGrabbed) {
-        return;
+        /*
+         * Absolute devices are touchscreens/tablets: the click which focuses
+         * the Cocoa window is also the user's touch.  Capture it immediately
+         * instead of discarding the press and forwarding only its release.
+         */
+        if (!isAbsoluteEnabled) {
+            return;
+        }
+        [self grabMouse];
     }
 
     with_bql(^{
