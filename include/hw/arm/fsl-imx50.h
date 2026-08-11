@@ -42,6 +42,7 @@ struct FslIMX50State {
     IMX2WdtState wdt;
     IMX50EPDCState epdc;
     MemoryRegion iram;
+    MemoryRegion src_iomem;
     MemoryRegion databahn_iomem;
     MemoryRegion sdma_iomem;
     MemoryRegion srtc_iomem;
@@ -57,6 +58,7 @@ struct FslIMX50State {
     uint32_t pxp[0x1000 / 4];
     uint8_t pxp_lut[256];
     uint32_t ddr_type;
+    uint32_t src_sbmr;
 };
 
 #define FSL_IMX50_TZIC_ADDR   0x0fffc000

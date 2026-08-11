@@ -522,6 +522,25 @@ static const MemoryRegionOps imx50_databahn_ops = {
     .valid = { .min_access_size = 4, .max_access_size = 4 },
 };
 
+static uint64_t imx50_src_read(void *opaque, hwaddr offset, unsigned size)
+{
+    FslIMX50State *s = opaque;
+
+    return offset == 0x04 ? s->src_sbmr : 0;
+}
+
+static void imx50_src_write(void *opaque, hwaddr offset, uint64_t value,
+                            unsigned size)
+{
+}
+
+static const MemoryRegionOps imx50_src_ops = {
+    .read = imx50_src_read,
+    .write = imx50_src_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 4 },
+};
+
 static void fsl_imx50_init(Object *obj)
 {
     FslIMX50State *s = FSL_IMX50(obj);
@@ -571,7 +590,6 @@ static void fsl_imx50_init(Object *obj)
 static void fsl_imx50_map_unimplemented(void)
 {
     create_unimplemented_device("imx50.iomuxc", 0x53fa8000, 0x4000);
-    create_unimplemented_device("imx50.src", 0x53fd0000, 0x4000);
     create_unimplemented_device("imx50.ocotp", 0x40102000, 0x2000);
 }
 
@@ -695,6 +713,10 @@ static void fsl_imx50_realize(DeviceState *dev, Error **errp)
                            FSL_IMX50_IRAM_SIZE, errp);
     memory_region_add_subregion(get_system_memory(), FSL_IMX50_IRAM_ADDR,
                                 &s->iram);
+    memory_region_init_io(&s->src_iomem, OBJECT(dev), &imx50_src_ops, s,
+                          "imx50.src", 0x4000);
+    memory_region_add_subregion(get_system_memory(), 0x53fd0000,
+                                &s->src_iomem);
     memory_region_init_io(&s->databahn_iomem, OBJECT(dev),
                           &imx50_databahn_ops, s, "imx50.databahn", 0x400);
     memory_region_add_subregion(get_system_memory(), 0x14000000,
@@ -751,6 +773,7 @@ static void fsl_imx50_realize(DeviceState *dev, Error **errp)
 
 static const Property fsl_imx50_properties[] = {
     DEFINE_PROP_UINT32("ddr-type", FslIMX50State, ddr_type, 0),
+    DEFINE_PROP_UINT32("src-sbmr", FslIMX50State, src_sbmr, 0),
 };
 
 static void fsl_imx50_class_init(ObjectClass *oc, const void *data)
