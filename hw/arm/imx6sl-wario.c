@@ -387,6 +387,7 @@ static void wario_init(MachineState *machine)
 
     mmdc = qdev_new(TYPE_IMX6SL_MMDC);
     object_property_add_child(OBJECT(machine), "mmdc", OBJECT(mmdc));
+    qdev_prop_set_uint64(mmdc, "ram-size", machine->ram_size);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(mmdc), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(mmdc), 0, 0x021b0000);
 

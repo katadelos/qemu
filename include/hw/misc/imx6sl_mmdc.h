@@ -11,6 +11,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(IMX6SLMMDCState, IMX6SL_MMDC)
 struct IMX6SLMMDCState {
     SysBusDevice parent_obj;
     MemoryRegion iomem;
+    uint64_t ram_size;
     uint32_t regs[0x1000];
 };
 

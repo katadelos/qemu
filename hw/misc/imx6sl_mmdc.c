@@ -5,9 +5,12 @@
 
 #include "qemu/osdep.h"
 #include "hw/misc/imx6sl_mmdc.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
+#include "qemu/units.h"
 
 #define MMDC_SIZE   0x4000
+#define MDCTL       0x0000
 #define MDSCR       0x001c
 #define MDMISC      0x0018
 #define MDMRR       0x0034
@@ -100,11 +103,22 @@ static void imx6sl_mmdc_reset(DeviceState *dev)
     IMX6SLMMDCState *s = IMX6SL_MMDC(dev);
 
     memset(s->regs, 0, sizeof(s->regs));
-    /* Rex boot firmware configures Hynix LPDDR3 with this MDMISC value. */
-    s->regs[MDMISC >> 2] = 0x00201718;
+    if (s->ram_size) {
+        /* Match the Wario DCD state that a real i.MX boot ROM applies. */
+        s->regs[MDCTL >> 2] = s->ram_size <= 256 * MiB ?
+                              0x83010000 : 0x83110000;
+        s->regs[MDMISC >> 2] = 0x00001688;
+    } else {
+        /* Rex boot firmware configures Hynix LPDDR3 with this MDMISC value. */
+        s->regs[MDMISC >> 2] = 0x00201718;
+    }
     /* Automatic power saving is immediately active in the timing-free model. */
     s->regs[MAPSR >> 2] = MAPSR_PSS;
 }
+
+static const Property imx6sl_mmdc_properties[] = {
+    DEFINE_PROP_UINT64("ram-size", IMX6SLMMDCState, ram_size, 0),
+};
 
 static void imx6sl_mmdc_init(Object *obj)
 {
@@ -120,6 +134,7 @@ static void imx6sl_mmdc_class_init(ObjectClass *klass, const void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     device_class_set_legacy_reset(dc, imx6sl_mmdc_reset);
+    device_class_set_props(dc, imx6sl_mmdc_properties);
     dc->vmsd = &vmstate_imx6sl_mmdc;
 }
 
