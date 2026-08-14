@@ -168,6 +168,8 @@ struct SDState {
     BlockBackend *blk;
     uint8_t boot_config;
     bool boot_parts_in_memory;
+    bool discard_writes;
+    uint64_t reported_capacity;
     uint8_t *boot_parts;
     uint32_t boot_parts_size;
     char *boot_parts_file;
@@ -182,6 +184,7 @@ struct SDState {
     unsigned long *wp_group_bmap;
     int32_t wp_group_bits;
     uint64_t size;
+    uint64_t backing_size;
     uint32_t blk_len;
     uint32_t multi_blk_cnt;
     uint32_t erase_start;
@@ -2142,6 +2145,10 @@ static void sd_reset(DeviceState *dev)
     } else if (sd_is_emmc(sd)) {
         size -= sd->rpmb_part_size;
     }
+    sd->backing_size = size;
+    if (sd->reported_capacity) {
+        size = sd->reported_capacity;
+    }
 
     sect = sd_addr_to_wpnum(size) + 1;
 
@@ -2158,7 +2165,8 @@ static void sd_reset(DeviceState *dev)
     sd_set_sdstatus(sd);
 
     g_free(sd->wp_group_bmap);
-    sd->wp_switch = sd->blk ? !blk_is_writable(sd->blk) : false;
+    sd->wp_switch = sd->discard_writes ? false :
+                    (sd->blk ? !blk_is_writable(sd->blk) : false);
     sd->wp_group_bits = sect;
     sd->wp_group_bmap = bitmap_new(sd->wp_group_bits);
     memset(sd->function_group, 0, sizeof(sd->function_group));
@@ -2367,6 +2375,10 @@ static void sd_blk_read(SDState *sd, uint64_t addr, uint32_t len)
         return;
     }
     addr += sd_part_offset(sd);
+    if (sd->reported_capacity && addr + len > sd->backing_size) {
+        memset(sd->data, 0, len);
+        return;
+    }
     if (!sd->blk || blk_pread(sd->blk, addr, len, sd->data, 0) < 0) {
         fprintf(stderr, "sd_blk_read: read error on host side\n");
     }
@@ -2404,6 +2416,9 @@ static void sd_blk_write(SDState *sd, uint64_t addr, uint32_t len)
             fprintf(stderr,
                     "sd_blk_write: boot partition write out of range\n");
         }
+        return;
+    }
+    if (sd->discard_writes) {
         return;
     }
     addr += sd_part_offset(sd);
@@ -4369,11 +4384,6 @@ static void sd_realize(DeviceState *dev, Error **errp)
     }
 
     if (sd->blk) {
-        if (!blk_supports_write_perm(sd->blk)) {
-            error_setg(errp, "Cannot use read-only drive as SD card");
-            return;
-        }
-
         blk_size = blk_getlength(sd->blk);
     }
     if (blk_size >= 0) {
@@ -4406,8 +4416,11 @@ static void sd_realize(DeviceState *dev, Error **errp)
             return;
         }
 
-        ret = blk_set_perm(sd->blk, BLK_PERM_CONSISTENT_READ | BLK_PERM_WRITE,
-                           BLK_PERM_ALL, errp);
+        ret = blk_set_perm(
+            sd->blk,
+            BLK_PERM_CONSISTENT_READ |
+                (blk_supports_write_perm(sd->blk) ? BLK_PERM_WRITE : 0),
+            BLK_PERM_ALL, errp);
         if (ret < 0) {
             return;
         }
@@ -4514,6 +4527,8 @@ static void emmc_realize(DeviceState *dev, Error **errp)
 
 static const Property sdmmc_common_properties[] = {
     DEFINE_PROP_DRIVE("drive", SDState, blk),
+    DEFINE_PROP_BOOL("discard-writes", SDState, discard_writes, false),
+    DEFINE_PROP_SIZE("reported-capacity", SDState, reported_capacity, 0),
 };
 
 static const Property sd_properties[] = {
