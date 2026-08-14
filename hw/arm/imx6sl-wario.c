@@ -174,11 +174,34 @@ static void wario_attach_card(FslIMX6State *s, WarioMachineState *wms,
     object_unref(OBJECT(card));
 }
 
-static void wario_attach_panel_flash(FslIMX6State *s)
+static void wario_panel_flash_program(SSIBus *bus, qemu_irq cs,
+                                      uint32_t address,
+                                      const uint8_t *data, size_t length)
+{
+    size_t i;
+
+    qemu_set_irq(cs, 1);
+    qemu_set_irq(cs, 0);
+    ssi_transfer(bus, 0x06); /* write enable */
+    qemu_set_irq(cs, 1);
+    qemu_set_irq(cs, 0);
+    ssi_transfer(bus, 0x02); /* page program */
+    ssi_transfer(bus, address >> 16);
+    ssi_transfer(bus, address >> 8);
+    ssi_transfer(bus, address);
+    for (i = 0; i < length; i++) {
+        ssi_transfer(bus, data[i]);
+    }
+    qemu_set_irq(cs, 1);
+}
+
+static void wario_attach_panel_flash(FslIMX6State *s,
+                                     const WarioMachineState *wms)
 {
     SSIBus *bus;
     DeviceState *flash;
     DriveInfo *di = drive_get(IF_MTD, 0, 0);
+    qemu_irq cs;
 
     /*
      * A 4-Mbit panel NOR is physically populated on Icewine and must be
@@ -196,8 +219,22 @@ static void wario_attach_panel_flash(FslIMX6State *s)
                                 &error_fatal);
     }
     qdev_realize_and_unref(flash, BUS(bus), &error_fatal);
+    cs = qdev_get_gpio_in_named(flash, SSI_GPIO_CS, 0);
+    if (!di) {
+        static const uint8_t ac_format = 0x4b;
+
+        /* Select the AC layout while keeping the synthetic waveform blank. */
+        wario_panel_flash_program(bus, cs, 0x899, &ac_format, 1);
+        if (wario_is_muscat(wms)) {
+            /* Encoded "ED4", a production ED060TC1-3CE panel barcode. */
+            static const uint8_t muscat_bcd[] = { 0xe9, 0xe8, 0x04 };
+
+            wario_panel_flash_program(bus, cs, 0x70050,
+                                      muscat_bcd, sizeof(muscat_bcd));
+        }
+    }
     qdev_connect_gpio_out(DEVICE(&s->gpio[3]), 11,
-                          qdev_get_gpio_in_named(flash, SSI_GPIO_CS, 0));
+                          cs);
 }
 
 static void wario_attach_wifi(FslIMX6State *s)
@@ -310,7 +347,7 @@ static void wario_init(MachineState *machine)
     /* USDHC2 is eMMC; USDHC3's Wi-Fi SDIO function is modeled separately. */
     wario_attach_card(s, wms, 1, 1, true);
     wario_attach_wifi(s);
-    wario_attach_panel_flash(s);
+    wario_attach_panel_flash(s, wms);
 
     i2c = s->i2c[0].bus;
     i2c_slave_create_simple(i2c, TYPE_MAX77696, 0x34);

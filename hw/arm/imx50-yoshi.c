@@ -565,6 +565,7 @@ static void yoshi_attach_panel_flash(FslIMX50State *soc)
     SSIBus *bus;
     DeviceState *flash;
     DriveInfo *di = drive_get(IF_MTD, 0, 0);
+    qemu_irq cs;
 
     bus = (SSIBus *)qdev_get_child_bus(DEVICE(&soc->spi[1]), "spi");
     flash = qdev_new("mx25l4005a");
@@ -574,9 +575,30 @@ static void yoshi_attach_panel_flash(FslIMX50State *soc)
     }
     qdev_realize_and_unref(flash, BUS(bus), &error_fatal);
 
+    cs = qdev_get_gpio_in_named(flash, SSI_GPIO_CS, 0);
+    if (!di) {
+        /*
+         * An erased panel flash is not a usable physical board state.  Seed
+         * the waveform-format byte so the existing board-default panel mode
+         * can be selected while leaving the rest of the synthetic flash
+         * erased.  A supplied MTD image always takes precedence.
+         */
+        qemu_set_irq(cs, 1);
+        qemu_set_irq(cs, 0);
+        ssi_transfer(bus, 0x06); /* write enable */
+        qemu_set_irq(cs, 1);
+        qemu_set_irq(cs, 0);
+        ssi_transfer(bus, 0x02); /* page program */
+        ssi_transfer(bus, 0x00);
+        ssi_transfer(bus, 0x08);
+        ssi_transfer(bus, 0x99);
+        ssi_transfer(bus, 0x15); /* WJ waveform layout */
+        qemu_set_irq(cs, 1);
+    }
+
     /* CSPI2 SS0 is the first sysbus output following the controller IRQ. */
     sysbus_connect_irq(SYS_BUS_DEVICE(&soc->spi[1]), 1,
-                       qdev_get_gpio_in_named(flash, SSI_GPIO_CS, 0));
+                       cs);
 }
 
 static void whitney_attach_pmic(FslIMX50State *soc)
