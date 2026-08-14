@@ -14,6 +14,12 @@
 #include "hw/i2c/zforce.h"
 #include "qemu/module.h"
 
+#define NTXEC_REG_VERSION       0x00
+#define NTXEC_REG_BATTERY_ADC   0x41
+#define NTXEC_REG_SYSTEM_FLAGS  0x60
+#define NTXEC_VERSION_KOBO_MINI 0xb83a
+#define NTXEC_BATTERY_4000MV    993
+
 struct KoboTouchMSP430State {
     I2CSlave parent_obj;
     uint16_t regs[256];
@@ -77,6 +83,9 @@ static void kobotouch_msp430_reset(DeviceState *dev)
     KoboTouchMSP430State *s = KOBOTOUCH_MSP430(dev);
 
     memset(s->regs, 0, sizeof(s->regs));
+    s->regs[NTXEC_REG_VERSION] = NTXEC_VERSION_KOBO_MINI;
+    s->regs[NTXEC_REG_BATTERY_ADC] = NTXEC_BATTERY_4000MV;
+    s->regs[NTXEC_REG_SYSTEM_FLAGS] = 0;
     s->pointer = 0;
     s->write_len = 0;
     s->read_pos = 0;
