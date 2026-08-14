@@ -33,6 +33,9 @@
 #define KOBOTOUCH_UBOOT_ADDR     0x77800000
 #define KOBOTOUCH_UBOOT_ENTRY    0x77800a20
 #define KOBOTOUCH_UBOOT_MAX      0x000c0000
+#define KOBOTOUCH_IVT_OFFSET     0x400
+#define KOBOTOUCH_IVT_ENTRY_OFF  0x04
+#define KOBOTOUCH_IVT_SELF_OFF   0x14
 
 #define TYPE_KOBOTOUCH_MACHINE MACHINE_TYPE_NAME("imx50-kobotouch")
 #define TYPE_KOBOMINI_MACHINE MACHINE_TYPE_NAME("imx50-kobomini")
@@ -50,24 +53,56 @@ static void kobotouch_firmware_reset(void *opaque)
     ARMCPU *cpu = opaque;
 
     cpu_reset(CPU(cpu));
-    cpu_set_pc(CPU(cpu), KOBOTOUCH_UBOOT_ENTRY);
+    if (kobotouch_binfo.entry >= KOBOTOUCH_RAM_BASE &&
+        kobotouch_binfo.entry < KOBOTOUCH_RAM_BASE + kobotouch_binfo.ram_size) {
+        cpu->env.regs[13] = FSL_IMX50_IRAM_ADDR + FSL_IMX50_IRAM_SIZE;
+    }
+    cpu_set_pc(CPU(cpu), kobotouch_binfo.entry);
 }
 
 static void kobotouch_load_firmware(MachineState *machine)
 {
+    g_autofree uint8_t *image = NULL;
+    gsize image_size;
+    hwaddr addr = KOBOTOUCH_UBOOT_ADDR;
+    hwaddr max_size = KOBOTOUCH_UBOOT_MAX;
+    uint32_t entry = KOBOTOUCH_UBOOT_ENTRY;
+    uint32_t self;
     ssize_t size;
 
     if (!machine->firmware) {
         return;
     }
-    size = load_image_targphys(machine->firmware, KOBOTOUCH_UBOOT_ADDR,
-                               KOBOTOUCH_UBOOT_MAX, NULL);
+
+    /* Modern barebox carries an i.MX IVT and runs from SDRAM. */
+    if (g_file_get_contents(machine->firmware, (char **)&image,
+                            &image_size, NULL) &&
+        image_size >= KOBOTOUCH_IVT_OFFSET +
+                      KOBOTOUCH_IVT_SELF_OFF + sizeof(self) &&
+        ldl_le_p(image + KOBOTOUCH_IVT_OFFSET) == 0x402000d1) {
+        entry = ldl_le_p(image + KOBOTOUCH_IVT_OFFSET +
+                         KOBOTOUCH_IVT_ENTRY_OFF);
+        self = ldl_le_p(image + KOBOTOUCH_IVT_OFFSET +
+                        KOBOTOUCH_IVT_SELF_OFF);
+        if (self >= KOBOTOUCH_RAM_BASE + KOBOTOUCH_IVT_OFFSET &&
+            self < KOBOTOUCH_RAM_BASE + machine->ram_size) {
+            addr = self - KOBOTOUCH_IVT_OFFSET;
+            max_size = KOBOTOUCH_RAM_BASE + machine->ram_size - addr;
+        }
+        if (entry < addr || entry >= addr + image_size) {
+            error_report("Kobo firmware IVT entry 0x%08x is outside image",
+                         entry);
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    size = load_image_targphys(machine->firmware, addr, max_size, NULL);
     if (size < 0) {
         error_report("Unable to load Kobo firmware '%s'",
                      machine->firmware);
         exit(EXIT_FAILURE);
     }
-    kobotouch_binfo.entry = KOBOTOUCH_UBOOT_ENTRY;
+    kobotouch_binfo.entry = entry;
 }
 
 static void kobotouch_attach_sd(FslIMX50State *soc,
