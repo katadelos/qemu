@@ -70,6 +70,7 @@ typedef struct WarioMachineState {
     char *idme_pcbsn;
     char *idme_bootmode;
     char *idme_postmode;
+    bool idme_boot_partitions;
 } WarioMachineState;
 
 typedef struct WarioIdmeField {
@@ -155,14 +156,14 @@ static void wario_attach_card(FslIMX6State *s, WarioMachineState *wms,
 
     bus = qdev_get_child_bus(DEVICE(&s->usdhc[controller]), "sd-bus");
     card = qdev_new(emmc ? TYPE_EMMC : TYPE_SD_CARD);
-    if (emmc) {
+    if (emmc && wms->idme_boot_partitions) {
         /* Wario keeps IDME in volatile eMMC boot partition 1. */
         qdev_prop_set_uint64(card, "boot-partition-size", 2 * MiB);
         qdev_prop_set_bit(card, "boot-partitions-in-memory", true);
     }
     qdev_prop_set_drive_err(card, "drive", blk, &error_fatal);
     qdev_realize(card, bus, &error_fatal);
-    if (emmc) {
+    if (emmc && wms->idme_boot_partitions) {
         wario_populate_idme(card, wms);
     }
     object_unref(OBJECT(card));
@@ -416,6 +417,17 @@ static void wario_idme_set(char **field, const char *value)
     *field = g_strdup(value);
 }
 
+static bool wario_get_idme_boot_partitions(Object *obj, Error **errp)
+{
+    return WARIO_MACHINE(obj)->idme_boot_partitions;
+}
+
+static void wario_set_idme_boot_partitions(Object *obj, bool value,
+                                           Error **errp)
+{
+    WARIO_MACHINE(obj)->idme_boot_partitions = value;
+}
+
 #define WARIO_IDME_PROPERTY(_member)                                     \
     static char *wario_get_##_member(Object *obj, Error **errp)          \
     {                                                                    \
@@ -444,6 +456,7 @@ static void wario_machine_instance_init(Object *obj)
     wms->idme_pcbsn = g_strdup("0470000000000001");
     wms->idme_bootmode = g_strdup("main");
     wms->idme_postmode = g_strdup("normal");
+    wms->idme_boot_partitions = true;
 }
 
 static void wario_machine_instance_finalize(Object *obj)
@@ -485,6 +498,9 @@ static void wario_machine_init(ObjectClass *oc, const void *data)
     object_class_property_add_str(oc, "idme-postmode",
                                   wario_get_idme_postmode,
                                   wario_set_idme_postmode);
+    object_class_property_add_bool(oc, "idme-boot-partitions",
+                                   wario_get_idme_boot_partitions,
+                                   wario_set_idme_boot_partitions);
 }
 
 static const TypeInfo wario_machine_type = {

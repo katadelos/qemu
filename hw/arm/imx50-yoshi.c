@@ -99,6 +99,7 @@ struct YoshiMachineState {
     char *idme_postmode;
     bool whitney;
     bool celeste;
+    bool idme_boot_partitions;
     FslIMX50State *soc;
     QEMUTimer *diagnostic_timer;
 };
@@ -526,13 +527,14 @@ static void yoshi_attach_emmc(FslIMX50State *soc,
     DeviceState *card = qdev_new(TYPE_EMMC);
 
     bus = qdev_get_child_bus(DEVICE(&soc->esdhc[controller]), "sd-bus");
-    if (!tms->whitney) {
+    if (tms->idme_boot_partitions) {
+        /* Reader identity is volatile when no eMMC backend was supplied. */
         qdev_prop_set_uint64(card, "boot-partition-size", 2 * MiB);
         qdev_prop_set_bit(card, "boot-partitions-in-memory", true);
     }
     qdev_prop_set_drive_err(card, "drive", blk, &error_fatal);
     qdev_realize(card, bus, &error_fatal);
-    if (!tms->whitney) {
+    if (tms->idme_boot_partitions) {
         yoshi_populate_idme(card, tms);
     }
     object_unref(OBJECT(card));
@@ -779,6 +781,17 @@ static void yoshi_idme_set(char **field, const char *value)
     *field = g_strdup(value);
 }
 
+static bool yoshi_get_idme_boot_partitions(Object *obj, Error **errp)
+{
+    return YOSHI_MACHINE(obj)->idme_boot_partitions;
+}
+
+static void yoshi_set_idme_boot_partitions(Object *obj, bool value,
+                                           Error **errp)
+{
+    YOSHI_MACHINE(obj)->idme_boot_partitions = value;
+}
+
 #define YOSHI_IDME_PROPERTY(_member)                                    \
     static char *yoshi_get_##_member(Object *obj, Error **errp)         \
     {                                                                   \
@@ -809,6 +822,7 @@ static void yoshi_machine_instance_init(Object *obj)
     tms->idme_pcbsn = g_strdup("");
     tms->idme_bootmode = g_strdup("main");
     tms->idme_postmode = g_strdup("normal");
+    tms->idme_boot_partitions = true;
 }
 
 static void tequila_machine_instance_init(Object *obj)
@@ -893,6 +907,9 @@ static void yoshi_machine_init(ObjectClass *oc, const void *data)
     object_class_property_add_str(oc, "idme-postmode",
                                   yoshi_get_idme_postmode,
                                   yoshi_set_idme_postmode);
+    object_class_property_add_bool(oc, "idme-boot-partitions",
+                                   yoshi_get_idme_boot_partitions,
+                                   yoshi_set_idme_boot_partitions);
 }
 
 static const TypeInfo yoshi_machine_type = {
