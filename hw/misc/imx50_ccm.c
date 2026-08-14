@@ -91,12 +91,12 @@ static uint32_t imx50_ccm_get_clock(IMXCCMState *ccm, IMXClk clock)
         return 32768;
     case CLK_PER:
         /*
-         * Whitney's Linux clocksource accounts for an additional divide by
-         * two on ipg_perclk.  Feeding the GPT 8 MHz makes guest monotonic
-         * time advance at twice wall time and triggers Nickel's idle suspend
-         * prematurely.
+         * The reset clock tree used by the i.MX50 boards derives per_root
+         * from the 400 MHz PLL2 through the CBCDR /2 /1 /6 dividers.  Linux
+         * uses this clock directly for the GPT (CLKSRC=ipg_perclk), so the
+         * timer model must run at the same 33 1/3 MHz rate that Linux reports.
          */
-        return 4000000;
+        return 400000000 / 12;
     case CLK_IPG:
         return 66000000;
     case CLK_IPG_HIGH:
