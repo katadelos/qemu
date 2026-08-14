@@ -36,6 +36,7 @@
 #define WARIO_RAM_MAX        (2 * GiB)
 #define WARIO_UBOOT_ADDR     0x00980000
 #define WARIO_UBOOT_MAX      0x00080000
+#define WARIO_IRAM_STACK     0x00920000
 #define WARIO_MACHINE_ID     4091
 #define WARIO_EPDC_ADDR      0x020f4000
 /* Linux IRQ 129 minus the GIC SPI base (32). */
@@ -57,6 +58,7 @@
 #define WARIO_PXP_GIC_IRQ    98
 #define WARIO_IVT_OFFSET     0x400
 #define WARIO_IVT_ENTRY_OFF  0x04
+#define WARIO_IVT_SELF_OFF   0x14
 #define WARIO_IDME_BASE      0x5e000
 
 #define TYPE_WARIO_MACHINE MACHINE_TYPE_NAME("imx6sl-wario")
@@ -114,6 +116,9 @@ static void wario_firmware_reset(void *opaque)
     ARMCPU *cpu = opaque;
 
     cpu_reset(CPU(cpu));
+    if (wario_boot_info.entry >= WARIO_RAM_BASE) {
+        cpu->env.regs[13] = WARIO_IRAM_STACK;
+    }
     cpu_set_pc(CPU(cpu), wario_boot_info.entry);
 }
 
@@ -216,25 +221,22 @@ static void wario_load_firmware(MachineState *machine)
 {
     g_autofree uint8_t *image = NULL;
     gsize image_size;
+    hwaddr addr = WARIO_UBOOT_ADDR;
+    hwaddr max_size = WARIO_UBOOT_MAX;
     uint32_t entry;
+    uint32_t self;
     ssize_t size;
 
     if (!machine->firmware) {
         return;
     }
 
-    size = load_image_targphys(machine->firmware, WARIO_UBOOT_ADDR,
-                               WARIO_UBOOT_MAX, NULL);
-    if (size < 0) {
-        error_report("Unable to load Wario firmware '%s'",
-                     machine->firmware);
-        exit(EXIT_FAILURE);
-    }
-
     /*
      * The i.MX boot ROM consumes an IVT at offset 0x400 and jumps to its
      * entry pointer.  -bios supplies the post-ROM image, so reproduce that
      * last boot-ROM action instead of starting at the ARM reset vector.
+     * Stock U-Boot runs from OCRAM, while current barebox images are loaded
+     * directly into SDRAM; the IVT self pointer identifies either layout.
      */
     if (!g_file_get_contents(machine->firmware, (char **)&image,
                              &image_size, NULL) ||
@@ -243,8 +245,21 @@ static void wario_load_firmware(MachineState *machine)
         exit(EXIT_FAILURE);
     }
     entry = ldl_le_p(image + WARIO_IVT_OFFSET + WARIO_IVT_ENTRY_OFF);
-    if (entry < WARIO_UBOOT_ADDR || entry >= WARIO_UBOOT_ADDR + size) {
+    self = ldl_le_p(image + WARIO_IVT_OFFSET + WARIO_IVT_SELF_OFF);
+    if (self >= WARIO_RAM_BASE + WARIO_IVT_OFFSET &&
+        self < WARIO_RAM_BASE + machine->ram_size) {
+        addr = self - WARIO_IVT_OFFSET;
+        max_size = WARIO_RAM_BASE + machine->ram_size - addr;
+    }
+    if (entry < addr || entry >= addr + image_size) {
         error_report("Wario firmware IVT entry 0x%08x is outside image", entry);
+        exit(EXIT_FAILURE);
+    }
+
+    size = load_image_targphys(machine->firmware, addr, max_size, NULL);
+    if (size < 0) {
+        error_report("Unable to load Wario firmware '%s'",
+                     machine->firmware);
         exit(EXIT_FAILURE);
     }
 
