@@ -156,6 +156,8 @@ static void kobotouch_create_peripherals(FslIMX50State *soc,
                                        TYPE_TPS65185, 0x68);
     qdev_connect_gpio_out_named(DEVICE(tps65185), "pwrgood", 0,
         qdev_get_gpio_in(DEVICE(&soc->gpio[2]), 28));
+    qdev_connect_gpio_out_named(DEVICE(tps65185), "irq", 0,
+        qdev_get_gpio_in(DEVICE(&soc->gpio[3]), 15));
     qdev_connect_gpio_out(DEVICE(&soc->gpio[2]), 29,
         qdev_get_gpio_in_named(DEVICE(tps65185), "powerup", 0));
     qdev_connect_gpio_out(DEVICE(&soc->gpio[2]), 30,

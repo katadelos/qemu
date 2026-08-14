@@ -683,6 +683,7 @@ static void zforce_class_init(ObjectClass *oc, const void *data)
 struct TPS65185State {
     I2CSlave parent_obj;
     qemu_irq pwrgood;
+    qemu_irq irq;
     uint8_t regs[17];
     uint8_t pointer;
     bool have_pointer;
@@ -704,14 +705,25 @@ static void tps65185_update_pwrgood(TPS65185State *s)
 static int tps65185_send(I2CSlave *i2c, uint8_t data)
 {
     TPS65185State *s = TPS65185(i2c);
+    uint8_t reg;
 
     if (!s->have_pointer) {
         s->pointer = data;
         s->have_pointer = true;
     } else if (s->pointer < sizeof(s->regs)) {
-        s->regs[s->pointer++] = data;
-        if (s->pointer == 2) { /* register 1 was just written */
+        reg = s->pointer++;
+        s->regs[reg] = data;
+        if (reg == 1) {
             tps65185_update_pwrgood(s);
+        } else if (reg == 4 && (data & 0x40)) {
+            /*
+             * Programming VCOM EEPROM completes asynchronously in hardware.
+             * The Kobo driver waits for the active-low PRGC interrupt before
+             * it reloads and verifies the programmed VCOM value.
+             */
+            s->regs[4] &= ~0x40;
+            s->regs[7] |= 0x01;
+            qemu_set_irq(s->irq, 0);
         }
     }
     return 0;
@@ -720,8 +732,22 @@ static int tps65185_send(I2CSlave *i2c, uint8_t data)
 static uint8_t tps65185_recv(I2CSlave *i2c)
 {
     TPS65185State *s = TPS65185(i2c);
+    uint8_t reg;
+    uint8_t value;
 
-    return s->pointer < sizeof(s->regs) ? s->regs[s->pointer++] : 0;
+    if (s->pointer >= sizeof(s->regs)) {
+        return 0;
+    }
+
+    reg = s->pointer++;
+    value = s->regs[reg];
+    if (reg == 7 || reg == 8) {
+        s->regs[reg] = 0;
+        if (reg == 7) {
+            qemu_set_irq(s->irq, 1);
+        }
+    }
+    return value;
 }
 
 static int tps65185_event(I2CSlave *i2c, enum i2c_event event)
@@ -741,13 +767,14 @@ static void tps65185_reset(DeviceState *dev)
     memset(s->regs, 0, sizeof(s->regs));
     s->regs[0] = 25;   /* temperature, degrees C */
     s->regs[13] = 0x20; /* TMST1 conversion complete */
-    s->regs[15] = 0x3f; /* all display rails power-good */
+    s->regs[15] = 0xfa; /* all display rails power-good */
     s->regs[16] = 0x65; /* TPS65185 pass 2 */
     s->pointer = 0;
     s->have_pointer = false;
     s->powerup = false;
     s->power_enable = false;
     qemu_set_irq(s->pwrgood, 0);
+    qemu_set_irq(s->irq, 1);
 }
 
 static void tps65185_powerup(void *opaque, int line, int level)
@@ -771,6 +798,7 @@ static void tps65185_init(Object *obj)
     TPS65185State *s = TPS65185(obj);
 
     qdev_init_gpio_out_named(DEVICE(obj), &s->pwrgood, "pwrgood", 1);
+    qdev_init_gpio_out_named(DEVICE(obj), &s->irq, "irq", 1);
     qdev_init_gpio_in_named(DEVICE(obj), tps65185_powerup, "powerup", 1);
     qdev_init_gpio_in_named(DEVICE(obj), tps65185_power_enable,
                             "power-enable", 1);
