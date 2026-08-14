@@ -32,7 +32,7 @@
 #define ZFORCE_HEIGHT      800
 #define ZFORCE_KINDLE_MAX  4095
 #define ZFORCE_QUEUE_LEN   8
-#define ZFORCE_PAYLOAD_MAX 128
+#define ZFORCE_PAYLOAD_MAX 129
 
 typedef struct ZForcePacket {
     uint8_t len;
@@ -243,7 +243,7 @@ static unsigned zforce_direct_command_size(uint8_t command)
 
 static void zforce_finish_write(ZForceState *s)
 {
-    uint8_t response[128] = { 0 };
+    uint8_t response[ZFORCE_PAYLOAD_MAX] = { 0 };
     const uint8_t *command_data = s->write_buf;
     unsigned expected;
     uint8_t command;
@@ -306,21 +306,45 @@ static void zforce_finish_write(ZForceState *s)
         zforce_queue(s, response, 9);
         break;
     case ZFORCE_MCU_STATUS:
-        /*
-         * Newer zForce firmware returns a 123-byte status block.  The Kobo
-         * driver consumes the version, geometry and protocol fields and
-         * skips the reserved tail.
-         */
         response[0] = ZFORCE_MCU_STATUS;
-        response[1] = 1;          /* firmware major, little endian */
-        response[7] = s->kindle_v2_protocol ? 8 : 0; /* firmware revision */
-        response[21] = ZFORCE_WIDTH & 0xff;
-        response[22] = ZFORCE_WIDTH >> 8;
-        response[23] = ZFORCE_HEIGHT & 0xff;
-        response[24] = ZFORCE_HEIGHT >> 8;
-        response[41] = 2;         /* interface protocol major */
-        response[42] = 0;
-        zforce_queue(s, response, 124);
+        if (s->kindle_ti_protocol) {
+            /*
+             * The Eanab TI driver consumes 128 bytes following the command
+             * byte.  Keep this layout separate from the older ST/Kobo
+             * status response: their firmware and drivers use different
+             * field offsets and a shorter reserved tail.
+             */
+            response[1] = 1;      /* firmware major, little endian */
+            response[9] = 1;      /* one supported contact */
+            response[18] = 1;     /* dual-touch configuration enabled */
+            response[22] = 45;    /* idle scan frequency */
+            response[24] = 60;    /* finger scan frequency */
+            response[26] = 60;    /* stylus scan frequency */
+            response[28] = ZFORCE_WIDTH & 0xff;
+            response[29] = ZFORCE_WIDTH >> 8;
+            response[30] = ZFORCE_HEIGHT & 0xff;
+            response[31] = ZFORCE_HEIGHT >> 8;
+            response[32] = 90;    /* physical width, millimetres */
+            response[34] = 120;   /* physical height, millimetres */
+            response[36] = 1;     /* first active X LED */
+            response[37] = 16;    /* last active X LED */
+            response[38] = 1;     /* first active Y LED */
+            response[39] = 22;    /* last active Y LED */
+            response[46] = 2;     /* interface protocol major */
+            response[47] = 0;
+            zforce_queue(s, response, 129);
+        } else {
+            /* Preserve the existing ST/Kobo status response verbatim. */
+            response[1] = 1;      /* firmware major, little endian */
+            response[7] = s->kindle_v2_protocol ? 8 : 0;
+            response[21] = ZFORCE_WIDTH & 0xff;
+            response[22] = ZFORCE_WIDTH >> 8;
+            response[23] = ZFORCE_HEIGHT & 0xff;
+            response[24] = ZFORCE_HEIGHT >> 8;
+            response[41] = 2;     /* interface protocol major */
+            response[42] = 0;
+            zforce_queue(s, response, 124);
+        }
         break;
     case ZFORCE_LCD_LEVEL:
         response[0] = ZFORCE_LCD_LEVEL;
@@ -576,7 +600,14 @@ static void zforce_reset_input(void *opaque, int line, int level)
         s->queue_count = 0;
         s->reading_payload = false;
         s->read_pos = 0;
-        if (!s->kindle_protocol) {
+        if (s->kindle_ti_protocol) {
+            /* Eanab queues boot-complete only when reset is deasserted. */
+            if (level) {
+                zforce_queue_boot_complete(s);
+            } else {
+                zforce_update_irq(s);
+            }
+        } else if (!s->kindle_protocol) {
             zforce_queue_boot_complete(s);
         } else {
             zforce_update_irq(s);
