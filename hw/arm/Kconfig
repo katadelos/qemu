@@ -206,7 +206,7 @@ config IMX6SL_WARIO
     select NEONODE_ZFORCE
     select SD
 
-config IMX60_HEISENBERG
+config IMX6SL_EANAB
     bool
     default y
     depends on TCG && ARM
@@ -214,7 +214,6 @@ config IMX60_HEISENBERG
     select IMX6SL_WARIO
     select NEONODE_ZFORCE
     select SD
-    select SSI_M25P80
 
 config IMX6SLL_REX
     bool

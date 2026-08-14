@@ -12,7 +12,7 @@ i2c_ss.add(when: 'CONFIG_NEONODE_ZFORCE', if_true: files('zforce.c'))
 i2c_ss.add(when: 'CONFIG_IMX50_YOSHI', if_true: files('cyttsp.c'))
 i2c_ss.add(when: 'CONFIG_IMX50_KOBOTOUCH', if_true: files('kobotouch_msp430.c'))
 i2c_ss.add(when: 'CONFIG_IMX6SL_WARIO', if_true: files('max77696.c', 'drv2667.c', 'cyttsp4.c'))
-i2c_ss.add(when: 'CONFIG_IMX60_HEISENBERG', if_true: files(
+i2c_ss.add(when: 'CONFIG_IMX6SL_EANAB', if_true: files(
   'bd71815.c',
   'fp9928.c',
 ))

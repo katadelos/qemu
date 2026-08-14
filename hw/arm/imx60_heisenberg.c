@@ -25,7 +25,6 @@
 #include "hw/misc/imx6sl_mmdc.h"
 #include "hw/misc/imx6sl_pxp.h"
 #include "hw/sd/sd.h"
-#include "hw/ssi/ssi.h"
 #include "qemu/error-report.h"
 #include "qemu/units.h"
 #include "system/block-backend.h"
@@ -37,16 +36,20 @@
 #define HEISENBERG_RAM_MAX        (2 * GiB)
 #define HEISENBERG_UBOOT_ADDR     0x00981000
 #define HEISENBERG_UBOOT_MAX      0x0007f000
-#define HEISENBERG_MACHINE_ID     4091
+#define HEISENBERG_MACHINE_ID     4307
 #define HEISENBERG_EPDC_ADDR      0x020f4000
 #define HEISENBERG_EPDC_GIC_IRQ   97
 #define HEISENBERG_PXP_ADDR       0x020f0000
 #define HEISENBERG_PXP_GIC_IRQ    98
+#define HEISENBERG_FB_ADDR        0x9c100000
+#define HEISENBERG_FB_WIDTH       600
+#define HEISENBERG_FB_HEIGHT      800
+#define HEISENBERG_FB_STRIDE      608
 #define HEISENBERG_IVT_OFFSET     0x400
 #define HEISENBERG_IVT_ENTRY_OFF  0x04
 #define HEISENBERG_IDME_BASE      0x80000
 
-#define TYPE_HEISENBERG_MACHINE MACHINE_TYPE_NAME("imx6sl-heisenberg")
+#define TYPE_HEISENBERG_MACHINE MACHINE_TYPE_NAME("imx6sl-eanab")
 OBJECT_DECLARE_SIMPLE_TYPE(HeisenbergMachineState, HEISENBERG_MACHINE)
 
 struct HeisenbergMachineState {
@@ -142,23 +145,6 @@ static void heisenberg_attach_wifi(FslIMX6State *s)
     object_unref(OBJECT(wifi));
 }
 
-static void heisenberg_attach_panel_flash(FslIMX6State *s)
-{
-    SSIBus *bus;
-    DeviceState *flash;
-    DriveInfo *di = drive_get(IF_MTD, 0, 0);
-
-    bus = (SSIBus *)qdev_get_child_bus(DEVICE(&s->spi[0]), "spi");
-    flash = qdev_new("mx25l4005a");
-    if (di) {
-        qdev_prop_set_drive_err(flash, "drive", blk_by_legacy_dinfo(di),
-                                &error_fatal);
-    }
-    qdev_realize_and_unref(flash, BUS(bus), &error_fatal);
-    qdev_connect_gpio_out(DEVICE(&s->gpio[3]), 11,
-                          qdev_get_gpio_in_named(flash, SSI_GPIO_CS, 0));
-}
-
 static void heisenberg_load_firmware(MachineState *machine)
 {
     g_autofree uint8_t *image = NULL;
@@ -234,6 +220,9 @@ static void heisenberg_init(MachineState *machine)
                              &error_fatal);
     object_property_set_uint(OBJECT(s), "fec-phy-num", 0,
                              &error_fatal);
+    /* GPIO4_16 is the active-low hall sensor; an open cover reads high. */
+    object_property_set_uint(OBJECT(&s->gpio[3]), "reset-psr", BIT(16),
+                             &error_fatal);
     /*
      * Heisenberg's 2014.04 USDHC driver waits for transfer completion before
      * acknowledging command completion.  Run USDHC2's SDMA phase without the
@@ -248,7 +237,6 @@ static void heisenberg_init(MachineState *machine)
 
     heisenberg_attach_emmc(s, hms);
     heisenberg_attach_wifi(s);
-    heisenberg_attach_panel_flash(s);
 
     /* BD71815 and the FP9928 panel supply are on I2C1. */
     pmic = qdev_new(TYPE_BD71815);
@@ -271,6 +259,7 @@ static void heisenberg_init(MachineState *machine)
 
     mmdc = qdev_new(TYPE_IMX6SL_MMDC);
     object_property_add_child(OBJECT(machine), "mmdc", OBJECT(mmdc));
+    qdev_prop_set_uint64(mmdc, "ram-size", machine->ram_size);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(mmdc), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(mmdc), 0, 0x021b0000);
 
@@ -287,10 +276,20 @@ static void heisenberg_init(MachineState *machine)
                        qdev_get_gpio_in(DEVICE(&s->a9mpcore),
                                        HEISENBERG_PXP_GIC_IRQ));
 
-    /* Cocoa uses the stock EPDC update buffers until fb0's address is known. */
+    /*
+     * The stock 512 MiB kernel reserves CMA at 0x9c000000 and allocates its
+     * 6 MiB EPDC framebuffer at 0x9c100000.  X rotates the native 800x600
+     * panel into a 600x800, 8-bit surface with 608-byte scanlines.  Periodic
+     * scanout keeps Cocoa synchronized with mmap writes between update
+     * ioctls, as on the other Lab126 machines.
+     */
     epdc = qdev_new(TYPE_IMX_EPDC);
     object_property_add_child(OBJECT(machine), "epdc", OBJECT(epdc));
     object_property_set_link(OBJECT(epdc), "pxp", OBJECT(pxp), &error_fatal);
+    qdev_prop_set_uint64(epdc, "fb-addr", HEISENBERG_FB_ADDR);
+    qdev_prop_set_uint32(epdc, "fb-width", HEISENBERG_FB_WIDTH);
+    qdev_prop_set_uint32(epdc, "fb-height", HEISENBERG_FB_HEIGHT);
+    qdev_prop_set_uint32(epdc, "fb-stride", HEISENBERG_FB_STRIDE);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(epdc), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(epdc), 0, HEISENBERG_EPDC_ADDR);
     sysbus_connect_irq(SYS_BUS_DEVICE(epdc), 0,
@@ -369,7 +368,7 @@ static void heisenberg_machine_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
 
-    mc->desc = "Lab126 Heisenberg/Eanab (i.MX6SL, Cortex-A9, EPDC)";
+    mc->desc = "Lab126 Eanab / Kindle Basic 2 (i.MX6SL, Heisenberg)";
     mc->init = heisenberg_init;
     mc->max_cpus = 1;
     mc->default_cpus = 1;
