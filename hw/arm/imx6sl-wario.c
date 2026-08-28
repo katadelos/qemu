@@ -453,6 +453,12 @@ static void wario_init(MachineState *machine)
      */
     pmic = qdev_new(bourbon ? TYPE_KINDLE_ZFORCE2 : TYPE_CYTTSP4);
     qdev_prop_set_uint8(pmic, "address", bourbon ? 0x50 : 0x24);
+    if (!bourbon) {
+        qdev_prop_set_uint16(pmic, "x-resolution",
+                             pinot ? PINOT_FB_WIDTH : WARIO_FB_WIDTH);
+        qdev_prop_set_uint16(pmic, "y-resolution",
+                             pinot ? PINOT_FB_HEIGHT : WARIO_FB_HEIGHT);
+    }
     if (muscat) {
         qdev_prop_set_bit(pmic, "invert-x", true);
     }

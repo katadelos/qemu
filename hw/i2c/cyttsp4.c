@@ -1,6 +1,7 @@
 /* Minimal Cypress TrueTouch Gen4 controller used by Lab126 Wario. */
 
 #include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "hw/i2c/cyttsp4.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
@@ -26,8 +27,6 @@
 #define CY_LDR_EXIT         0x3b
 #define CY_LDR_INIT         0x48
 
-#define CY_TOUCH_MAX_X      757
-#define CY_TOUCH_MAX_Y      1023
 #define CY_TOUCH_REPORT_OFS 3
 #define CY_TOUCH_STATUS_OFS 5
 #define CY_TOUCH_RECORD_OFS 6
@@ -57,6 +56,8 @@ struct CYTTSP4State {
     bool input_pressed;
     bool report_pressed;
     bool invert_x;
+    uint16_t x_resolution;
+    uint16_t y_resolution;
 };
 
 static void cyttsp4_set_sysinfo(CYTTSP4State *s);
@@ -115,11 +116,13 @@ static void cyttsp4_input_sync(DeviceState *dev)
     }
 
     x = qemu_input_scale_axis(s->input_x, INPUT_EVENT_ABS_MIN,
-                              INPUT_EVENT_ABS_MAX, 0, CY_TOUCH_MAX_X);
+                              INPUT_EVENT_ABS_MAX, 0,
+                              s->x_resolution - 1);
     y = qemu_input_scale_axis(s->input_y, INPUT_EVENT_ABS_MIN,
-                              INPUT_EVENT_ABS_MAX, 0, CY_TOUCH_MAX_Y);
+                              INPUT_EVENT_ABS_MAX, 0,
+                              s->y_resolution - 1);
     if (s->invert_x) {
-        x = CY_TOUCH_MAX_X - x;
+        x = s->x_resolution - 1 - x;
     }
 
     if (s->input_pressed == s->report_pressed &&
@@ -225,13 +228,13 @@ static void cyttsp4_set_sysinfo(CYTTSP4State *s)
 
     s->regs[0x2c] = 0x0a; /* Live panel-test/scanning status. */
 
-    /* Panel configuration: 758 x 1024, 8-bit pressure. */
+    /* Panel configuration in the controller's portrait coordinate space. */
     s->regs[0x2d] = 24;
     s->regs[0x2e] = 32;
-    s->regs[0x33] = 0x02;
-    s->regs[0x34] = 0xf6;
-    s->regs[0x35] = 0x04;
-    s->regs[0x36] = 0x00;
+    s->regs[0x33] = s->x_resolution >> 8;
+    s->regs[0x34] = s->x_resolution;
+    s->regs[0x35] = s->y_resolution >> 8;
+    s->regs[0x36] = s->y_resolution;
     s->regs[0x37] = 0x00;
     s->regs[0x38] = 0xff;
 
@@ -245,9 +248,9 @@ static void cyttsp4_set_sysinfo(CYTTSP4State *s)
     opcfg[9] = 0;  opcfg[10] = 12; /* X */
     opcfg[11] = 2; opcfg[12] = 12; /* Y */
     opcfg[13] = 4; opcfg[14] = 8;  /* pressure */
-    opcfg[15] = 5; opcfg[16] = 4;  /* tracking ID */
-    opcfg[17] = 5; opcfg[18] = 2;  /* event ID */
-    opcfg[19] = 5; opcfg[20] = 2;  /* object ID */
+    opcfg[15] = 5 | (4 << 5); opcfg[16] = 4; /* tracking ID */
+    opcfg[17] = 5 | (2 << 5); opcfg[18] = 2; /* event ID */
+    opcfg[19] = 5;            opcfg[20] = 2; /* object ID */
     opcfg[21] = 6; opcfg[22] = 8;  /* width */
 
     /*
@@ -450,6 +453,12 @@ static void cyttsp4_realize(DeviceState *dev, Error **errp)
 {
     CYTTSP4State *s = CYTTSP4(dev);
 
+    if (!s->x_resolution || !s->y_resolution ||
+        s->x_resolution > 4096 || s->y_resolution > 4096) {
+        error_setg(errp, "invalid CYTTSP4 panel resolution");
+        return;
+    }
+
     s->irq_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
                                 cyttsp4_irq_release, s);
     s->heartbeat_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
@@ -508,6 +517,8 @@ static void cyttsp4_init(Object *obj)
 
 static const Property cyttsp4_properties[] = {
     DEFINE_PROP_BOOL("invert-x", CYTTSP4State, invert_x, false),
+    DEFINE_PROP_UINT16("x-resolution", CYTTSP4State, x_resolution, 758),
+    DEFINE_PROP_UINT16("y-resolution", CYTTSP4State, y_resolution, 1024),
 };
 
 static void cyttsp4_class_init(ObjectClass *oc, const void *data)
