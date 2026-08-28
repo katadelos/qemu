@@ -462,7 +462,13 @@ static void ar6003_htc_ready(SDState *sd)
     stw_le_p(ready + 4, 256); /* bytes per credit */
     ready[6] = 8;             /* maximum endpoints */
     ready[8] = 1;             /* HTC protocol 2.1 */
-    ready[9] = 0;             /* disable message bundling */
+    /*
+     * A one-message maximum keeps HTC bundling effectively disabled (the
+     * driver requires at least two packets for a bundle), while still making
+     * ath6kl allocate its scatter-request pool.  ath6kl_sdio_stop() expects
+     * that pool to exist even when the target never sends bundled messages.
+     */
+    ready[9] = 1;
     ar6003_htc_packet(sd, 0, ready, sizeof(ready));
 }
 
