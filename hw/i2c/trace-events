@@ -75,3 +75,7 @@ cyttsp_input(bool pressed, unsigned x, unsigned y, bool bootloader, uint8_t mode
 cyttsp_report(bool pressed, unsigned x, unsigned y, uint8_t stat, uint8_t id) "pressed=%d x=%u y=%u stat=0x%02x id=0x%02x"
 cyttsp_read(uint8_t mode, uint8_t tt_mode, uint8_t stat, unsigned x, unsigned y, uint8_t pressure, uint8_t id) "mode=0x%02x tt_mode=0x%02x stat=0x%02x x=%u y=%u pressure=%u id=0x%02x"
 cyttsp_command(uint8_t command, unsigned len) "command=0x%02x len=%u"
+
+# max77696.c
+max77696_power(bool down, uint8_t status, uint8_t interrupt, uint8_t mask) "down=%d status=0x%02x interrupt=0x%02x mask=0x%02x"
+max77696_irq(bool pending, uint8_t interrupt, uint8_t mask, uint8_t root_mask) "pending=%d interrupt=0x%02x mask=0x%02x root_mask=0x%02x"

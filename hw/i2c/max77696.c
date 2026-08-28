@@ -6,9 +6,21 @@
 #include "migration/vmstate.h"
 #include "qemu/module.h"
 #include "system/rtc.h"
+#include "system/runstate.h"
+#include "ui/input.h"
+#include "trace.h"
 
 #define MAX77696_MAIN_ADDR       0x3c
 #define MAX77696_UIC_ADDR        0x35
+#define GLBLINT                  0x05
+#define GLBLINTM                 0x06
+#define GLBLSTAT                 0x07
+#define GLBLINT_EN0_RISING       (1U << 7)
+#define GLBLINT_EN0_FALLING      (1U << 6)
+#define GLBLSTAT_EN0_S           (1U << 7)
+#define INTTOP1                  0xa2
+#define INTTOP1M                 0xa3
+#define INTTOP1_TOPSYS           (1U << 7)
 #define UIC_STATUS2              0x04
 #define UIC_STATUS2_ADC_MASK     0x1f
 #define ADC_CNTL                 0x26
@@ -44,6 +56,8 @@ struct MAX77696State {
     uint8_t len;
     uint8_t width;
     int64_t rtc_offset;
+    bool power_down;
+    QemuInputHandlerState *input_handler;
 };
 
 static bool max77696_is_rtc(MAX77696State *s)
@@ -55,6 +69,63 @@ static bool max77696_is_main(MAX77696State *s)
 {
     return I2C_SLAVE(s)->address == MAX77696_MAIN_ADDR;
 }
+
+static void max77696_update_irq(MAX77696State *s)
+{
+    bool topsys_pending;
+    bool root_pending;
+
+    if (!max77696_is_main(s)) {
+        return;
+    }
+
+    topsys_pending = s->regs[GLBLINT] & ~s->regs[GLBLINTM];
+    if (topsys_pending) {
+        s->regs[INTTOP1] |= INTTOP1_TOPSYS;
+    } else {
+        s->regs[INTTOP1] &= ~INTTOP1_TOPSYS;
+    }
+    root_pending = s->regs[INTTOP1] & ~s->regs[INTTOP1M];
+
+    /* The physical PMIC interrupt output is active-low. */
+    trace_max77696_irq(root_pending, s->regs[GLBLINT],
+                       s->regs[GLBLINTM], s->regs[INTTOP1M]);
+    qemu_set_irq(s->irq[0], root_pending ? 0 : 1);
+}
+
+static void max77696_input_event(DeviceState *dev, QemuConsole *src,
+                                 InputEvent *evt)
+{
+    MAX77696State *s = MAX77696(dev);
+    InputKeyEvent *key = evt->u.key.data;
+    int qcode = qemu_input_key_value_to_qcode(key->key);
+
+    if (qcode != Q_KEY_CODE_POWER || s->power_down == key->down) {
+        return;
+    }
+
+    s->power_down = key->down;
+    if (key->down) {
+        s->regs[GLBLSTAT] |= GLBLSTAT_EN0_S;
+        s->regs[GLBLINT] |= GLBLINT_EN0_RISING;
+    } else {
+        s->regs[GLBLSTAT] &= ~GLBLSTAT_EN0_S;
+        s->regs[GLBLINT] |= GLBLINT_EN0_FALLING;
+    }
+    trace_max77696_power(key->down, s->regs[GLBLSTAT],
+                         s->regs[GLBLINT], s->regs[GLBLINTM]);
+    max77696_update_irq(s);
+
+    if (key->down) {
+        qemu_system_wakeup_request(QEMU_WAKEUP_REASON_OTHER, NULL);
+    }
+}
+
+static const QemuInputHandler max77696_input_handler = {
+    .name = "MAX77696 EN0 power button",
+    .mask = INPUT_EVENT_MASK_KEY,
+    .event = max77696_input_event,
+};
 
 static uint16_t max77696_adc_sample(unsigned channel)
 {
@@ -166,6 +237,10 @@ static int max77696_send(I2CSlave *i2c, uint8_t data)
         } else {
             s->regs[index] = data;
         }
+        if (max77696_is_main(s) &&
+            (index == GLBLINTM || index == INTTOP1M)) {
+            max77696_update_irq(s);
+        }
         max77696_advance(s);
     }
     return 0;
@@ -174,7 +249,14 @@ static int max77696_send(I2CSlave *i2c, uint8_t data)
 static uint8_t max77696_recv(I2CSlave *i2c)
 {
     MAX77696State *s = MAX77696(i2c);
-    uint8_t value = s->regs[max77696_index(s)];
+    unsigned index = max77696_index(s);
+    uint8_t value = s->regs[index];
+
+    /* TOPSYS edge status is latched until software reads GLBLINT. */
+    if (max77696_is_main(s) && index == GLBLINT) {
+        s->regs[GLBLINT] = 0;
+        max77696_update_irq(s);
+    }
 
     max77696_advance(s);
     return value;
@@ -224,7 +306,12 @@ static void max77696_realize(DeviceState *dev, Error **errp)
 
     if (max77696_is_main(s)) {
         /* The physical PMIC IRQ pin is active-low. */
-        qemu_set_irq(s->irq[0], 1);
+        s->regs[GLBLINTM] = 0xff;
+        s->regs[INTTOP1M] = 0xff;
+        s->power_down = false;
+        s->input_handler = qemu_input_handler_register(
+            dev, &max77696_input_handler);
+        max77696_update_irq(s);
         qemu_set_irq(s->irq[1], 0);
     }
 }
@@ -234,9 +321,28 @@ static void max77696_reset(DeviceState *dev)
     MAX77696State *s = MAX77696(dev);
 
     if (max77696_is_main(s)) {
-        qemu_set_irq(s->irq[0], 1);
+        s->regs[GLBLINT] = 0;
+        s->regs[GLBLSTAT] &= ~GLBLSTAT_EN0_S;
+        s->regs[INTTOP1] &= ~INTTOP1_TOPSYS;
+        s->power_down = false;
+        max77696_update_irq(s);
         qemu_set_irq(s->irq[1], 0);
     }
+}
+
+static void max77696_unrealize(DeviceState *dev)
+{
+    MAX77696State *s = MAX77696(dev);
+
+    if (s->input_handler) {
+        qemu_input_handler_unregister(s->input_handler);
+    }
+}
+
+static int max77696_post_load(void *opaque, int version_id)
+{
+    max77696_update_irq(opaque);
+    return 0;
 }
 
 static void max77696_init(Object *obj)
@@ -248,8 +354,9 @@ static void max77696_init(Object *obj)
 
 static const VMStateDescription max77696_vmstate = {
     .name = "max77696",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
+    .post_load = max77696_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_I2C_SLAVE(parent_obj, MAX77696State),
         VMSTATE_UINT8_ARRAY(regs, MAX77696State, 512),
@@ -258,6 +365,7 @@ static const VMStateDescription max77696_vmstate = {
         VMSTATE_UINT8(len, MAX77696State),
         VMSTATE_UINT8(width, MAX77696State),
         VMSTATE_INT64(rtc_offset, MAX77696State),
+        VMSTATE_BOOL_V(power_down, MAX77696State, 2),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -268,6 +376,7 @@ static void max77696_class_init(ObjectClass *oc, const void *data)
     I2CSlaveClass *sc = I2C_SLAVE_CLASS(oc);
 
     dc->realize = max77696_realize;
+    dc->unrealize = max77696_unrealize;
     dc->vmsd = &max77696_vmstate;
     device_class_set_legacy_reset(dc, max77696_reset);
     sc->send = max77696_send;
