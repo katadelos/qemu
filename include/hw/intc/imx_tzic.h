@@ -19,6 +19,8 @@ struct IMXTZICState {
     uint32_t intcntl;
     uint32_t dsmint;
     uint32_t wakeup[4];
+    bool wake_filter;
     qemu_irq irq;
+    qemu_irq deep_wake[2];
 };
 #endif

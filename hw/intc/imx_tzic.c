@@ -11,9 +11,29 @@ static void imx_tzic_update(IMXTZICState *s)
     bool active = false;
 
     for (i = 0; i < ARRAY_SIZE(s->pending); i++) {
-        active |= s->pending[i] & s->enabled[i];
+        uint32_t enabled = s->enabled[i];
+
+        if (s->wake_filter) {
+            enabled &= s->wakeup[i];
+        }
+        active |= s->pending[i] & enabled;
     }
     qemu_set_irq(s->irq, active);
+    qemu_set_irq(s->deep_wake[0], active && s->wake_filter);
+    qemu_set_irq(s->deep_wake[1], active && s->wake_filter);
+}
+
+static void imx_tzic_update_wake_filter(IMXTZICState *s)
+{
+    unsigned i;
+
+    s->wake_filter = false;
+    for (i = 0; i < ARRAY_SIZE(s->wakeup); i++) {
+        if (s->wakeup[i] != s->enabled[i]) {
+            s->wake_filter = true;
+            return;
+        }
+    }
 }
 
 static void imx_tzic_set_irq(void *opaque, int irq, int level)
@@ -103,6 +123,14 @@ static void imx_tzic_write(void *opaque, hwaddr offset, uint64_t value,
         } else if (offset >= 0xe00 && offset < 0xe10) {
             index = (offset - 0xe00) / 4;
             s->wakeup[index] = value;
+            /*
+             * Linux copies ENSET into all four WAKEUP banks for ordinary
+             * idle, but installs a different wake-only set for system
+             * suspend.  Treat that completed register state as the TZIC's
+             * deep-sleep input filter so a non-wake timer cannot release a
+             * guest blocked in WFI.
+             */
+            imx_tzic_update_wake_filter(s);
         }
         break;
     }
@@ -122,11 +150,12 @@ static void imx_tzic_init(Object *obj)
                           TYPE_IMX_TZIC, 0x1000);
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
+    qdev_init_gpio_out_named(DEVICE(obj), s->deep_wake, "deep-wake", 2);
     qdev_init_gpio_in(DEVICE(obj), imx_tzic_set_irq, IMX_TZIC_NUM_IRQS);
 }
 
 static const VMStateDescription vmstate_imx_tzic = {
-    .name = TYPE_IMX_TZIC, .version_id = 1, .minimum_version_id = 1,
+    .name = TYPE_IMX_TZIC, .version_id = 2, .minimum_version_id = 2,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(enabled, IMXTZICState, 4),
         VMSTATE_UINT32_ARRAY(pending, IMXTZICState, 4),
@@ -135,6 +164,7 @@ static const VMStateDescription vmstate_imx_tzic = {
         VMSTATE_UINT32(intcntl, IMXTZICState),
         VMSTATE_UINT32(dsmint, IMXTZICState),
         VMSTATE_UINT32_ARRAY(wakeup, IMXTZICState, 4),
+        VMSTATE_BOOL(wake_filter, IMXTZICState),
         VMSTATE_END_OF_LIST()
     },
 };

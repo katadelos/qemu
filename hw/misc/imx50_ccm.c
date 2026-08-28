@@ -9,12 +9,18 @@
 #define CCM_CS2CDR 0x2c
 #define CCM_CSCDR2 0x38
 
+#define PLL_DP_CTL      0x00
+#define PLL_DP_CTL_LRF  (1U << 0)
+#define PLL_DP_CTL_RST  (1U << 4)
+#define PLL_DP_CTL_UPEN (1U << 5)
+
 static void imx50_ccm_reset(DeviceState *dev)
 {
     IMX50CCMState *s = IMX50_CCM(dev);
 
     memset(s->ccm, 0, sizeof(s->ccm));
     memset(s->pll, 0, sizeof(s->pll));
+    s->stop_wake_asserted = false;
 
     /*
      * SSI_EXT1 and SSI_EXT2 use their respective common SSI clocks after
@@ -50,22 +56,49 @@ static void imx50_ccm_write(void *opaque, hwaddr offset, uint64_t value,
 static uint64_t imx50_pll_read(void *opaque, hwaddr offset, unsigned size)
 {
     IMX50PLLRegion *r = opaque;
-    uint32_t value = r->ccm->pll[r->index][offset / 4];
 
-    /* DPLL lock (LRF) is asserted once software enables the PLL. */
-    return offset == 0 ? value | 1 : value;
+    return r->ccm->pll[r->index][offset / 4];
 }
 
 static void imx50_pll_write(void *opaque, hwaddr offset, uint64_t value,
                             unsigned size)
 {
     IMX50PLLRegion *r = opaque;
+    uint32_t old = r->ccm->pll[r->index][offset / 4];
+
+    if (offset == PLL_DP_CTL) {
+        /*
+         * LRF is read-only.  An enabled PLL retains an existing lock, and a
+         * manual RST write starts it and establishes a new lock.
+         */
+        value &= ~PLL_DP_CTL_LRF;
+        if ((value & PLL_DP_CTL_UPEN) &&
+            ((value & PLL_DP_CTL_RST) || (old & PLL_DP_CTL_LRF))) {
+            value |= PLL_DP_CTL_LRF;
+        }
+    }
 
     /* DP_CONFIG.LDREQ clears when the new DPLL factors are accepted. */
     if (offset == 0x04) {
         value &= ~1U;
     }
     r->ccm->pll[r->index][offset / 4] = value;
+}
+
+static void imx50_ccm_stop_wake(void *opaque, int line, int level)
+{
+    IMX50CCMState *s = opaque;
+
+    /*
+     * The i.MX50 STOP workaround restarts PLL1 before WFI.  Hardware holds
+     * the CPU on step_clk until PLL1 has relocked at the staged rate, so the
+     * first instruction after WFI observes LRF set without another restart.
+     */
+    if (level && !s->stop_wake_asserted &&
+        (s->pll[0][PLL_DP_CTL / 4] & PLL_DP_CTL_UPEN)) {
+        s->pll[0][PLL_DP_CTL / 4] |= PLL_DP_CTL_LRF;
+    }
+    s->stop_wake_asserted = level;
 }
 
 static const MemoryRegionOps imx50_ccm_ops = {
@@ -125,15 +158,18 @@ static void imx50_ccm_init(Object *obj)
                               TYPE_IMX50_CCM ".pll", 0x100);
         sysbus_init_mmio(sbd, &s->pll_iomem[i]);
     }
+    qdev_init_gpio_in_named(DEVICE(obj), imx50_ccm_stop_wake,
+                            "stop-wake", 1);
 }
 
 static const VMStateDescription vmstate_imx50_ccm = {
     .name = TYPE_IMX50_CCM,
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(ccm, IMX50CCMState, 0x1000 / 4),
         VMSTATE_UINT32_2DARRAY(pll, IMX50CCMState, 3, 0x100 / 4),
+        VMSTATE_BOOL(stop_wake_asserted, IMX50CCMState),
         VMSTATE_END_OF_LIST()
     },
 };

@@ -634,6 +634,9 @@ static void fsl_imx50_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ccm), 1, 0x63f80000);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ccm), 2, 0x63f84000);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ccm), 3, 0x63f88000);
+    qdev_connect_gpio_out_named(
+        DEVICE(&s->tzic), "deep-wake", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->ccm), "stop-wake", 0));
     for (i = 0; i < FSL_IMX50_NUM_UARTS; i++) {
         qdev_prop_set_chr(DEVICE(&s->uart[i]), "chardev", serial_hd(i));
         if (!sysbus_realize(SYS_BUS_DEVICE(&s->uart[i]), errp)) {
