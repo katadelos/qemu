@@ -403,6 +403,13 @@ static void wario_init(MachineState *machine)
                              &error_fatal);
     object_property_set_uint(OBJECT(s), "fec-phy-num", 0,
                              &error_fatal);
+
+    /* Icewine's Hall output is high while the cover is open. */
+    if (g_str_has_prefix(wms->idme_pcbsn, "047") ||
+        g_str_has_prefix(wms->idme_pcbsn, "048")) {
+        object_property_set_uint(OBJECT(&s->gpio[3]), "reset-psr",
+                                 BIT(7), &error_fatal);
+    }
     qdev_realize(DEVICE(s), NULL, &error_fatal);
 
     memory_region_add_subregion(get_system_memory(), WARIO_RAM_BASE,
