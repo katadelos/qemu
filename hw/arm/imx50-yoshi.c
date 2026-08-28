@@ -16,6 +16,7 @@
 #include "hw/ssi/mc13892.h"
 #include "hw/ssi/ssi.h"
 #include "migration/vmstate.h"
+#include "net/net.h"
 #include "qemu/units.h"
 #include "system/block-backend.h"
 #include "system/reset.h"
@@ -551,6 +552,7 @@ static void yoshi_attach_wifi(FslIMX50State *soc)
      */
     bus = qdev_get_child_bus(DEVICE(&soc->esdhc[1]), "sd-bus");
     wifi = qdev_new(TYPE_AR6003_SDIO);
+    qemu_configure_nic_device(wifi, true, "ar6003");
     qdev_realize(wifi, bus, &error_fatal);
     qdev_connect_gpio_out(DEVICE(&soc->gpio[4]), 28,
                           qdev_get_gpio_in_named(wifi, "power", 0));
@@ -966,6 +968,7 @@ static void tequila_machine_init(ObjectClass *oc, const void *data)
 
     mc->desc = "Amazon Kindle 4 Tequila (i.MX508)";
     mc->default_ram_id = "tequila.ram";
+    mc->default_nic = TYPE_AR6003_SDIO;
 }
 
 static const TypeInfo tequila_machine_type = {
