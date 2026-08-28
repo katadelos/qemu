@@ -256,9 +256,9 @@ static void heisenberg_init(MachineState *machine)
     object_unref(OBJECT(pmic));
     i2c_slave_create_simple(s->i2c[0].bus, TYPE_FP9928, 0x48);
 
-    /* Eanab zForce2 TI protocol: I2C2 address 0x51 and GPIO4 controls. */
+    /* Eanab zForce2 TI protocol: vendor DT uses I2C2 address 0x50. */
     touch = qdev_new(TYPE_KINDLE_ZFORCE2_TI);
-    qdev_prop_set_uint8(touch, "address", 0x51);
+    qdev_prop_set_uint8(touch, "address", 0x50);
     qdev_realize(touch, BUS(s->i2c[1].bus), &error_fatal);
     qdev_connect_gpio_out(touch, 0,
                           qdev_get_gpio_in(DEVICE(&s->gpio[3]), 3));
