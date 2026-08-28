@@ -47,6 +47,7 @@
 #define HEISENBERG_FB_STRIDE      608
 #define HEISENBERG_IVT_OFFSET     0x400
 #define HEISENBERG_IVT_ENTRY_OFF  0x04
+#define HEISENBERG_IVT_SELF_OFF   0x14
 #define HEISENBERG_IDME_BASE      0x80000
 
 #define TYPE_HEISENBERG_MACHINE MACHINE_TYPE_NAME("imx6sl-eanab")
@@ -149,40 +150,48 @@ static void heisenberg_load_firmware(MachineState *machine)
 {
     g_autofree uint8_t *image = NULL;
     gsize image_size;
+    hwaddr addr = HEISENBERG_UBOOT_ADDR;
+    hwaddr max_size = HEISENBERG_UBOOT_MAX;
     uint32_t entry;
+    uint32_t self;
     ssize_t size;
 
     if (!machine->firmware) {
         return;
     }
 
-    /*
-     * Unlike the older Wario images, Heisenberg's IVT self pointer is
-     * 0x00981400 while the IVT remains at file offset 0x400.  The i.MX boot
-     * ROM therefore places byte zero at 0x00981000; loading it at Wario's
-     * 0x00980000 base makes the 0x00982000 entry land 0x1000 bytes late.
-     */
-    size = load_image_targphys(machine->firmware, HEISENBERG_UBOOT_ADDR,
-                               HEISENBERG_UBOOT_MAX, NULL);
-    if (size < 0) {
-        error_report("Unable to load Heisenberg firmware '%s'",
-                     machine->firmware);
-        exit(EXIT_FAILURE);
-    }
-
     if (!g_file_get_contents(machine->firmware, (char **)&image,
                              &image_size, NULL) ||
-        image_size < HEISENBERG_IVT_OFFSET + HEISENBERG_IVT_ENTRY_OFF +
+        image_size < HEISENBERG_IVT_OFFSET + HEISENBERG_IVT_SELF_OFF +
                      sizeof(entry)) {
         error_report("Heisenberg firmware has no readable IVT");
         exit(EXIT_FAILURE);
     }
     entry = ldl_le_p(image + HEISENBERG_IVT_OFFSET +
                      HEISENBERG_IVT_ENTRY_OFF);
-    if (entry < HEISENBERG_UBOOT_ADDR ||
-        entry >= HEISENBERG_UBOOT_ADDR + size) {
+    self = ldl_le_p(image + HEISENBERG_IVT_OFFSET +
+                    HEISENBERG_IVT_SELF_OFF);
+
+    /*
+     * Vendor U-Boot is an OCRAM image whose IVT self pointer is 0x00981400.
+     * Modern barebox is a post-DCD SDRAM image and records that layout in the
+     * same field.  Reproduce the ROM's final load-and-jump action for both.
+     */
+    if (self >= HEISENBERG_RAM_BASE + HEISENBERG_IVT_OFFSET &&
+        self < HEISENBERG_RAM_BASE + machine->ram_size) {
+        addr = self - HEISENBERG_IVT_OFFSET;
+        max_size = HEISENBERG_RAM_BASE + machine->ram_size - addr;
+    }
+    if (entry < addr || entry >= addr + image_size) {
         error_report("Heisenberg firmware IVT entry 0x%08x is outside image",
                      entry);
+        exit(EXIT_FAILURE);
+    }
+
+    size = load_image_targphys(machine->firmware, addr, max_size, NULL);
+    if (size < 0) {
+        error_report("Unable to load Heisenberg firmware '%s'",
+                     machine->firmware);
         exit(EXIT_FAILURE);
     }
     heisenberg_boot_info.entry = entry;
