@@ -61,6 +61,14 @@
 #define WARIO_IVT_SELF_OFF   0x14
 #define WARIO_IDME_BASE      0x5e000
 
+#define WARIO_ATAG_SERIAL16   0x5441000a
+#define WARIO_ATAG_REVISION16 0x5441000b
+#define WARIO_ATAG_MACADDR    0x5441000d
+#define WARIO_ATAG_BOOTMODE   0x5441000f
+#define WARIO_ATAG_ID16_SIZE  16
+#define WARIO_ATAG_MAC_SIZE   32
+#define WARIO_ATAG_BOOT_SIZE  32
+
 #define TYPE_WARIO_MACHINE MACHINE_TYPE_NAME("imx6sl-wario")
 OBJECT_DECLARE_SIMPLE_TYPE(WarioMachineState, WARIO_MACHINE)
 
@@ -109,6 +117,60 @@ static bool wario_is_muscat(const WarioMachineState *wms)
     return g_str_has_prefix(wms->idme_pcbsn, "067") ||
            g_str_has_prefix(wms->idme_pcbsn, "068") ||
            g_ascii_strncasecmp(wms->idme_pcbsn, "13g", 3) == 0;
+}
+
+static uint8_t *wario_append_string_atag(uint8_t *p, uint32_t tag,
+                                         const char *value,
+                                         size_t payload_size)
+{
+    stl_le_p(p, (payload_size + 8) / 4);
+    stl_le_p(p + 4, tag);
+    memset(p + 8, 0, payload_size);
+    memcpy(p + 8, value, MIN(strlen(value), payload_size));
+    return p + 8 + payload_size;
+}
+
+static int wario_write_extra_atags(const struct arm_boot_info *info,
+                                   void *opaque, void *buffer,
+                                   size_t max_size)
+{
+    WarioMachineState *wms = opaque;
+    uint8_t *start = buffer;
+    uint8_t *p = start;
+    const size_t required =
+        2 * (8 + WARIO_ATAG_ID16_SIZE) +
+        (8 + WARIO_ATAG_MAC_SIZE) + (8 + WARIO_ATAG_BOOT_SIZE);
+
+    (void)info;
+
+    if (max_size < required) {
+        return -1;
+    }
+
+    p = wario_append_string_atag(p, WARIO_ATAG_SERIAL16,
+                                 wms->idme_serial, WARIO_ATAG_ID16_SIZE);
+    p = wario_append_string_atag(p, WARIO_ATAG_REVISION16,
+                                 wms->idme_pcbsn, WARIO_ATAG_ID16_SIZE);
+
+    stl_le_p(p, (WARIO_ATAG_MAC_SIZE + 8) / 4);
+    stl_le_p(p + 4, WARIO_ATAG_MACADDR);
+    memset(p + 8, 0, WARIO_ATAG_MAC_SIZE);
+    memcpy(p + 8, wms->idme_mac,
+           MIN(strlen(wms->idme_mac), (size_t)12));
+    memcpy(p + 20, wms->idme_mfg,
+           MIN(strlen(wms->idme_mfg), (size_t)20));
+    p += 8 + WARIO_ATAG_MAC_SIZE;
+
+    stl_le_p(p, (WARIO_ATAG_BOOT_SIZE + 8) / 4);
+    stl_le_p(p + 4, WARIO_ATAG_BOOTMODE);
+    memset(p + 8, 0, WARIO_ATAG_BOOT_SIZE);
+    memcpy(p + 8, wms->idme_bootmode,
+           MIN(strlen(wms->idme_bootmode), (size_t)16));
+    memcpy(p + 24, wms->idme_postmode,
+           MIN(strlen(wms->idme_postmode), (size_t)16));
+    p += 8 + WARIO_ATAG_BOOT_SIZE;
+
+    return (int)(p - start);
 }
 
 static void wario_firmware_reset(void *opaque)
@@ -328,6 +390,8 @@ static void wario_init(MachineState *machine)
         .loader_start = WARIO_RAM_BASE,
         .board_id = WARIO_MACHINE_ID,
         .ram_size = machine->ram_size,
+        .write_extra_atags = wario_write_extra_atags,
+        .write_extra_atags_opaque = wms,
     };
 
     s = FSL_IMX6(object_new(TYPE_FSL_IMX6));

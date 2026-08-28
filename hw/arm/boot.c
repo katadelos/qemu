@@ -320,6 +320,24 @@ static void set_kernel_args(const struct arm_boot_info *info, AddressSpace *as)
         WRITE_WORD(p, 0x54410009);
         p += cmdline_size * 4;
     }
+    if (info->write_extra_atags) {
+        uint8_t extra_atags[0x1000];
+        int extra_atags_len;
+
+        extra_atags_len = info->write_extra_atags(
+            info, info->write_extra_atags_opaque, extra_atags,
+            sizeof(extra_atags));
+        if (extra_atags_len < 0 ||
+            extra_atags_len > (int)sizeof(extra_atags) ||
+            (extra_atags_len & 3)) {
+            error_report("invalid board-specific ATAG data length %d",
+                         extra_atags_len);
+            exit(1);
+        }
+        address_space_write(as, p, MEMTXATTRS_UNSPECIFIED,
+                            extra_atags, extra_atags_len);
+        p += extra_atags_len;
+    }
     if (info->atag_board) {
         /* ATAG_BOARD */
         int atag_board_len;

@@ -64,6 +64,14 @@ struct arm_boot_info {
      * control whether Linux is booted as secure(true) or non-secure(false).
      */
     bool secure_boot;
+    /*
+     * Optional complete, board-specific ATAG records inserted before
+     * ATAG_NONE.  The callback returns the byte length written, or a negative
+     * value on failure.  Records must include their own headers and padding.
+     */
+    int (*write_extra_atags)(const struct arm_boot_info *info, void *opaque,
+                             void *p, size_t max_size);
+    void *write_extra_atags_opaque;
     int (*atag_board)(const struct arm_boot_info *info, void *p);
     /* multicore boards that use the default secondary core boot functions
      * can ignore these two function calls. If the default functions won't
