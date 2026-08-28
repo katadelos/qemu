@@ -81,6 +81,7 @@ typedef struct WarioMachineState {
     char *idme_bootmode;
     char *idme_postmode;
     bool idme_boot_partitions;
+    bool kobo_rgb565;
 } WarioMachineState;
 
 typedef struct WarioIdmeField {
@@ -493,6 +494,7 @@ static void wario_init(MachineState *machine)
         qdev_prop_set_uint32(epdc, "fb-height", WARIO_FB_HEIGHT);
         qdev_prop_set_uint32(epdc, "fb-stride", WARIO_FB_STRIDE);
     }
+    qdev_prop_set_uint8(epdc, "fb-bpp", wms->kobo_rgb565 ? 2 : 1);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(epdc), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(epdc), 0, WARIO_EPDC_ADDR);
     sysbus_connect_irq(SYS_BUS_DEVICE(epdc), 0,
@@ -558,6 +560,16 @@ static void wario_set_idme_boot_partitions(Object *obj, bool value,
     WARIO_MACHINE(obj)->idme_boot_partitions = value;
 }
 
+static bool wario_get_kobo_rgb565(Object *obj, Error **errp)
+{
+    return WARIO_MACHINE(obj)->kobo_rgb565;
+}
+
+static void wario_set_kobo_rgb565(Object *obj, bool value, Error **errp)
+{
+    WARIO_MACHINE(obj)->kobo_rgb565 = value;
+}
+
 #define WARIO_IDME_PROPERTY(_member)                                     \
     static char *wario_get_##_member(Object *obj, Error **errp)          \
     {                                                                    \
@@ -587,6 +599,7 @@ static void wario_machine_instance_init(Object *obj)
     wms->idme_bootmode = g_strdup("main");
     wms->idme_postmode = g_strdup("normal");
     wms->idme_boot_partitions = true;
+    wms->kobo_rgb565 = false;
 }
 
 static void wario_machine_instance_finalize(Object *obj)
@@ -631,6 +644,9 @@ static void wario_machine_init(ObjectClass *oc, const void *data)
     object_class_property_add_bool(oc, "idme-boot-partitions",
                                    wario_get_idme_boot_partitions,
                                    wario_set_idme_boot_partitions);
+    object_class_property_add_bool(oc, "kobo-rgb565",
+                                   wario_get_kobo_rgb565,
+                                   wario_set_kobo_rgb565);
 }
 
 static const TypeInfo wario_machine_type = {
