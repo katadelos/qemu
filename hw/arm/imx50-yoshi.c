@@ -601,7 +601,7 @@ static void yoshi_attach_panel_flash(FslIMX50State *soc)
                        cs);
 }
 
-static void whitney_attach_pmic(FslIMX50State *soc)
+static DeviceState *whitney_attach_pmic(FslIMX50State *soc)
 {
     SSIBus *bus;
     DeviceState *pmic;
@@ -617,9 +617,11 @@ static void whitney_attach_pmic(FslIMX50State *soc)
     qdev_connect_gpio_out_named(
         pmic, "irq", 0,
         qdev_get_gpio_in(DEVICE(&soc->gpio[5]), 8));
+
+    return pmic;
 }
 
-static void tequila_attach_keyboard(FslIMX50State *soc)
+static void tequila_attach_keyboard(FslIMX50State *soc, DeviceState *pmic)
 {
     DeviceState *keyboard = qdev_new(TYPE_TEQUILA_KEYBOARD);
     static const struct {
@@ -648,9 +650,12 @@ static void tequila_attach_keyboard(FslIMX50State *soc)
             qdev_get_gpio_in(DEVICE(&soc->gpio[connections[i].bank]),
                              connections[i].pin));
     }
+    qdev_connect_gpio_out(
+        keyboard, TEQUILA_KEY_POWER,
+        qdev_get_gpio_in_named(pmic, "power-button", 0));
 }
 
-static void whitney_attach_input(FslIMX50State *soc)
+static void whitney_attach_input(FslIMX50State *soc, DeviceState *pmic)
 {
     DeviceState *keyboard = qdev_new(TYPE_TEQUILA_KEYBOARD);
     I2CSlave *mma8453;
@@ -684,10 +689,14 @@ static void whitney_attach_input(FslIMX50State *soc)
     qdev_connect_gpio_out(
         keyboard, TEQUILA_KEY_HOME,
         qemu_irq_invert(qdev_get_gpio_in(DEVICE(&soc->gpio[0]), 0)));
+    qdev_connect_gpio_out(
+        keyboard, TEQUILA_KEY_POWER,
+        qdev_get_gpio_in_named(pmic, "power-button", 0));
 }
 
-static void celeste_attach_input(FslIMX50State *soc)
+static void celeste_attach_input(FslIMX50State *soc, DeviceState *pmic)
 {
+    DeviceState *keyboard = qdev_new(TYPE_TEQUILA_KEYBOARD);
     I2CSlave *cyttsp;
 
     /*
@@ -703,12 +712,18 @@ static void celeste_attach_input(FslIMX50State *soc)
 
     /* SD2_WP (GPIO5_16) is high while the magnetic cover is open. */
     qemu_set_irq(qdev_get_gpio_in(DEVICE(&soc->gpio[4]), 16), 1);
+
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(keyboard), &error_fatal);
+    qdev_connect_gpio_out(
+        keyboard, TEQUILA_KEY_POWER,
+        qdev_get_gpio_in_named(pmic, "power-button", 0));
 }
 
 static void yoshi_init(MachineState *machine)
 {
     YoshiMachineState *tms = YOSHI_MACHINE(machine);
     FslIMX50State *soc;
+    DeviceState *pmic;
     I2CSlave *papyrus;
 
     if (machine->ram_size > YOSHI_RAM_MAX) {
@@ -765,13 +780,13 @@ static void yoshi_init(MachineState *machine)
     yoshi_attach_wifi(soc);
     yoshi_attach_panel_flash(soc);
     /* The production Yoshi-family boards use MC13892 on CSPI3. */
-    whitney_attach_pmic(soc);
+    pmic = whitney_attach_pmic(soc);
     if (tms->whitney) {
-        whitney_attach_input(soc);
+        whitney_attach_input(soc, pmic);
     } else if (tms->celeste) {
-        celeste_attach_input(soc);
+        celeste_attach_input(soc, pmic);
     } else {
-        tequila_attach_keyboard(soc);
+        tequila_attach_keyboard(soc, pmic);
     }
     yoshi_binfo = (struct arm_boot_info) {
         .loader_start = YOSHI_RAM_BASE,

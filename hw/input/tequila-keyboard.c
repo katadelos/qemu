@@ -44,6 +44,8 @@ static int tequila_keyboard_output_for_qcode(int qcode)
         return TEQUILA_KEY_HOME;
     case Q_KEY_CODE_B:
         return TEQUILA_KEY_BACK;
+    case Q_KEY_CODE_POWER:
+        return TEQUILA_KEY_POWER;
     default:
         return -1;
     }
@@ -58,6 +60,16 @@ static void tequila_keyboard_event(DeviceState *dev, QemuConsole *src,
     int output = tequila_keyboard_output_for_qcode(qcode);
 
     if (output < 0) {
+        return;
+    }
+
+    if (output == TEQUILA_KEY_POWER) {
+        if (extract32(s->host_down, output, 1) == key->down) {
+            return;
+        }
+        s->host_down = deposit32(s->host_down, output, 1, key->down);
+        s->pressed = deposit32(s->pressed, output, 1, key->down);
+        qemu_set_irq(s->outputs[output], key->down);
         return;
     }
 
