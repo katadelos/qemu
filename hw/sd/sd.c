@@ -682,7 +682,13 @@ static void ar6003_wmi_scan_timer(void *opaque)
 static void ar6003_wmi_connect_timer(void *opaque)
 {
     SDState *sd = opaque;
-    uint8_t event[20] = { 0 };
+    /*
+     * The legacy ath6kl parser unconditionally removes the fixed 4-byte
+     * association-request and 6-byte association-response headers from the
+     * lengths in this event.  Supplying zero lengths underflows those u16s,
+     * so cfg80211 never completes the WEXT association used by Kobo 3.14.
+     */
+    uint8_t event[29] = { 0 };
 
     if (ar6003_rx_pending(sd)) {
         timer_mod(sd->sdio_connect_timer,
@@ -692,8 +698,12 @@ static void ar6003_wmi_connect_timer(void *opaque)
     stw_le_p(event, 2412);
     event[2] = 0x02;
     event[7] = 0x02;
+    stw_le_p(event + 8, 10);  /* listen interval */
+    stw_le_p(event + 10, 100); /* beacon interval */
     stl_le_p(event + 12, 1); /* INFRA_NETWORK */
-    /* beaconIeLen, assocReqLen and assocRespLen remain zero. */
+    event[16] = 0; /* beaconIeLen */
+    event[17] = 4; /* assocReqLen: capinfo + listen interval */
+    event[18] = 6; /* assocRespLen: capinfo + status + AID */
     ar6003_wmi_event(sd, 0x1002, event, sizeof(event));
 }
 
