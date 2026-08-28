@@ -740,6 +740,7 @@ static void fsl_imx50_realize(DeviceState *dev, Error **errp)
                           &imx50_anatop_ops, s, "imx50.anatop", 0x100);
     memory_region_add_subregion(get_system_memory(), 0x41018000,
                                 &s->anatop_iomem);
+    qdev_prop_set_bit(DEVICE(&s->usb_otg), "gadget", true);
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->usb_otg), errp)) {
         return;
     }

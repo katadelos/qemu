@@ -84,7 +84,7 @@ static void chipidea_config_timer(void *opaque)
         0x01, 0x0b, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00,
     };
 
-    if (!ci->gadget_nic || ci->gadget_configured) {
+    if (!ci->gadget || ci->gadget_configured) {
         return;
     }
     if (ci->gadget_config_phase == 0) {
@@ -113,7 +113,9 @@ static void chipidea_config_timer(void *opaque)
         ci->gadget_config_phase = 4;
     } else {
         ci->gadget_configured = true;
-        qemu_flush_queued_packets(qemu_get_queue(ci->gadget_nic));
+        if (ci->gadget_nic) {
+            qemu_flush_queued_packets(qemu_get_queue(ci->gadget_nic));
+        }
         return;
     }
     timer_mod(ci->gadget_config_timer,
@@ -581,13 +583,16 @@ static void chipidea_realize(DeviceState *dev, Error **errp)
         return;
     }
 
-    if (ci->gadget && ci->gadget_nic_conf.peers.ncs[0]) {
-        ci->gadget_nic = qemu_new_nic(&chipidea_net_info,
-                                      &ci->gadget_nic_conf,
-                                      object_get_typename(OBJECT(dev)),
-                                      dev->id, &dev->mem_reentrancy_guard, ci);
-        qemu_format_nic_info_str(qemu_get_queue(ci->gadget_nic),
-                                 ci->gadget_nic_conf.macaddr.a);
+    if (ci->gadget) {
+        if (ci->gadget_nic_conf.peers.ncs[0]) {
+            ci->gadget_nic = qemu_new_nic(&chipidea_net_info,
+                                          &ci->gadget_nic_conf,
+                                          object_get_typename(OBJECT(dev)),
+                                          dev->id,
+                                          &dev->mem_reentrancy_guard, ci);
+            qemu_format_nic_info_str(qemu_get_queue(ci->gadget_nic),
+                                     ci->gadget_nic_conf.macaddr.a);
+        }
         ci->gadget_config_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
                                                 chipidea_config_timer, ci);
         memory_region_init_io(&ci->dc_command_iomem, OBJECT(ci),
