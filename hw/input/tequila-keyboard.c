@@ -15,7 +15,7 @@
 #include "qemu/module.h"
 #include "ui/input.h"
 
-#define TEQUILA_FIVEWAY_PULSE_MS 1
+#define TEQUILA_FIVEWAY_PULSE_MS 20
 #define TEQUILA_KEYPAD_PULSE_MS  100
 
 static int tequila_keyboard_output_for_qcode(int qcode)
