@@ -306,6 +306,7 @@ static uint64_t chipidea_read(void *opaque, hwaddr offset,
     case CI_USBMODE: return ci->dc_mode;
     case CI_ENDPTSETUPSTAT: return ci->endptsetupstat;
     case CI_ENDPTPRIME: return ci->endpointprime;
+    case CI_ENDPTFLUSH: return ci->endptflush;
     case CI_ENDPTSTATUS: return ci->endptstatus;
     case CI_ENDPTCOMPLETE: return ci->endptcomplete;
     default:
@@ -350,8 +351,20 @@ static void chipidea_write(void *opaque, hwaddr offset,
         }
         break;
     case CI_ENDPTFLUSH:
+        /*
+         * Once STOP has destroyed the operational state, endpoint commands
+         * do not complete merely because software selects device mode again.
+         * The device command engine has to run at least once first.  Stopping
+         * an otherwise live controller does not discard that initialized
+         * state, which is why the ordinary disconnect path can still flush.
+         */
+        if ((ci->dc_mode & 3) != 2 || !ci->endpoint_commands_ready) {
+            ci->endptflush |= value;
+            break;
+        }
         ci->endpointprime &= ~value;
         ci->endptstatus &= ~value;
+        ci->endptflush &= ~value;
         break;
     case CI_ENDPTCOMPLETE:
         ci->endptcomplete &= ~value;
@@ -420,7 +433,21 @@ static void chipidea_command_write(void *opaque, hwaddr offset,
     EHCIState *ehci = &SYS_BUS_EHCI(ci)->ehci;
     bool was_running = ehci->usbcmd & BIT(0);
 
+    if (value & BIT(1)) {
+        ci->dc_mode = 0;
+        ci->endptsetupstat = 0;
+        ci->endpointprime = 0;
+        ci->endptflush = 0;
+        ci->endptstatus = 0;
+        ci->endptcomplete = 0;
+        memset(ci->endptctrl, 0, sizeof(ci->endptctrl));
+        ci->endpoint_commands_ready = false;
+    }
+
     ehci->usbcmd = value & ~BIT(1);
+    if (value & BIT(0)) {
+        ci->endpoint_commands_ready = true;
+    }
     if (!(value & BIT(0))) {
         ci->gadget_configured = false;
         ci->gadget_config_phase = 0;

@@ -19,6 +19,7 @@ struct ChipideaState {
     uint32_t dc_mode;
     uint32_t endptsetupstat;
     uint32_t endpointprime;
+    uint32_t endptflush;
     uint32_t endptstatus;
     uint32_t endptcomplete;
     uint32_t endptctrl[8];
@@ -26,6 +27,7 @@ struct ChipideaState {
     unsigned gadget_config_phase;
     bool gadget_configured;
     bool processing_in;
+    bool endpoint_commands_ready;
 };
 
 #define TYPE_CHIPIDEA "usb-chipidea"
