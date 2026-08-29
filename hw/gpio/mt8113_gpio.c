@@ -246,9 +246,6 @@ static void mt8113_gpio_reset(DeviceState *dev)
 
     memset(s->regs, 0, sizeof(s->regs));
     memset(s->eint_regs, 0, sizeof(s->eint_regs));
-    for (unsigned port = 0; port < ARRAY_SIZE(s->input_levels); port++) {
-        s->input_levels[port] = UINT32_MAX;
-    }
     for (unsigned port = 0; port < MT8113_EINT_PORTS; port++) {
         *mt8113_eint_reg(s, MT8113_EINT_MASK, port) = UINT32_MAX;
     }
@@ -259,6 +256,9 @@ static void mt8113_gpio_init(Object *obj)
 {
     MT8113GPIOState *s = MT8113_GPIO(obj);
 
+    for (unsigned port = 0; port < ARRAY_SIZE(s->input_levels); port++) {
+        s->input_levels[port] = UINT32_MAX;
+    }
     memory_region_init_io(&s->iomem, obj, &mt8113_gpio_ops, s,
                           TYPE_MT8113_GPIO, MT8113_GPIO_MMIO_SIZE);
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
