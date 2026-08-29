@@ -1,7 +1,7 @@
 /*
  * MediaTek MT8113 hardware timing controller
  *
- * Coloursoft uses MediaTek's HWTCON v2 display pipeline rather than the
+ * Bellatrix4 uses MediaTek's HWTCON v2 display pipeline rather than the
  * i.MX EPDC block used by earlier Kindles.  Keep the register model separate
  * even while only the bootloader-visible register storage is implemented.
  *
@@ -458,6 +458,8 @@ static void mt8113_hwtcon_write(void *opaque, hwaddr offset, uint64_t value,
                              0x1fffff;
             uint32_t source = bank->regs[MDP_RDMA_SRC_BASE / 4];
             uint32_t source_end = bank->regs[MDP_RDMA_SRC_END / 4];
+            unsigned bytes_per_pixel =
+                format == MDP_RDMA_FORMAT_RGBA8888 ? 4 : 1;
             bool transaction_valid = width && height && panel_width &&
                                      panel_height && width <= panel_width &&
                                      height <= panel_height &&
@@ -477,9 +479,8 @@ static void mt8113_hwtcon_write(void *opaque, hwaddr offset, uint64_t value,
              * from the CFA input hook.
              */
             if (transaction_valid &&
-                format == MDP_RDMA_FORMAT_RGBA8888 &&
                 width == panel_width && height == panel_height &&
-                pitch >= panel_width * 4) {
+                pitch >= panel_width * bytes_per_pixel) {
                 full_source = true;
             }
 
