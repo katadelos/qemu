@@ -2,6 +2,7 @@
 
 #include "qemu/osdep.h"
 #include "hw/i2c/lis2du12.h"
+#include "hw/core/irq.h"
 #include "migration/vmstate.h"
 #include "qemu/module.h"
 
@@ -20,7 +21,14 @@ struct LIS2DU12State {
     uint8_t regs[0x60];
     uint8_t pointer;
     bool expect_pointer;
+    qemu_irq irq;
 };
+
+static void lis2du12_update_irq(LIS2DU12State *s)
+{
+    /* No motion or FIFO event is pending in the stationary sensor model. */
+    qemu_set_irq(s->irq, 0);
+}
 
 static void lis2du12_register_reset(LIS2DU12State *s)
 {
@@ -73,6 +81,8 @@ static int lis2du12_event(I2CSlave *i2c, enum i2c_event event)
 {
     LIS2DU12State *s = LIS2DU12(i2c);
 
+    /* Re-drive INT1 after the SoC GPIO controller itself is reset. */
+    lis2du12_update_irq(s);
     if (event == I2C_START_SEND) {
         s->expect_pointer = true;
     }
@@ -86,6 +96,14 @@ static void lis2du12_reset(DeviceState *dev)
     lis2du12_register_reset(s);
     s->pointer = 0;
     s->expect_pointer = true;
+    lis2du12_update_irq(s);
+}
+
+static void lis2du12_init(Object *obj)
+{
+    LIS2DU12State *s = LIS2DU12(obj);
+
+    qdev_init_gpio_out_named(DEVICE(obj), &s->irq, "irq", 1);
 }
 
 static const VMStateDescription lis2du12_vmstate = {
@@ -117,6 +135,7 @@ static const TypeInfo lis2du12_info = {
     .name = TYPE_LIS2DU12,
     .parent = TYPE_I2C_SLAVE,
     .instance_size = sizeof(LIS2DU12State),
+    .instance_init = lis2du12_init,
     .class_init = lis2du12_class_init,
 };
 
