@@ -282,6 +282,13 @@ static void coloursoft_cfa_bypass_reset(void *opaque)
     }
 }
 
+static void coloursoft_firmware_reset(void *opaque)
+{
+    ARMCPU *cpu = opaque;
+
+    cpu_reset(CPU(cpu));
+}
+
 /*
  * Enter the 32-bit BL2 or U-Boot payload from the Cortex-A53 reset state.
  * The real BootROM/BL2 performs this EL3 width transition.
@@ -534,6 +541,9 @@ static void coloursoft_init(MachineState *machine)
                              COLOURSOFT_HANDOFF_ADDR, &error_fatal);
     qdev_realize(DEVICE(soc), NULL, &error_fatal);
     cms->soc = soc;
+    for (int cpu = 0; cpu < MT8113_NUM_CPUS; cpu++) {
+        qemu_register_reset(coloursoft_firmware_reset, &soc->cpu[cpu]);
+    }
 
     i2c_slave_create_simple(soc->i2c[0].bus, TYPE_FP9967, 0x26);
     lis2du12 = i2c_slave_create_simple(soc->i2c[0].bus,
@@ -671,6 +681,12 @@ static void coloursoft_machine_instance_finalize(Object *obj)
 {
     ColoursoftMachineState *cms = COLOURSOFT_MACHINE(obj);
 
+    if (cms->soc) {
+        for (int cpu = 0; cpu < MT8113_NUM_CPUS; cpu++) {
+            qemu_unregister_reset(coloursoft_firmware_reset,
+                                  &cms->soc->cpu[cpu]);
+        }
+    }
     qemu_unregister_reset(coloursoft_cfa_bypass_reset, cms);
     timer_free(cms->cfa_bypass_timer);
     g_free(cms->bl2);
