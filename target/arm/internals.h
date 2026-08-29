@@ -399,6 +399,8 @@ void arm_cpu_synchronize_from_tb(CPUState *cs, const TranslationBlock *tb);
 
 /* Our implementation of TCGCPUOps::cpu_exec_halt */
 bool arm_cpu_exec_halt(CPUState *cs);
+/* Track the GIC wake request for a CPU entering PSCI power-down. */
+void arm_cpu_psci_wakeup(ARMCPU *cpu, bool level);
 int arm_cpu_mmu_index(CPUState *cs, bool ifetch);
 #endif /* CONFIG_TCG */
 

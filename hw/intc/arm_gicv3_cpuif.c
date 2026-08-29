@@ -1060,6 +1060,16 @@ void gicv3_cpuif_update(GICv3CPUState *cs)
                              cs->icc_igrpen[cs->hppi.grp],
                              icc_highest_active_prio(cs));
 
+#ifdef CONFIG_TCG
+    /*
+     * A sleeping redistributor still sends an interrupt wake request to the
+     * platform power controller.  Model that path separately from IRQ/FIQ:
+     * Linux deliberately disables the GIC CPU interface before PSCI
+     * power-down and only restores it after returning through cpu_resume.
+     */
+    arm_cpu_psci_wakeup(cpu, cs->hppi.prio != 0xff);
+#endif
+
     if (cs->hppi.grp == GICV3_G1 && !arm_feature(env, ARM_FEATURE_EL3)) {
         /* If a Security-enabled GIC sends a G1S interrupt to a
          * Security-disabled CPU, we must treat it as if it were G0.

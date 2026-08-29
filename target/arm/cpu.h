@@ -1002,6 +1002,14 @@ struct ArchCPU {
     /* Current power state, access guarded by BQL */
     ARMPSCIState power_state;
 
+    /* Context-loss CPU_SUSPEND state; wake/pending flags are atomic. */
+    bool psci_powerdown_pending;
+    bool psci_wakeup_requested;
+    bool psci_powerdown_target_aa64;
+    uint8_t psci_powerdown_target_el;
+    uint64_t psci_powerdown_entry;
+    uint64_t psci_powerdown_context_id;
+
     /* CPU has virtualization extension */
     bool has_el2;
     /* CPU has security extension */

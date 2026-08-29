@@ -22,6 +22,7 @@
 #include "qemu/qemu-print.h"
 #include "qemu/timer.h"
 #include "qemu/log.h"
+#include "qemu/main-loop.h"
 #include "exec/page-vary.h"
 #include "system/whpx.h"
 #include "target/arm/idau.h"
@@ -251,6 +252,12 @@ static void arm_cpu_reset_hold(Object *obj, ResetType type)
     env->vfp.xregs[ARM_VFP_MVFR2] = cpu->isar.mvfr2;
 
     cpu->power_state = cs->start_powered_off ? PSCI_OFF : PSCI_ON;
+    qatomic_set(&cpu->psci_powerdown_pending, false);
+    qatomic_set(&cpu->psci_wakeup_requested, false);
+    cpu->psci_powerdown_target_aa64 = false;
+    cpu->psci_powerdown_target_el = 0;
+    cpu->psci_powerdown_entry = 0;
+    cpu->psci_powerdown_context_id = 0;
 
     if (arm_feature(env, ARM_FEATURE_AARCH64)) {
         /* 64 bit CPUs always start in 64 bit mode */
@@ -766,6 +773,55 @@ static bool arm_cpu_internal_is_big_endian(CPUState *cs)
 }
 
 #ifdef CONFIG_TCG
+static void arm_cpu_resume_from_powerdown(CPUState *cs)
+{
+    ARMCPU *cpu = ARM_CPU(cs);
+    CPUARMState *env = &cpu->env;
+    uint64_t entry = cpu->psci_powerdown_entry;
+    uint64_t context_id = cpu->psci_powerdown_context_id;
+    uint32_t irq_line_state = env->irq_line_state;
+    uint32_t target_el = cpu->psci_powerdown_target_el;
+    bool target_aa64 = cpu->psci_powerdown_target_aa64;
+
+    g_assert(bql_locked());
+    g_assert(qatomic_read(&cpu->psci_powerdown_pending));
+
+    /*
+     * A PSCI power-down state loses architectural CPU context.  Restart it
+     * exactly like CPU_ON, but preserve asserted input lines: the interrupt
+     * which woke the power controller must still be visible after Linux has
+     * restored its GIC CPU interface.
+     */
+    cpu_reset(cs);
+    env->aarch64 = target_aa64;
+    arm_emulate_firmware_reset(cs, target_el);
+    cs->halted = 0;
+    cpu->power_state = PSCI_ON;
+
+    assert(target_el == arm_current_el(env));
+    if (target_aa64) {
+        env->xregs[0] = context_id;
+    } else {
+        env->regs[0] = context_id;
+    }
+
+    arm_rebuild_hflags(env);
+    cpu_set_pc(cs, entry);
+
+    env->irq_line_state = irq_line_state;
+    if (irq_line_state) {
+        cpu_interrupt(cs, irq_line_state);
+    }
+}
+
+void arm_cpu_psci_wakeup(ARMCPU *cpu, bool level)
+{
+    qatomic_set(&cpu->psci_wakeup_requested, level);
+    if (level && qatomic_read(&cpu->psci_powerdown_pending)) {
+        cpu_interrupt(CPU(cpu), CPU_INTERRUPT_EXITTB);
+    }
+}
+
 bool arm_cpu_exec_halt(CPUState *cs)
 {
     bool leave_halt = cpu_has_work(cs);
@@ -773,6 +829,17 @@ bool arm_cpu_exec_halt(CPUState *cs)
     if (leave_halt) {
         /* We're about to come out of WFI/WFE: disable the WFxT timer */
         ARMCPU *cpu = ARM_CPU(cs);
+
+        if (qatomic_read(&cpu->psci_powerdown_pending)) {
+            bql_lock();
+            if (qatomic_read(&cpu->psci_powerdown_pending) &&
+                cpu_has_work(cs)) {
+                arm_cpu_resume_from_powerdown(cs);
+            } else {
+                leave_halt = false;
+            }
+            bql_unlock();
+        }
         if (cpu->wfxt_timer) {
             timer_del(cpu->wfxt_timer);
         }

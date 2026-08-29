@@ -705,19 +705,34 @@ void arm_handle_psci_call(ARMCPU *cpu)
     case QEMU_PSCI_0_1_FN_CPU_SUSPEND:
     case QEMU_PSCI_0_2_FN_CPU_SUSPEND:
     case QEMU_PSCI_0_2_FN64_CPU_SUSPEND:
-        /* Affinity levels are not supported in QEMU */
-        if (param[1] & 0xfffe0000) {
+        if (param[1] & ~(uint64_t)QEMU_PSCI_0_2_POWER_STATE_MASK) {
             ret = QEMU_PSCI_RET_INVALID_PARAMS;
             break;
         }
-        /*
-         * A powerdown state loses CPU context.  Treating it as WFI leaves
-         * guests asleep with their GIC CPU interface disabled, so reject it
-         * until the fake firmware can resume at param[2] as PSCI requires.
-         */
         if (param[1] & QEMU_PSCI_0_2_POWER_STATE_TYPE_MASK) {
-            ret = QEMU_PSCI_RET_NOT_SUPPORTED;
-            break;
+            CPUState *cs = CPU(cpu);
+            int target_el = arm_feature(env, ARM_FEATURE_EL2) ? 2 : 1;
+
+            cpu->psci_powerdown_entry = param[2];
+            cpu->psci_powerdown_context_id = param[3];
+            cpu->psci_powerdown_target_el = target_el;
+            cpu->psci_powerdown_target_aa64 =
+                arm_el_is_aa64(env, target_el);
+            qatomic_set(&cpu->psci_powerdown_pending, true);
+
+            /*
+             * The redistributor wake request is level-sensitive.  It may
+             * have become asserted after Linux put the GIC CPU interface to
+             * sleep but before this PSCI call reached QEMU.  Latch that
+             * already-active request now so CPU_SUSPEND cannot lose it.
+             */
+            if (qatomic_read(&cpu->psci_wakeup_requested)) {
+                cpu_interrupt(cs, CPU_INTERRUPT_EXITTB);
+            }
+
+            cs->exception_index = EXCP_HLT;
+            cs->halted = 1;
+            cpu_loop_exit(cs);
         }
         if (is_a64(env)) {
             env->xregs[0] = 0;
