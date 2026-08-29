@@ -9,6 +9,7 @@
 
 #include "hw/core/sysbus.h"
 #include "qom/object.h"
+#include "qemu/timer.h"
 
 #define TYPE_MT8113_GCE "mt8113.gce"
 OBJECT_DECLARE_SIMPLE_TYPE(MT8113GCEState, MT8113_GCE)
@@ -26,6 +27,8 @@ struct MT8113GCEState {
     bool waiting[MT8113_GCE_THREADS];
     uint16_t wait_token[MT8113_GCE_THREADS];
     uint16_t selected_token;
+    QEMUTimer *exec_timer;
+    uint32_t pending_threads;
 };
 
 #endif

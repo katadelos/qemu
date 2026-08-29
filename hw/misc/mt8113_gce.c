@@ -36,6 +36,7 @@
 #define GCE_THR_IRQ_DONE          BIT(0)
 #define GCE_THR_STATUS_SUSPENDED  BIT(1)
 #define GCE_MAX_PACKET_STEPS      4096
+#define GCE_EXEC_DELAY_NS         (1 * SCALE_MS)
 
 #define MT8113_IOMMU_BASE         0x10209000
 #define MT8113_IOMMU_TTBR         0x000
@@ -258,6 +259,13 @@ static bool mt8113_gce_condition(unsigned op, uint32_t left,
     }
 }
 
+static void mt8113_gce_schedule_thread(MT8113GCEState *s, unsigned thread)
+{
+    s->pending_threads |= BIT(thread);
+    timer_mod(s->exec_timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + GCE_EXEC_DELAY_NS);
+}
+
 static void mt8113_gce_execute(MT8113GCEState *s, unsigned thread)
 {
     uint32_t *pc_reg = mt8113_gce_thread_reg(s, thread,
@@ -411,6 +419,24 @@ static void mt8113_gce_execute(MT8113GCEState *s, unsigned thread)
     }
 }
 
+static void mt8113_gce_run_pending(void *opaque)
+{
+    MT8113GCEState *s = opaque;
+    uint32_t pending = s->pending_threads;
+
+    s->pending_threads = 0;
+    while (pending) {
+        unsigned thread = ctz32(pending);
+
+        pending &= ~BIT(thread);
+        if ((*mt8113_gce_thread_reg(s, thread, GCE_THR_ENABLE) & 1) &&
+            !(*mt8113_gce_thread_reg(s, thread, GCE_THR_SUSPEND) & 1) &&
+            !s->waiting[thread]) {
+            mt8113_gce_execute(s, thread);
+        }
+    }
+}
+
 static void mt8113_gce_event(void *opaque, int line, int level)
 {
     MT8113GCEState *s = opaque;
@@ -424,7 +450,7 @@ static void mt8113_gce_event(void *opaque, int line, int level)
     for (unsigned thread = 0; thread < MT8113_GCE_THREADS; thread++) {
         if (s->waiting[thread] && s->wait_token[thread] == token) {
             s->waiting[thread] = false;
-            mt8113_gce_execute(s, thread);
+            mt8113_gce_schedule_thread(s, thread);
         }
     }
 }
@@ -474,7 +500,9 @@ static void mt8113_gce_write(void *opaque, hwaddr offset, uint64_t value,
             *mt8113_gce_thread_reg(s, thread, GCE_THR_SUSPEND) = 0;
             *mt8113_gce_thread_reg(s, thread, GCE_THR_STATUS) = 0;
             *mt8113_gce_thread_reg(s, thread, GCE_THR_IRQ_STATUS) = 0;
+            *mt8113_gce_thread_reg(s, thread, GCE_THR_IRQ_ENABLE) = 0;
             s->waiting[thread] = false;
+            s->pending_threads &= ~BIT(thread);
             mt8113_gce_update_irq(s);
             return;
         case GCE_THR_SUSPEND:
@@ -485,6 +513,10 @@ static void mt8113_gce_write(void *opaque, hwaddr offset, uint64_t value,
             } else {
                 *mt8113_gce_thread_reg(s, thread, GCE_THR_STATUS) &=
                     ~GCE_THR_STATUS_SUSPENDED;
+                if (*mt8113_gce_thread_reg(s, thread,
+                                           GCE_THR_ENABLE) & 1) {
+                    mt8113_gce_schedule_thread(s, thread);
+                }
             }
             return;
         case GCE_THR_IRQ_STATUS:
@@ -494,7 +526,20 @@ static void mt8113_gce_write(void *opaque, hwaddr offset, uint64_t value,
         case GCE_THR_ENABLE:
             *thread_reg = value;
             if (value & 1) {
-                mt8113_gce_execute(s, thread);
+                if (*mt8113_gce_thread_reg(s, thread,
+                                            GCE_THR_IRQ_ENABLE)) {
+                    /*
+                     * Mailbox tasks must not interrupt the guest before the
+                     * driver has linked them into task_busy_list.  The
+                     * interrupt-free boot-time token-clear program, however,
+                     * is polled synchronously by the stock driver.
+                     */
+                    mt8113_gce_schedule_thread(s, thread);
+                } else {
+                    mt8113_gce_execute(s, thread);
+                }
+            } else {
+                s->pending_threads &= ~BIT(thread);
             }
             return;
         default:
@@ -526,6 +571,8 @@ static void mt8113_gce_reset(DeviceState *dev)
     memset(s->waiting, 0, sizeof(s->waiting));
     memset(s->wait_token, 0, sizeof(s->wait_token));
     s->selected_token = 0;
+    s->pending_threads = 0;
+    timer_del(s->exec_timer);
     qemu_set_irq(s->irq, 0);
 }
 
@@ -539,6 +586,15 @@ static void mt8113_gce_init(Object *obj)
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
     qdev_init_gpio_in_named(DEVICE(obj), mt8113_gce_event,
                             "hwtcon-frame-done", 1);
+    s->exec_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                 mt8113_gce_run_pending, s);
+}
+
+static void mt8113_gce_finalize(Object *obj)
+{
+    MT8113GCEState *s = MT8113_GCE(obj);
+
+    timer_free(s->exec_timer);
 }
 
 static void mt8113_gce_class_init(ObjectClass *oc, const void *data)
@@ -553,6 +609,7 @@ static const TypeInfo mt8113_gce_type = {
     .parent = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(MT8113GCEState),
     .instance_init = mt8113_gce_init,
+    .instance_finalize = mt8113_gce_finalize,
     .class_init = mt8113_gce_class_init,
 };
 
