@@ -9,6 +9,7 @@
 #include "hw/arm/mt8113.h"
 #include "hw/arm/machines-qom.h"
 #include "hw/core/boards.h"
+#include "hw/core/cpu.h"
 #include "hw/core/irq.h"
 #include "hw/core/loader.h"
 #include "hw/core/qdev-properties.h"
@@ -20,9 +21,15 @@
 #include "hw/i2c/max20342.h"
 #include "hw/sd/sd.h"
 #include "qapi/error.h"
+#include "exec/target_page.h"
+#include "exec/tb-flush.h"
+#include "qemu/bswap.h"
 #include "qemu/error-report.h"
+#include "qemu/timer.h"
 #include "qemu/units.h"
 #include "system/block-backend.h"
+#include "system/reset.h"
+#include "system/tcg.h"
 
 #define COLOURSOFT_HANDOFF_ADDR      0x40001000
 #define COLOURSOFT_BOOTARGS_ADDR     0x40000100
@@ -34,6 +41,13 @@
 
 #define COLOURSOFT_IDME_SIZE         (10 * 512)
 #define COLOURSOFT_IDME_VERSION      "2.1"
+
+#define COLOURSOFT_CFA_MODULE_START  0xbf000000
+#define COLOURSOFT_CFA_MODULE_END    0xc0000000
+#define COLOURSOFT_CFA_KNOWN_ADDR    0xbf055000
+#define COLOURSOFT_CFA_SCAN_PAGES    512
+#define COLOURSOFT_CFA_DATA_SCAN_SIZE 0x20000
+#define COLOURSOFT_CFA_RETRY_NS      (100 * SCALE_MS)
 
 #define TYPE_COLOURSOFT_MACHINE MACHINE_TYPE_NAME("mt8113-coloursoft")
 OBJECT_DECLARE_SIMPLE_TYPE(ColoursoftMachineState, COLOURSOFT_MACHINE)
@@ -49,11 +63,20 @@ typedef struct ColoursoftMachineState {
     char *idme_serial;
     char *idme_mac;
     char *idme_mfg;
+    char *idme_device_type;
     char *idme_bootmode;
     char *idme_postmode;
     char *idme_fos_flags;
     char *idme_hwid;
     char *idme_bcm_stress;
+    QEMUTimer *cfa_bypass_timer;
+    bool cfa_bypass;
+    bool cfa_bypass_inflight;
+    bool cfa_bypass_applied;
+    uint32_t cfa_bypass_address;
+    uint32_t cfa_bypass_workers_address;
+    uint32_t cfa_scan_address;
+    uint64_t cfa_bypass_attempts;
 } ColoursoftMachineState;
 
 typedef struct ColoursoftIdmeField {
@@ -62,6 +85,202 @@ typedef struct ColoursoftIdmeField {
     size_t size;
     bool exportable;
 } ColoursoftIdmeField;
+
+/*
+ * The stock CFA module converts the complete 1272x1696 RGBA source frame in
+ * two kernel threads before every e-ink update.  That NEON-heavy software
+ * conversion is both unnecessary for QEMU's RGB console and prohibitively
+ * slow under TCG.  Match the stock function prologue before replacing it with
+ * a hook that reports its actual input pointer to HWTCON and returns.  This
+ * preserves the driver's first/alternate fbdev page selection without running
+ * the converter whose calling contract was verified from shipped source.
+ */
+static const uint8_t coloursoft_cfa_signature[] = {
+    0xf0, 0x43, 0x2d, 0xe9, /* push {r4-r9, lr} */
+    0x00, 0x80, 0xa0, 0xe1,
+    0x01, 0x50, 0xa0, 0xe1,
+    0x24, 0xd0, 0x4d, 0xe2,
+    0x02, 0x60, 0xa0, 0xe1,
+    0x03, 0x90, 0xa0, 0xe1,
+    0x40, 0x70, 0x9d, 0xe5,
+    0x44, 0x40, 0x9d, 0xe5,
+};
+
+static const uint8_t coloursoft_cfa_hook[] = {
+    0xd0, 0xc0, 0x00, 0xe3, /* movw ip, #0x00d0 */
+    0x00, 0xc0, 0x4c, 0xe3, /* movt ip, #0xc000 */
+    0x00, 0x00, 0x8c, 0xe5, /* str r0, [ip]       source pointer */
+    0x04, 0x20, 0x8c, 0xe5, /* str r2, [ip, #4]   source width */
+    0x08, 0x30, 0x8c, 0xe5, /* str r3, [ip, #8]   source height */
+    0x00, 0x10, 0x9d, 0xe5, /* ldr r1, [sp]       left */
+    0x0c, 0x10, 0x8c, 0xe5, /* str r1, [ip, #12] */
+    0x04, 0x10, 0x9d, 0xe5, /* ldr r1, [sp, #4]   top */
+    0x10, 0x10, 0x8c, 0xe5, /* str r1, [ip, #16] */
+    0x08, 0x10, 0x9d, 0xe5, /* ldr r1, [sp, #8]   update width */
+    0x14, 0x10, 0x8c, 0xe5, /* str r1, [ip, #20] */
+    0x0c, 0x10, 0x9d, 0xe5, /* ldr r1, [sp, #12]  update height */
+    0x18, 0x10, 0x8c, 0xe5, /* str r1, [ip, #24] */
+    0x10, 0x10, 0x9d, 0xe5, /* ldr r1, [sp, #16]  rotation */
+    0x1c, 0x10, 0x8c, 0xe5, /* str r1, [ip, #28] */
+    0x1e, 0xff, 0x2f, 0xe1, /* bx lr */
+};
+
+/*
+ * Stock cfa.ko .data starts with cfa_handle_threads followed by its CFA
+ * method and base-LUT configuration.  Match enough immutable data to resolve
+ * the independently relocated writable section without depending on a fixed
+ * module layout.
+ */
+static const char coloursoft_cfa_data_path[] =
+    "/data/init_bin/cfa/base.bin.gz";
+
+static bool coloursoft_cfa_signature_at(CPUState *cpu, uint32_t address)
+{
+    uint8_t signature[sizeof(coloursoft_cfa_signature)];
+
+    return cpu_memory_rw_debug(cpu, address, signature, sizeof(signature),
+                               false) == 0 &&
+           !memcmp(signature, coloursoft_cfa_signature, sizeof(signature));
+}
+
+static uint32_t coloursoft_find_cfa_signature(ColoursoftMachineState *cms,
+                                               CPUState *cpu)
+{
+    size_t page_size = TARGET_PAGE_SIZE;
+    g_autofree uint8_t *page = g_malloc(page_size);
+
+    if (coloursoft_cfa_signature_at(cpu, COLOURSOFT_CFA_KNOWN_ADDR)) {
+        return COLOURSOFT_CFA_KNOWN_ADDR;
+    }
+
+    for (unsigned page_index = 0;
+         page_index < COLOURSOFT_CFA_SCAN_PAGES; page_index++) {
+        uint32_t address = cms->cfa_scan_address;
+
+        cms->cfa_scan_address += page_size;
+        if (cms->cfa_scan_address >= COLOURSOFT_CFA_MODULE_END) {
+            cms->cfa_scan_address = COLOURSOFT_CFA_MODULE_START;
+        }
+        if (address == COLOURSOFT_CFA_KNOWN_ADDR ||
+            cpu_memory_rw_debug(cpu, address, page, page_size, false)) {
+            continue;
+        }
+        for (unsigned offset = 0;
+             offset <= page_size - sizeof(coloursoft_cfa_signature);
+             offset += sizeof(uint32_t)) {
+            if (!memcmp(page + offset, coloursoft_cfa_signature,
+                        sizeof(coloursoft_cfa_signature))) {
+                return address + offset;
+            }
+        }
+    }
+    return 0;
+}
+
+static uint32_t coloursoft_find_cfa_workers(CPUState *cpu,
+                                             uint32_t text_address)
+{
+    size_t page_size = TARGET_PAGE_SIZE;
+    g_autofree uint8_t *page = g_malloc(page_size);
+    uint32_t start = text_address & TARGET_PAGE_MASK;
+
+    for (uint32_t address = start;
+         address - start < COLOURSOFT_CFA_DATA_SCAN_SIZE;
+         address += page_size) {
+        if (cpu_memory_rw_debug(cpu, address, page, page_size, false)) {
+            continue;
+        }
+        for (unsigned offset = 0x20;
+             offset <= page_size - sizeof(coloursoft_cfa_data_path);
+             offset += sizeof(uint32_t)) {
+            uint8_t *candidate = page + offset - 0x20;
+
+            /* Relocated pointers occupy the deliberately ignored words. */
+            if (!memcmp(page + offset, coloursoft_cfa_data_path,
+                        sizeof(coloursoft_cfa_data_path)) &&
+                ldl_le_p(candidate) == 2 &&
+                ldl_le_p(candidate + 0x0c) == 9 &&
+                ldl_le_p(candidate + 0x1c) == 0x01400000) {
+                return address + offset - 0x20;
+            }
+        }
+    }
+    return 0;
+}
+
+static void coloursoft_cfa_bypass_on_cpu(CPUState *cpu, run_on_cpu_data data)
+{
+    ColoursoftMachineState *cms = data.host_ptr;
+    uint32_t address = coloursoft_find_cfa_signature(cms, cpu);
+    uint32_t workers_address = address ?
+        coloursoft_find_cfa_workers(cpu, address) : 0;
+    const uint32_t one = 1;
+
+    if (address && workers_address &&
+        !cpu_memory_rw_debug(cpu, workers_address, (void *)&one,
+                             sizeof(one), true) &&
+        !cpu_memory_rw_debug(cpu, address,
+                             (void *)coloursoft_cfa_hook,
+                             sizeof(coloursoft_cfa_hook), true)) {
+        /* This callback holds every vCPU outside translated code. */
+        if (tcg_enabled()) {
+            tb_flush__exclusive_or_serial();
+        }
+        qatomic_set(&cms->cfa_bypass_address, address);
+        qatomic_set(&cms->cfa_bypass_workers_address, workers_address);
+        qatomic_set(&cms->cfa_bypass_applied, true);
+        info_report("Coloursoft CFA bypass applied at 0x%08x (one worker at "
+                    "0x%08x)", address, workers_address);
+    }
+
+    qatomic_set(&cms->cfa_bypass_inflight, false);
+    if (!qatomic_read(&cms->cfa_bypass_applied) &&
+        qatomic_read(&cms->cfa_bypass)) {
+        timer_mod_ns(cms->cfa_bypass_timer,
+                     qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                     COLOURSOFT_CFA_RETRY_NS);
+    }
+}
+
+static void coloursoft_cfa_bypass_tick(void *opaque)
+{
+    ColoursoftMachineState *cms = opaque;
+
+    if (!qatomic_read(&cms->cfa_bypass) ||
+        qatomic_read(&cms->cfa_bypass_applied) ||
+        qatomic_xchg(&cms->cfa_bypass_inflight, true)) {
+        return;
+    }
+    if (!first_cpu) {
+        qatomic_set(&cms->cfa_bypass_inflight, false);
+        timer_mod_ns(cms->cfa_bypass_timer,
+                     qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                     COLOURSOFT_CFA_RETRY_NS);
+        return;
+    }
+
+    qatomic_inc(&cms->cfa_bypass_attempts);
+    async_safe_run_on_cpu(first_cpu, coloursoft_cfa_bypass_on_cpu,
+                          RUN_ON_CPU_HOST_PTR(cms));
+}
+
+static void coloursoft_cfa_bypass_reset(void *opaque)
+{
+    ColoursoftMachineState *cms = opaque;
+
+    timer_del(cms->cfa_bypass_timer);
+    qatomic_set(&cms->cfa_bypass_inflight, false);
+    qatomic_set(&cms->cfa_bypass_applied, false);
+    qatomic_set(&cms->cfa_bypass_address, 0);
+    qatomic_set(&cms->cfa_bypass_workers_address, 0);
+    qatomic_set(&cms->cfa_bypass_attempts, 0);
+    cms->cfa_scan_address = COLOURSOFT_CFA_MODULE_START;
+    if (qatomic_read(&cms->cfa_bypass)) {
+        timer_mod_ns(cms->cfa_bypass_timer,
+                     qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                     COLOURSOFT_CFA_RETRY_NS);
+    }
+}
 
 /*
  * Enter the 32-bit BL2 or U-Boot payload from the Cortex-A53 reset state.
@@ -204,7 +423,7 @@ static void coloursoft_populate_idme(DeviceState *card,
         { "bootcount",      "0",                  8, true },
         { "manufacturing",  cms->idme_mfg,       512, true },
         { "unlock_code",    "",                1024, true },
-        { "device_type_id", "0",                 32, true },
+        { "device_type_id", cms->idme_device_type, 32, true },
         { "dev_flags",      "0",                  8, true },
         { "fos_flags",      cms->idme_fos_flags,   8, true },
         { "usr_flags",      "0",                  8, true },
@@ -302,6 +521,7 @@ static void coloursoft_init(MachineState *machine)
     I2CSlave *fp9935;
     I2CSlave *bd71828;
     I2CSlave *ft5536g;
+    I2CSlave *lis2du12;
 
     if (machine->ram_size > MT8113_RAM_MAX) {
         error_report("Coloursoft RAM exceeds the MT8113 2 GiB address map");
@@ -316,7 +536,8 @@ static void coloursoft_init(MachineState *machine)
     cms->soc = soc;
 
     i2c_slave_create_simple(soc->i2c[0].bus, TYPE_FP9967, 0x26);
-    i2c_slave_create_simple(soc->i2c[0].bus, TYPE_LIS2DU12, 0x19);
+    lis2du12 = i2c_slave_create_simple(soc->i2c[0].bus,
+                                      TYPE_LIS2DU12, 0x19);
     fp9935 = i2c_slave_create_simple(soc->i2c[0].bus, TYPE_FP9935, 0x30);
     i2c_slave_create_simple(soc->i2c[0].bus, TYPE_MAX20342, 0x35);
     bd71828 = i2c_slave_create_simple(soc->i2c[1].bus, TYPE_BD71828, 0x4b);
@@ -333,11 +554,18 @@ static void coloursoft_init(MachineState *machine)
         qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in", 15));
     qdev_connect_gpio_out_named(DEVICE(&soc->gpio), "gpio-out", 20,
         qdev_get_gpio_in_named(DEVICE(ft5536g), "reset", 0));
+    qdev_connect_gpio_out_named(DEVICE(lis2du12), "irq", 0,
+        qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in", 70));
+    qemu_set_irq(qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in", 70),
+                 0);
 
     memory_region_add_subregion(get_system_memory(), MT8113_RAM_BASE,
                                 machine->ram);
+    sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&soc->hwtcon), 2,
+                            MT8113_HWTCON_CFA_MAILBOX_ADDR, 1);
     coloursoft_attach_emmc(cms);
     coloursoft_load_firmware(cms, machine);
+    qemu_register_reset(coloursoft_cfa_bypass_reset, cms);
 }
 
 static char *coloursoft_get_string(char **value)
@@ -370,11 +598,40 @@ COLOURSOFT_STRING_PROPERTY(idme_board_id)
 COLOURSOFT_STRING_PROPERTY(idme_serial)
 COLOURSOFT_STRING_PROPERTY(idme_mac)
 COLOURSOFT_STRING_PROPERTY(idme_mfg)
+COLOURSOFT_STRING_PROPERTY(idme_device_type)
 COLOURSOFT_STRING_PROPERTY(idme_bootmode)
 COLOURSOFT_STRING_PROPERTY(idme_postmode)
 COLOURSOFT_STRING_PROPERTY(idme_fos_flags)
 COLOURSOFT_STRING_PROPERTY(idme_hwid)
 COLOURSOFT_STRING_PROPERTY(idme_bcm_stress)
+
+static bool coloursoft_get_cfa_bypass(Object *obj, Error **errp)
+{
+    return qatomic_read(&COLOURSOFT_MACHINE(obj)->cfa_bypass);
+}
+
+static void coloursoft_set_cfa_bypass(Object *obj, bool value, Error **errp)
+{
+    ColoursoftMachineState *cms = COLOURSOFT_MACHINE(obj);
+
+    qatomic_set(&cms->cfa_bypass, value);
+    if (!cms->cfa_bypass_timer) {
+        return;
+    }
+    if (!value) {
+        timer_del(cms->cfa_bypass_timer);
+    } else if (!qatomic_read(&cms->cfa_bypass_applied) &&
+               !qatomic_read(&cms->cfa_bypass_inflight)) {
+        timer_mod_ns(cms->cfa_bypass_timer,
+                     qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                     COLOURSOFT_CFA_RETRY_NS);
+    }
+}
+
+static bool coloursoft_get_cfa_bypass_applied(Object *obj, Error **errp)
+{
+    return qatomic_read(&COLOURSOFT_MACHINE(obj)->cfa_bypass_applied);
+}
 
 static void coloursoft_machine_instance_init(Object *obj)
 {
@@ -383,20 +640,39 @@ static void coloursoft_machine_instance_init(Object *obj)
     cms->boot_stage = g_strdup("u-boot");
     /* Bytes 3..5 are a Sangria Color tattoo recognized by stock U-Boot. */
     cms->idme_board_id = g_strdup("0003RW0000000000");
-    cms->idme_serial = g_strdup("G000CS0000000000");
+    /* Modern serials encode the three-byte device code at bytes 3..5. */
+    cms->idme_serial = g_strdup("G003H9000000000");
     cms->idme_mac = g_strdup("020000000005");
     cms->idme_mfg = g_strdup("COLOURSOFTQEMU00000");
+    cms->idme_device_type = g_strdup("3H9");
     cms->idme_bootmode = g_strdup("1");
     cms->idme_postmode = g_strdup("0");
     cms->idme_fos_flags = g_strdup("0");
     cms->idme_hwid = g_strdup("0");
     cms->idme_bcm_stress = g_strdup("");
+    cms->cfa_bypass = true;
+    cms->cfa_scan_address = COLOURSOFT_CFA_MODULE_START;
+    cms->cfa_bypass_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                          coloursoft_cfa_bypass_tick, cms);
+    object_property_add_bool(obj, "cfa-bypass-applied",
+                             coloursoft_get_cfa_bypass_applied, NULL);
+    object_property_add_uint32_ptr(obj, "cfa-bypass-address",
+                                   &cms->cfa_bypass_address,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint32_ptr(obj, "cfa-bypass-workers-address",
+                                   &cms->cfa_bypass_workers_address,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "cfa-bypass-attempts",
+                                   &cms->cfa_bypass_attempts,
+                                   OBJ_PROP_FLAG_READ);
 }
 
 static void coloursoft_machine_instance_finalize(Object *obj)
 {
     ColoursoftMachineState *cms = COLOURSOFT_MACHINE(obj);
 
+    qemu_unregister_reset(coloursoft_cfa_bypass_reset, cms);
+    timer_free(cms->cfa_bypass_timer);
     g_free(cms->bl2);
     g_free(cms->tee);
     g_free(cms->quickboot);
@@ -405,6 +681,7 @@ static void coloursoft_machine_instance_finalize(Object *obj)
     g_free(cms->idme_serial);
     g_free(cms->idme_mac);
     g_free(cms->idme_mfg);
+    g_free(cms->idme_device_type);
     g_free(cms->idme_bootmode);
     g_free(cms->idme_postmode);
     g_free(cms->idme_fos_flags);
@@ -439,11 +716,15 @@ static void coloursoft_machine_class_init(ObjectClass *oc, const void *data)
     COLOURSOFT_ADD_PROPERTY("idme-serial", idme_serial);
     COLOURSOFT_ADD_PROPERTY("idme-mac", idme_mac);
     COLOURSOFT_ADD_PROPERTY("idme-mfg", idme_mfg);
+    COLOURSOFT_ADD_PROPERTY("idme-device-type", idme_device_type);
     COLOURSOFT_ADD_PROPERTY("idme-bootmode", idme_bootmode);
     COLOURSOFT_ADD_PROPERTY("idme-postmode", idme_postmode);
     COLOURSOFT_ADD_PROPERTY("idme-fos-flags", idme_fos_flags);
     COLOURSOFT_ADD_PROPERTY("idme-hwid", idme_hwid);
     COLOURSOFT_ADD_PROPERTY("idme-bcm-stress", idme_bcm_stress);
+    object_class_property_add_bool(oc, "cfa-bypass",
+                                   coloursoft_get_cfa_bypass,
+                                   coloursoft_set_cfa_bypass);
 }
 
 static const TypeInfo coloursoft_machine_type = {
