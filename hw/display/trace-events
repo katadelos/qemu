@@ -1,7 +1,10 @@
 # See docs/devel/tracing.rst for syntax documentation.
 
 # mt8113_hwtcon.c
-mt8113_hwtcon_mdp_source(uint32_t addr, uint32_t format, unsigned width, unsigned height, unsigned pitch, unsigned panel_width, unsigned panel_height, unsigned captured) "addr=0x%08x format=%u size=%ux%u pitch=%u panel=%ux%u captured=%u"
+mt8113_hwtcon_mdp_source(uint32_t addr, uint32_t end, uint64_t plane, uint32_t format, unsigned width, unsigned height, unsigned pitch, unsigned panel_width, unsigned panel_height, unsigned queued) "addr=0x%08x end=0x%08x plane=0x%08" PRIx64 " format=%u size=%ux%u pitch=%u panel=%ux%u queued=%u"
+mt8113_hwtcon_cfa_source(uint32_t va, unsigned source_width, unsigned source_height, unsigned rotation, unsigned panel_width, unsigned panel_height) "va=0x%08x source=%ux%u rotation=%u panel=%ux%u"
+mt8113_hwtcon_cfa_capture(uint32_t va, uint32_t iova, uint64_t phys, uint64_t bytes, bool success) "va=0x%08x iova=0x%08x first-phys=0x%08" PRIx64 " bytes=%" PRIu64 " success=%u"
+mt8113_hwtcon_cfa_fault(uint32_t source, uint64_t va, int cpu, unsigned spans) "source=0x%08x va=0x%08" PRIx64 " cpu=%d spans=%u"
 
 # imx50_epdc.c
 whitney_epdc_begin(uint32_t source, unsigned left, unsigned top, unsigned width, unsigned height, unsigned stride) "source=0x%08x rect=%u,%u %ux%u stride=%u"
