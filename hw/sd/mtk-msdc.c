@@ -62,6 +62,7 @@
 #define MSDC_BD_NEXT_H4_SHIFT   24
 #define MSDC_BD_PTR_H4_SHIFT    28
 #define MSDC_DMA_ADDR_H4_MASK   0xf
+#define MSDC_MAX_BD_NUM         1024
 
 typedef struct MTKMSDCDescriptor {
     uint32_t info;
@@ -174,7 +175,9 @@ static bool mtk_msdc_dma_descriptors(MTKMSDCState *s)
             ((hwaddr)((gpd.info >> MSDC_GPD_PTR_H4_SHIFT) &
                       MSDC_DMA_ADDR_H4_MASK) << 32);
 
-        for (unsigned i = 0; i < 256 && s->transfer_remaining; i++) {
+        /* The stock driver advertises MAX_BD_NUM (1024) scatter entries. */
+        for (unsigned i = 0;
+             i < MSDC_MAX_BD_NUM && s->transfer_remaining; i++) {
             MTKMSDCDescriptor bd;
             hwaddr buffer_addr;
 
