@@ -23,7 +23,7 @@ i2c_ss.add(when: 'CONFIG_IMX6SLL_REX', if_true: files(
   'lm3695.c',
   'max14656.c',
 ))
-i2c_ss.add(when: 'CONFIG_MT8113_COLOURSOFT', if_true: files(
+i2c_ss.add(when: 'CONFIG_MT8113_BELLATRIX4', if_true: files(
   'bd71828.c',
   'fp9935.c',
   'fp9967.c',

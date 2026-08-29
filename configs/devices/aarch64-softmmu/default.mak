@@ -3,7 +3,7 @@
 # We support all the 32 bit boards so need all their config
 include ../arm-softmmu/default.mak
 
-CONFIG_MT8113_COLOURSOFT=y
+CONFIG_MT8113_BELLATRIX4=y
 
 # These are selected by default when TCG is enabled, uncomment them to
 # keep out of the build.

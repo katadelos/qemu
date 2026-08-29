@@ -232,7 +232,7 @@ config MT8113
     select MTK_MSDC
     select SERIAL_MM
 
-config MT8113_COLOURSOFT
+config MT8113_BELLATRIX4
     bool
     default y
     depends on TCG && AARCH64

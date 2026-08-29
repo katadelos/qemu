@@ -1,7 +1,7 @@
 /*
  * MediaTek MT8113 Global Command Engine
  *
- * The Coloursoft HWTCON driver uses GCE command packets for display register
+ * The Bellatrix4 HWTCON driver uses GCE command packets for display register
  * programming.  This model executes the packet subset used by that driver and
  * implements the mailbox thread completion protocol.
  *

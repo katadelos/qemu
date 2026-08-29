@@ -1,4 +1,4 @@
-/* ROHM BD71828 PMIC register interface used by Coloursoft. */
+/* ROHM BD71828 PMIC register interface used by Bellatrix4. */
 
 #include "qemu/osdep.h"
 #include "hw/i2c/bd71828.h"

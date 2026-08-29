@@ -92,7 +92,7 @@ static void ft5536g_deliver_touch_report(void *opaque)
     memset(report, 0, FT5536G_TOUCH_DATA_SIZE);
 
     /*
-     * Protocol-v2 reports are what the Colorsoft's focaltech driver reads:
+     * Protocol-v2 reports are what Bellatrix4's focaltech driver reads:
      * byte 1 is 0x2n and each contact starts at byte 4. Coordinates carry
      * four fractional bits which the driver divides back down by sixteen.
      */
