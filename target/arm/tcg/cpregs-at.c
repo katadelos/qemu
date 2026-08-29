@@ -133,7 +133,8 @@ static uint64_t do_ats_write(CPUARMState *env, uint64_t value,
         if (arm_feature(env, ARM_FEATURE_EL2)) {
             if (mmu_idx == ARMMMUIdx_E10_0 ||
                 mmu_idx == ARMMMUIdx_E10_1 ||
-                mmu_idx == ARMMMUIdx_E10_1_PAN) {
+                mmu_idx == ARMMMUIdx_E10_1_PAN ||
+                mmu_idx == ARMMMUIdx_E10_1_SWPAN) {
                 format64 |= env->cp15.hcr_el2 & (HCR_VM | HCR_DC);
             } else {
                 format64 |= arm_current_el(env) == 2;

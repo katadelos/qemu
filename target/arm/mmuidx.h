@@ -82,7 +82,9 @@
  * Stage2 NonSecure
  * plus one TLB per Physical address space: S, NS, Realm, Root
  *
- * for a total of 22 different mmu_idx.
+ * plus one implementation-only index used to cache the AArch32 DACR
+ * software-PAN no-access state without changing architectural permissions,
+ * for a total of 23 different mmu_idx.
  *
  * R profile CPUs have an MPU, but can use the same set of MMU indexes
  * as A profile. They only need to distinguish EL0 and EL1 (and
@@ -175,6 +177,13 @@ typedef enum ARMMMUIdx {
     ARMMMUIdx_Phys_Realm = 21 | ARM_MMU_IDX_A,
 
     /*
+     * AArch32 short-descriptor translations with DACR domain 1 disabled.
+     * This has ordinary EL1 permissions; its separate core index is only a
+     * cache tag for software PAN and must not acquire hardware-PAN semantics.
+     */
+    ARMMMUIdx_E10_1_SWPAN = 22 | ARM_MMU_IDX_A,
+
+    /*
      * These are not allocated TLBs and are used only for AT system
      * instructions or for the first stage of an S12 page table walk.
      */
@@ -210,6 +219,7 @@ typedef enum ARMMMUIdxBit {
     TO_CORE_BIT(E10_1),
     TO_CORE_BIT(E10_1_PAN),
     TO_CORE_BIT(E10_1_GCS),
+    TO_CORE_BIT(E10_1_SWPAN),
     TO_CORE_BIT(E20_0),
     TO_CORE_BIT(E20_0_GCS),
     TO_CORE_BIT(E20_2),

@@ -135,6 +135,7 @@ static ARMMMUIdx full_a64_user_mem_index(DisasContext *s, bool unpriv)
         switch (useridx) {
         case ARMMMUIdx_E10_1:
         case ARMMMUIdx_E10_1_PAN:
+        case ARMMMUIdx_E10_1_SWPAN:
             useridx = ARMMMUIdx_E10_0;
             break;
         case ARMMMUIdx_E20_2:

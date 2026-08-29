@@ -166,6 +166,7 @@ ARMMMUIdx stage_1_mmu_idx(ARMMMUIdx mmu_idx)
     case ARMMMUIdx_E10_0:
         return ARMMMUIdx_Stage1_E0;
     case ARMMMUIdx_E10_1:
+    case ARMMMUIdx_E10_1_SWPAN:
         return ARMMMUIdx_Stage1_E1;
     case ARMMMUIdx_E10_1_PAN:
         return ARMMMUIdx_Stage1_E1_PAN;
@@ -284,6 +285,7 @@ static bool regime_translation_disabled(CPUARMState *env, ARMMMUIdx mmu_idx,
     case ARMMMUIdx_E10_1:
     case ARMMMUIdx_E10_1_PAN:
     case ARMMMUIdx_E10_1_GCS:
+    case ARMMMUIdx_E10_1_SWPAN:
         /* TGE means that EL0/1 act as if SCTLR_EL1.M is zero */
         hcr_el2 = arm_hcr_el2_eff_secstate(env, space);
         if (hcr_el2 & HCR_TGE) {
@@ -3690,6 +3692,7 @@ static bool get_phys_addr_nogpc(CPUARMState *env, S1Translate *ptw,
         s1_mmu_idx = ARMMMUIdx_Stage1_E0;
         goto do_twostage;
     case ARMMMUIdx_E10_1:
+    case ARMMMUIdx_E10_1_SWPAN:
         s1_mmu_idx = ARMMMUIdx_Stage1_E1;
         goto do_twostage;
     case ARMMMUIdx_E10_1_PAN:
@@ -3845,6 +3848,7 @@ arm_mmu_idx_to_security_space(CPUARMState *env, ARMMMUIdx mmu_idx)
     case ARMMMUIdx_E10_1:
     case ARMMMUIdx_E10_1_PAN:
     case ARMMMUIdx_E10_1_GCS:
+    case ARMMMUIdx_E10_1_SWPAN:
     case ARMMMUIdx_E20_0:
     case ARMMMUIdx_E20_0_GCS:
     case ARMMMUIdx_E20_2:
@@ -3964,6 +3968,7 @@ hwaddr arm_cpu_get_phys_page_attrs_debug(CPUState *cs, vaddr addr,
     switch (mmu_idx) {
     case ARMMMUIdx_E10_1:
     case ARMMMUIdx_E10_1_PAN:
+    case ARMMMUIdx_E10_1_SWPAN:
         return arm_cpu_get_phys_page(env, addr, attrs, ARMMMUIdx_E10_0);
     case ARMMMUIdx_E20_2:
     case ARMMMUIdx_E20_2_PAN:

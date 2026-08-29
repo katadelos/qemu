@@ -774,6 +774,9 @@ typedef struct CPUArchState {
      */
     bool event_register;
 
+    /* Separate short-descriptor TLBs after Linux first toggles SW PAN. */
+    bool aa32_sw_pan_active;
+
     /* Fields up to this point are cleared by a CPU reset */
     struct {} end_reset_fields;
 
@@ -2442,14 +2445,14 @@ FIELD(TBFLAG_ANY, AARCH64_STATE, 0, 1)
 FIELD(TBFLAG_ANY, SS_ACTIVE, 1, 1)
 FIELD(TBFLAG_ANY, PSTATE__SS, 2, 1)      /* Not cached. */
 FIELD(TBFLAG_ANY, BE_DATA, 3, 1)
-FIELD(TBFLAG_ANY, MMUIDX, 4, 4)
+FIELD(TBFLAG_ANY, MMUIDX, 4, 5)
 /* Target EL if we take a floating-point-disabled exception */
-FIELD(TBFLAG_ANY, FPEXC_EL, 8, 2)
+FIELD(TBFLAG_ANY, FPEXC_EL, 9, 2)
 /* Memory operations require alignment: SCTLR_ELx.A or CCR.UNALIGN_TRP */
-FIELD(TBFLAG_ANY, ALIGN_MEM, 10, 1)
-FIELD(TBFLAG_ANY, PSTATE__IL, 11, 1)
-FIELD(TBFLAG_ANY, FGT_ACTIVE, 12, 1)
-FIELD(TBFLAG_ANY, FGT_SVC, 13, 1)
+FIELD(TBFLAG_ANY, ALIGN_MEM, 11, 1)
+FIELD(TBFLAG_ANY, PSTATE__IL, 12, 1)
+FIELD(TBFLAG_ANY, FGT_ACTIVE, 13, 1)
+FIELD(TBFLAG_ANY, FGT_SVC, 14, 1)
 
 /*
  * Bit usage when in AArch32 state, both A- and M-profile.

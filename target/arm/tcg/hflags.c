@@ -347,6 +347,7 @@ static CPUARMTBFlags rebuild_hflags_a64(CPUARMState *env, int el, int fp_el,
         switch (mmu_idx) {
         case ARMMMUIdx_E10_1:
         case ARMMMUIdx_E10_1_PAN:
+        case ARMMMUIdx_E10_1_SWPAN:
             /* FEAT_NV: NV,NV1 == 1,1 means we don't do UNPRIV accesses */
             if ((hcr & (HCR_NV | HCR_NV1)) != (HCR_NV | HCR_NV1)) {
                 DP_TBFLAG_A64(flags, UNPRIV, 1);

@@ -206,7 +206,7 @@ struct CPUClass {
  * Fix the number of mmu modes across all targets.
  * Current maximum is target/arm/.
  */
-#define NB_MMU_MODES 22
+#define NB_MMU_MODES 23
 typedef uint32_t MMUIdxMap;
 
 /* Use a fully associative victim tlb of 8 entries. */

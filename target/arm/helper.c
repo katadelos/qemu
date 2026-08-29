@@ -362,12 +362,69 @@ static CPAccessResult access_tacr(CPUARMState *env, const ARMCPRegInfo *ri,
     return CP_ACCESS_OK;
 }
 
+/*
+ * Linux's AArch32 software PAN implementation switches domain 1 between
+ * client and no-access on every exception entry/exit.  Keep the two DACR
+ * states in separate TLBs rather than flushing every MMU index (and the
+ * complete TB jump cache) twice per interrupt.  This must use a dedicated
+ * index with ordinary EL1 permissions: architectural PAN also rejects all
+ * user-accessible mappings, whereas software PAN rejects only DACR domain 1.
+ *
+ * Other DACR changes still need the conservative flush below: QEMU does not
+ * otherwise tag cached short-descriptor translations with their domain.
+ */
+#define AA32_DACR_DOMAIN1_MASK (3U << 2)
+
+static bool aa32_dacr_sw_pan_enabled(CPUARMState *env, int el)
+{
+    if (el != 1 || !env->aa32_sw_pan_active || arm_el_is_aa64(env, el) ||
+        extended_addresses_enabled(env)) {
+        return false;
+    }
+
+    return (env->cp15.dacr_ns & AA32_DACR_DOMAIN1_MASK) == 0;
+}
+
+static bool aa32_dacr_sw_pan_transition(CPUARMState *env,
+                                        uint32_t old, uint32_t value)
+{
+    uint32_t old_domain = old & AA32_DACR_DOMAIN1_MASK;
+    uint32_t new_domain = value & AA32_DACR_DOMAIN1_MASK;
+
+    if (arm_current_el(env) != 1 || is_a64(env) ||
+        extended_addresses_enabled(env) ||
+        ((old ^ value) & ~AA32_DACR_DOMAIN1_MASK)) {
+        return false;
+    }
+
+    return (old_domain == 0 || old_domain == (1U << 2)) &&
+           (new_domain == 0 || new_domain == (1U << 2));
+}
+
 static void dacr_write(CPUARMState *env, const ARMCPRegInfo *ri, uint64_t value)
 {
     ARMCPU *cpu = env_archcpu(env);
+    uint32_t old = raw_read(env, ri);
+    uint32_t new = value;
+    bool sw_pan_transition;
 
-    raw_write(env, ri, value);
-    tlb_flush(CPU(cpu)); /* Flush TLB as domain not tracked in TLB */
+    if (old == new) {
+        return;
+    }
+
+    sw_pan_transition = aa32_dacr_sw_pan_transition(env, old, new);
+    raw_write(env, ri, new);
+    if (sw_pan_transition && env->aa32_sw_pan_active) {
+        return;
+    }
+
+    /*
+     * The first 0x51/0x55-style transition flushes the old untagged state,
+     * then enables the two-index cache.  Early boot therefore retains the
+     * exact historical MMU index until Linux demonstrates this contract.
+     */
+    tlb_flush(CPU(cpu));
+    env->aa32_sw_pan_active = sw_pan_transition;
 }
 
 static void fcse_write(CPUARMState *env, const ARMCPRegInfo *ri, uint64_t value)
@@ -414,6 +471,7 @@ int alle1_tlbmask(CPUARMState *env)
     return (ARMMMUIdxBit_E10_1 |
             ARMMMUIdxBit_E10_1_PAN |
             ARMMMUIdxBit_E10_1_GCS |
+            ARMMMUIdxBit_E10_1_SWPAN |
             ARMMMUIdxBit_E10_0 |
             ARMMMUIdxBit_E10_0_GCS |
             ARMMMUIdxBit_Stage2 |
@@ -847,6 +905,7 @@ static void scr_write(CPUARMState *env, const ARMCPRegInfo *ri, uint64_t value)
                                            ARMMMUIdxBit_E10_1 |
                                            ARMMMUIdxBit_E10_1_PAN |
                                            ARMMMUIdxBit_E10_1_GCS |
+                                           ARMMMUIdxBit_E10_1_SWPAN |
                                            ARMMMUIdxBit_E20_2 |
                                            ARMMMUIdxBit_E20_2_PAN |
                                            ARMMMUIdxBit_E20_2_GCS |
@@ -10053,6 +10112,8 @@ ARMMMUIdx arm_mmu_idx_el(CPUARMState *env, int el)
     case 1:
         if (arm_pan_enabled(env)) {
             idx = ARMMMUIdx_E10_1_PAN;
+        } else if (aa32_dacr_sw_pan_enabled(env, el)) {
+            idx = ARMMMUIdx_E10_1_SWPAN;
         } else {
             idx = ARMMMUIdx_E10_1;
         }

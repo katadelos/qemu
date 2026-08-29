@@ -234,6 +234,7 @@ static inline int get_a32_user_mem_index(DisasContext *s)
     case ARMMMUIdx_E10_0:
     case ARMMMUIdx_E10_1:
     case ARMMMUIdx_E10_1_PAN:
+    case ARMMMUIdx_E10_1_SWPAN:
         return arm_to_core_mmu_idx(ARMMMUIdx_E10_0);
     case ARMMMUIdx_MUser:
     case ARMMMUIdx_MPriv:
