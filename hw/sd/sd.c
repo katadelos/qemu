@@ -2371,7 +2371,8 @@ static const VMStateDescription sd_vmstate = {
     },
 };
 
-static void sd_blk_read(SDState *sd, uint64_t addr, uint32_t len)
+static void sd_blk_read_buffer(SDState *sd, uint64_t addr, uint32_t len,
+                               uint8_t *data)
 {
     unsigned int partition_access;
 
@@ -2384,7 +2385,7 @@ static void sd_blk_read(SDState *sd, uint64_t addr, uint32_t len)
         uint64_t offset = (partition_access - 1) * sd->boot_part_size + addr;
 
         if (addr + len <= sd->boot_part_size) {
-            memcpy(sd->data, sd->boot_parts + offset, len);
+            memcpy(data, sd->boot_parts + offset, len);
         } else {
             fprintf(stderr, "sd_blk_read: boot partition read out of range\n");
         }
@@ -2392,12 +2393,17 @@ static void sd_blk_read(SDState *sd, uint64_t addr, uint32_t len)
     }
     addr += sd_part_offset(sd);
     if (sd->reported_capacity && addr + len > sd->backing_size) {
-        memset(sd->data, 0, len);
+        memset(data, 0, len);
         return;
     }
-    if (!sd->blk || blk_pread(sd->blk, addr, len, sd->data, 0) < 0) {
+    if (!sd->blk || blk_pread(sd->blk, addr, len, data, 0) < 0) {
         fprintf(stderr, "sd_blk_read: read error on host side\n");
     }
+}
+
+static void sd_blk_read(SDState *sd, uint64_t addr, uint32_t len)
+{
+    sd_blk_read_buffer(sd, addr, len, sd->data);
 }
 
 static void emmc_boot_parts_sync(SDState *sd, Error **errp)
@@ -2413,7 +2419,8 @@ static void emmc_boot_parts_sync(SDState *sd, Error **errp)
     }
 }
 
-static void sd_blk_write(SDState *sd, uint64_t addr, uint32_t len)
+static void sd_blk_write_buffer(SDState *sd, uint64_t addr, uint32_t len,
+                                const uint8_t *data)
 {
     unsigned int partition_access;
 
@@ -2426,7 +2433,7 @@ static void sd_blk_write(SDState *sd, uint64_t addr, uint32_t len)
         uint64_t offset = (partition_access - 1) * sd->boot_part_size + addr;
 
         if (addr + len <= sd->boot_part_size) {
-            memcpy(sd->boot_parts + offset, sd->data, len);
+            memcpy(sd->boot_parts + offset, data, len);
             emmc_boot_parts_sync(sd, &error_fatal);
         } else {
             fprintf(stderr,
@@ -2438,9 +2445,14 @@ static void sd_blk_write(SDState *sd, uint64_t addr, uint32_t len)
         return;
     }
     addr += sd_part_offset(sd);
-    if (!sd->blk || blk_pwrite(sd->blk, addr, len, sd->data, 0) < 0) {
+    if (!sd->blk || blk_pwrite(sd->blk, addr, len, data, 0) < 0) {
         fprintf(stderr, "sd_blk_write: write error on host side\n");
     }
+}
+
+static void sd_blk_write(SDState *sd, uint64_t addr, uint32_t len)
+{
+    sd_blk_write_buffer(sd, addr, len, sd->data);
 }
 
 static bool rpmb_calc_hmac(SDState *sd, const RPMBDataFrame *frame,
@@ -3951,14 +3963,10 @@ static bool sd_generic_read_byte(SDState *sd, uint8_t *value)
     return false;
 }
 
-static void sd_write_byte(SDState *sd, uint8_t value)
+static void sd_write_byte_unchecked(SDState *sd, uint8_t value)
 {
     unsigned int partition_access;
     int i;
-
-    if (!sd->blk || !blk_is_inserted(sd->blk)) {
-        return;
-    }
 
     if (sd->state != sd_receivingdata_state) {
         qemu_log_mask(LOG_GUEST_ERROR,
@@ -4088,17 +4096,169 @@ static void sd_write_byte(SDState *sd, uint8_t value)
     }
 }
 
-static uint8_t sd_read_byte(SDState *sd)
+static void sd_write_byte(SDState *sd, uint8_t value)
+{
+    if (!sd->blk || !blk_is_inserted(sd->blk)) {
+        return;
+    }
+
+    sd_write_byte_unchecked(sd, value);
+}
+
+static void sd_write_data(SDState *sd, const uint8_t *data, size_t length)
+{
+    unsigned int partition_access;
+
+    if (!sd->blk || !blk_is_inserted(sd->blk)) {
+        return;
+    }
+
+    if (trace_event_get_state(TRACE_SDCARD_WRITE_DATA) ||
+        sd->state != sd_receivingdata_state ||
+        (sd->card_status & (ADDRESS_ERROR | WP_VIOLATION))) {
+        goto bytewise;
+    }
+
+    switch (sd->current_cmd) {
+    case 24: { /* CMD24: WRITE_SINGLE_BLOCK */
+        size_t count = MIN(length, sd->data_size - sd->data_offset);
+
+        memcpy(sd->data + sd->data_offset, data, count);
+        sd->data_offset += count;
+        data += count;
+        length -= count;
+        if (sd->data_offset >= sd->data_size) {
+            sd->state = sd_programming_state;
+            sd_blk_write(sd, sd->data_start, sd->data_offset);
+            sd->blk_written++;
+            sd->csd[14] |= 0x40;
+            sd->state = sd_transfer_state;
+        }
+        break;
+    }
+
+    case 25: /* CMD25: WRITE_MULTIPLE_BLOCK */
+        while (length && sd->state == sd_receivingdata_state) {
+            uint32_t block_len = sd->blk_len;
+            size_t count;
+
+            if (sd->data_offset == 0) {
+                if (!address_in_range(sd, "WRITE_MULTIPLE_BLOCK",
+                                      sd->data_start, block_len)) {
+                    break;
+                }
+                if (sd->size <= SDSC_MAX_CAPACITY &&
+                    sd_wp_addr(sd, sd->data_start)) {
+                    sd->card_status |= WP_VIOLATION;
+                    break;
+                }
+            }
+
+            partition_access = sd->ext_csd[EXT_CSD_PART_CONFIG]
+                    & EXT_CSD_PART_CONFIG_ACC_MASK;
+
+            /*
+             * A Mediatek DMA descriptor commonly spans many sectors.  Keep
+             * those sectors as one block-backend request instead of issuing
+             * a synchronous write for every 512-byte block.
+             */
+            if (sd->data_offset == 0 && block_len && sd_is_emmc(sd) &&
+                partition_access != EXT_CSD_PART_CONFIG_ACC_RPMB &&
+                length >= block_len &&
+                !trace_event_get_state(TRACE_SDCARD_WRITE_BLOCK)) {
+                size_t blocks = length / block_len;
+                uint32_t bytes;
+
+                if (sd->multi_blk_cnt) {
+                    blocks = MIN(blocks, (size_t)sd->multi_blk_cnt);
+                }
+                bytes = blocks * block_len;
+                if (!address_in_range(sd, "WRITE_MULTIPLE_BLOCK",
+                                      sd->data_start, bytes)) {
+                    break;
+                }
+
+                sd->state = sd_programming_state;
+                sd_blk_write_buffer(sd, sd->data_start, bytes, data);
+                sd->blk_written += blocks;
+                sd->data_start += bytes;
+                sd->csd[14] |= 0x40;
+                data += bytes;
+                length -= bytes;
+
+                if (sd->multi_blk_cnt) {
+                    sd->multi_blk_cnt -= blocks;
+                    if (!sd->multi_blk_cnt) {
+                        sd->state = sd_transfer_state;
+                        break;
+                    }
+                }
+                sd->state = sd_receivingdata_state;
+                continue;
+            }
+
+            count = MIN(length, (size_t)block_len - sd->data_offset);
+            memcpy(sd->data + sd->data_offset, data, count);
+            sd->data_offset += count;
+            data += count;
+            length -= count;
+
+            if (sd->data_offset >= block_len) {
+                sd->state = sd_programming_state;
+                if (partition_access == EXT_CSD_PART_CONFIG_ACC_RPMB) {
+                    emmc_rpmb_blk_write(sd, sd->data_start,
+                                        sd->data_offset);
+                } else {
+                    sd_blk_write(sd, sd->data_start, sd->data_offset);
+                }
+                sd->blk_written++;
+                sd->data_start += block_len;
+                sd->data_offset = 0;
+                sd->csd[14] |= 0x40;
+
+                if (sd->multi_blk_cnt && !--sd->multi_blk_cnt) {
+                    sd->state = sd_transfer_state;
+                    break;
+                }
+                sd->state = sd_receivingdata_state;
+            }
+        }
+        break;
+
+    case 56: { /* CMD56: GEN_CMD */
+        size_t count = MIN(length, sd->data_size - sd->data_offset);
+
+        memcpy(sd->data + sd->data_offset, data, count);
+        sd->data_offset += count;
+        data += count;
+        length -= count;
+        if (sd->data_offset >= sd->data_size) {
+            sd->state = sd_transfer_state;
+        }
+        break;
+    }
+
+    default:
+        goto bytewise;
+    }
+
+    if (!length) {
+        return;
+    }
+
+bytewise:
+    for (size_t i = 0; i < length; i++) {
+        sd_write_byte_unchecked(sd, data[i]);
+    }
+}
+
+static uint8_t sd_read_byte_unchecked(SDState *sd)
 {
     /* TODO: Append CRCs */
     const uint8_t dummy_byte = 0x00;
     unsigned int partition_access;
     uint8_t ret;
     uint32_t io_len;
-
-    if (!sd->blk || !blk_is_inserted(sd->blk)) {
-        return dummy_byte;
-    }
 
     if (sd->state != sd_sendingdata_state) {
         qemu_log_mask(LOG_GUEST_ERROR,
@@ -4167,6 +4327,151 @@ static uint8_t sd_read_byte(SDState *sd)
     }
 
     return ret;
+}
+
+static uint8_t sd_read_byte(SDState *sd)
+{
+    if (!sd->blk || !blk_is_inserted(sd->blk)) {
+        return 0;
+    }
+
+    return sd_read_byte_unchecked(sd);
+}
+
+static void sd_read_data(SDState *sd, uint8_t *data, size_t length)
+{
+    unsigned int partition_access;
+
+    if (!sd->blk || !blk_is_inserted(sd->blk)) {
+        memset(data, 0, length);
+        return;
+    }
+
+    if (trace_event_get_state(TRACE_SDCARD_READ_DATA) ||
+        sd->state != sd_sendingdata_state ||
+        (sd->card_status & (ADDRESS_ERROR | WP_VIOLATION))) {
+        goto bytewise;
+    }
+
+    switch (sd->current_cmd) {
+    case 6:  /* CMD6:   SWITCH_FUNCTION */
+    case 8:  /* CMD8:   SEND_EXT_CSD */
+    case 9:  /* CMD9:   SEND_CSD */
+    case 10: /* CMD10:  SEND_CID */
+    case 13: /* ACMD13: SD_STATUS */
+    case 17: /* CMD17:  READ_SINGLE_BLOCK */
+    case 19: /* CMD19:  SEND_TUNING_BLOCK (SD) */
+    case 22: /* ACMD22: SEND_NUM_WR_BLOCKS */
+    case 30: /* CMD30:  SEND_WRITE_PROT */
+    case 51: /* ACMD51: SEND_SCR */
+    case 56: { /* CMD56: GEN_CMD */
+        size_t count = MIN(length, sd->data_size - sd->data_offset);
+
+        memcpy(data, sd->data + sd->data_offset, count);
+        sd->data_offset += count;
+        data += count;
+        length -= count;
+        if (sd->data_offset >= sd->data_size) {
+            sd->state = sd_transfer_state;
+        }
+        break;
+    }
+
+    case 18: /* CMD18: READ_MULTIPLE_BLOCK */
+        while (length && sd->state == sd_sendingdata_state) {
+            uint32_t block_len = sd_blk_len(sd);
+            size_t count;
+
+            partition_access = sd->ext_csd[EXT_CSD_PART_CONFIG]
+                    & EXT_CSD_PART_CONFIG_ACC_MASK;
+
+            /*
+             * Collapse aligned eMMC multi-block reads into the request size
+             * supplied by the host controller.  This is both the hardware
+             * contract and the important fast path for Mediatek DMA.
+             */
+            if (sd->data_offset == 0 && block_len && sd_is_emmc(sd) &&
+                partition_access != EXT_CSD_PART_CONFIG_ACC_RPMB &&
+                length >= block_len &&
+                !trace_event_get_state(TRACE_SDCARD_READ_BLOCK)) {
+                size_t blocks = length / block_len;
+                uint32_t bytes;
+                uint64_t backing_addr;
+                bool boot_partition;
+
+                if (sd->multi_blk_cnt) {
+                    blocks = MIN(blocks, (size_t)sd->multi_blk_cnt);
+                }
+                bytes = blocks * block_len;
+                backing_addr = sd->data_start + sd_part_offset(sd);
+                boot_partition = sd->boot_parts_in_memory &&
+                    (partition_access == EXT_CSD_PART_CONFIG_ACC_BOOT1 ||
+                     partition_access == EXT_CSD_PART_CONFIG_ACC_BOOT2);
+
+                if ((!sd->reported_capacity || boot_partition ||
+                     backing_addr + bytes <= sd->backing_size) &&
+                    address_in_range(sd, "READ_MULTIPLE_BLOCK",
+                                     sd->data_start, bytes)) {
+                    sd_blk_read_buffer(sd, sd->data_start, bytes, data);
+                    sd->data_start += bytes;
+                    data += bytes;
+                    length -= bytes;
+
+                    if (sd->multi_blk_cnt) {
+                        sd->multi_blk_cnt -= blocks;
+                        if (!sd->multi_blk_cnt) {
+                            sd->state = sd_transfer_state;
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                if (sd->card_status & ADDRESS_ERROR) {
+                    break;
+                }
+            }
+
+            if (sd->data_offset == 0) {
+                if (!address_in_range(sd, "READ_MULTIPLE_BLOCK",
+                                      sd->data_start, block_len)) {
+                    break;
+                }
+                if (partition_access == EXT_CSD_PART_CONFIG_ACC_RPMB) {
+                    emmc_rpmb_blk_read(sd, sd->data_start, block_len);
+                } else {
+                    sd_blk_read(sd, sd->data_start, block_len);
+                }
+            }
+
+            count = MIN(length, (size_t)block_len - sd->data_offset);
+            memcpy(data, sd->data + sd->data_offset, count);
+            sd->data_offset += count;
+            data += count;
+            length -= count;
+
+            if (sd->data_offset >= block_len) {
+                sd->data_start += block_len;
+                sd->data_offset = 0;
+                if (sd->multi_blk_cnt && !--sd->multi_blk_cnt) {
+                    sd->state = sd_transfer_state;
+                    break;
+                }
+            }
+        }
+        break;
+
+    default:
+        goto bytewise;
+    }
+
+    if (!length) {
+        return;
+    }
+
+bytewise:
+    for (size_t i = 0; i < length; i++) {
+        data[i] = sd_read_byte_unchecked(sd);
+    }
 }
 
 static bool sd_receive_ready(SDState *sd)
@@ -4594,6 +4899,8 @@ static void sd_class_init(ObjectClass *klass, const void *data)
 
     sc->set_cid = sd_set_cid;
     sc->set_csd = sd_set_csd;
+    sc->write_data = sd_write_data;
+    sc->read_data = sd_read_data;
     sc->proto = &sd_proto_sd;
 }
 
@@ -4627,6 +4934,8 @@ static void emmc_class_init(ObjectClass *klass, const void *data)
 
     sc->set_cid = emmc_set_cid;
     sc->set_csd = emmc_set_csd;
+    sc->write_data = sd_write_data;
+    sc->read_data = sd_read_data;
 }
 
 static NetClientInfo ar6003_net_info = {

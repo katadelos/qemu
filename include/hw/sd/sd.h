@@ -131,6 +131,15 @@ struct SDCardClass {
      */
     void (*write_byte)(SDState *sd, uint8_t value);
     /**
+     * Write multiple bytes to a SD card.
+     * @sd: card
+     * @data: bytes to write
+     * @length: number of bytes to write
+     *
+     * Optional bulk form of write_byte().
+     */
+    void (*write_data)(SDState *sd, const uint8_t *data, size_t length);
+    /**
      * Read a byte from a SD card.
      * @sd: card
      *
@@ -139,6 +148,15 @@ struct SDCardClass {
      * Return: byte value read
      */
     uint8_t (*read_byte)(SDState *sd);
+    /**
+     * Read multiple bytes from a SD card.
+     * @sd: card
+     * @data: destination buffer
+     * @length: number of bytes to read
+     *
+     * Optional bulk form of read_byte().
+     */
+    void (*read_data)(SDState *sd, uint8_t *data, size_t length);
     bool (*receive_ready)(SDState *sd);
     bool (*data_ready)(SDState *sd);
     void (*set_voltage)(SDState *sd, uint16_t millivolts);

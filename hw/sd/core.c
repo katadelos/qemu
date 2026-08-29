@@ -125,9 +125,20 @@ void sdbus_write_data(SDBus *sdbus, const void *buf, size_t length)
     if (card) {
         SDCardClass *sc = SDMMC_COMMON_GET_CLASS(card);
 
-        for (size_t i = 0; i < length; i++) {
-            trace_sdbus_write(sdbus_name(sdbus), data[i]);
-            sc->write_byte(card, data[i]);
+        if (sc->write_data) {
+            if (trace_event_get_state(TRACE_SDBUS_WRITE)) {
+                const char *bus_name = sdbus_name(sdbus);
+
+                for (size_t i = 0; i < length; i++) {
+                    trace_sdbus_write(bus_name, data[i]);
+                }
+            }
+            sc->write_data(card, data, length);
+        } else {
+            for (size_t i = 0; i < length; i++) {
+                trace_sdbus_write(sdbus_name(sdbus), data[i]);
+                sc->write_byte(card, data[i]);
+            }
         }
     }
 }
@@ -155,9 +166,20 @@ void sdbus_read_data(SDBus *sdbus, void *buf, size_t length)
     if (card) {
         SDCardClass *sc = SDMMC_COMMON_GET_CLASS(card);
 
-        for (size_t i = 0; i < length; i++) {
-            data[i] = sc->read_byte(card);
-            trace_sdbus_read(sdbus_name(sdbus), data[i]);
+        if (sc->read_data) {
+            sc->read_data(card, data, length);
+            if (trace_event_get_state(TRACE_SDBUS_READ)) {
+                const char *bus_name = sdbus_name(sdbus);
+
+                for (size_t i = 0; i < length; i++) {
+                    trace_sdbus_read(bus_name, data[i]);
+                }
+            }
+        } else {
+            for (size_t i = 0; i < length; i++) {
+                data[i] = sc->read_byte(card);
+                trace_sdbus_read(sdbus_name(sdbus), data[i]);
+            }
         }
     }
 }
