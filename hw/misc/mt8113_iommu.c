@@ -17,8 +17,38 @@
 #include "system/dma.h"
 
 #define MT8113_IOMMU_INVALIDATE  0x020
+#define MT8113_IOMMU_INV_START   0x024
+#define MT8113_IOMMU_INV_END     0x028
 #define MT8113_IOMMU_CPE_DONE    0x12c
 #define MT8113_IOMMU_INV_RANGE   BIT(0)
+#define MT8113_IOMMU_INV_ALL     BIT(1)
+#define MT8113_IOMMU_PAGE_SHIFT  12
+#define MT8113_IOMMU_PAGE_SIZE   (1 << MT8113_IOMMU_PAGE_SHIFT)
+
+static void mt8113_iommu_flush_tlb(MT8113IOMMUState *s)
+{
+    memset(s->tlb_iova_page, 0xff, sizeof(s->tlb_iova_page));
+}
+
+static void mt8113_iommu_flush_tlb_range(MT8113IOMMUState *s,
+                                          uint32_t start, uint32_t end)
+{
+    uint32_t first_page = start >> MT8113_IOMMU_PAGE_SHIFT;
+    uint32_t last_page = end >> MT8113_IOMMU_PAGE_SHIFT;
+
+    if (end < start || last_page - first_page >= MT8113_IOMMU_TLB_ENTRIES) {
+        mt8113_iommu_flush_tlb(s);
+        return;
+    }
+
+    for (uint32_t page = first_page; page <= last_page; page++) {
+        unsigned index = page & (MT8113_IOMMU_TLB_ENTRIES - 1);
+
+        if (s->tlb_iova_page[index] == page) {
+            s->tlb_iova_page[index] = UINT32_MAX;
+        }
+    }
+}
 
 static uint64_t mt8113_iommu_mmio_read(void *opaque, hwaddr offset,
                                        unsigned size)
@@ -32,11 +62,23 @@ static void mt8113_iommu_write(void *opaque, hwaddr offset, uint64_t value,
                                unsigned size)
 {
     MT8113IOMMUState *s = opaque;
+    uint32_t old = s->regs[offset / sizeof(uint32_t)];
 
     s->regs[offset / sizeof(uint32_t)] = value;
-    if (offset == MT8113_IOMMU_INVALIDATE &&
-        (value & MT8113_IOMMU_INV_RANGE)) {
-        s->regs[MT8113_IOMMU_CPE_DONE / sizeof(uint32_t)] = 1;
+    if (offset == 0 && old != value) {
+        mt8113_iommu_flush_tlb(s);
+    }
+    if (offset == MT8113_IOMMU_INVALIDATE) {
+        if (value & MT8113_IOMMU_INV_ALL) {
+            mt8113_iommu_flush_tlb(s);
+        } else if (value & MT8113_IOMMU_INV_RANGE) {
+            mt8113_iommu_flush_tlb_range(
+                s, s->regs[MT8113_IOMMU_INV_START / sizeof(uint32_t)],
+                s->regs[MT8113_IOMMU_INV_END / sizeof(uint32_t)]);
+        }
+        if (value & MT8113_IOMMU_INV_RANGE) {
+            s->regs[MT8113_IOMMU_CPE_DONE / sizeof(uint32_t)] = 1;
+        }
     }
 }
 
@@ -55,6 +97,8 @@ static bool mt8113_iommu_translate_span(MT8113IOMMUState *s, hwaddr iova,
 {
     MemTxResult result;
     uint32_t l1, l2;
+    uint32_t iova_page;
+    unsigned index;
     hwaddr table = s->regs[0] & 0xffffc000;
 
     if (iova >= 0x10000000) {
@@ -64,6 +108,16 @@ static bool mt8113_iommu_translate_span(MT8113IOMMUState *s, hwaddr iova,
     }
     if (!table) {
         return false;
+    }
+
+    iova_page = iova >> MT8113_IOMMU_PAGE_SHIFT;
+    index = iova_page & (MT8113_IOMMU_TLB_ENTRIES - 1);
+    if (s->tlb_iova_page[index] == iova_page) {
+        *physical = s->tlb_physical_page[index] |
+                    (iova & (MT8113_IOMMU_PAGE_SIZE - 1));
+        *span = MT8113_IOMMU_PAGE_SIZE -
+                (iova & (MT8113_IOMMU_PAGE_SIZE - 1));
+        return true;
     }
 
     l1 = address_space_ldl_le(&address_space_memory,
@@ -80,16 +134,25 @@ static bool mt8113_iommu_translate_span(MT8113IOMMUState *s, hwaddr iova,
         if (result != MEMTX_OK || !(l2 & 3)) {
             return false;
         }
-        *physical = (l2 & 0xfffff000) | (iova & 0xfff);
-        *span = 0x1000 - (iova & 0xfff);
-        return true;
-    }
-    if ((l1 & 3) == 2) {
+        if ((l2 & 3) == 1) {
+            /* ARMv7 short-descriptor large page: the same 64 KiB
+             * descriptor occupies sixteen consecutive L2 entries. */
+            *physical = (l2 & 0xffff0000) | (iova & 0xffff);
+        } else {
+            *physical = (l2 & 0xfffff000) | (iova & 0xfff);
+        }
+    } else if ((l1 & 3) == 2) {
         *physical = (l1 & 0xfff00000) | (iova & 0xfffff);
-        *span = 0x100000 - (iova & 0xfffff);
-        return true;
+    } else {
+        return false;
     }
-    return false;
+
+    s->tlb_iova_page[index] = iova_page;
+    s->tlb_physical_page[index] = *physical &
+                                  ~(hwaddr)(MT8113_IOMMU_PAGE_SIZE - 1);
+    *span = MT8113_IOMMU_PAGE_SIZE -
+            (iova & (MT8113_IOMMU_PAGE_SIZE - 1));
+    return true;
 }
 
 bool mt8113_iommu_translate(MT8113IOMMUState *s, hwaddr iova,
@@ -125,11 +188,37 @@ bool mt8113_iommu_dma_read(MT8113IOMMUState *s, hwaddr iova,
     return true;
 }
 
+bool mt8113_iommu_dma_write(MT8113IOMMUState *s, hwaddr iova,
+                            const void *buffer, size_t length)
+{
+    const uint8_t *source = buffer;
+
+    while (length) {
+        hwaddr physical;
+        size_t span;
+        size_t chunk;
+
+        if (!mt8113_iommu_translate_span(s, iova, &physical, &span)) {
+            return false;
+        }
+        chunk = MIN(length, span);
+        if (dma_memory_write(&address_space_memory, physical, source,
+                             chunk, MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
+            return false;
+        }
+        iova += chunk;
+        source += chunk;
+        length -= chunk;
+    }
+    return true;
+}
+
 static void mt8113_iommu_reset(DeviceState *dev)
 {
     MT8113IOMMUState *s = MT8113_IOMMU(dev);
 
     memset(s->regs, 0, sizeof(s->regs));
+    mt8113_iommu_flush_tlb(s);
     qemu_set_irq(s->irq, 0);
 }
 

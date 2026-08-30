@@ -14,17 +14,22 @@
 OBJECT_DECLARE_SIMPLE_TYPE(MT8113IOMMUState, MT8113_IOMMU)
 
 #define MT8113_IOMMU_MMIO_SIZE 0x1000
+#define MT8113_IOMMU_TLB_ENTRIES 2048
 
 struct MT8113IOMMUState {
     SysBusDevice parent_obj;
     MemoryRegion iomem;
     qemu_irq irq;
     uint32_t regs[MT8113_IOMMU_MMIO_SIZE / sizeof(uint32_t)];
+    uint32_t tlb_iova_page[MT8113_IOMMU_TLB_ENTRIES];
+    hwaddr tlb_physical_page[MT8113_IOMMU_TLB_ENTRIES];
 };
 
 bool mt8113_iommu_translate(MT8113IOMMUState *s, hwaddr iova,
                             hwaddr *physical);
 bool mt8113_iommu_dma_read(MT8113IOMMUState *s, hwaddr iova,
                            void *buffer, size_t length);
+bool mt8113_iommu_dma_write(MT8113IOMMUState *s, hwaddr iova,
+                            const void *buffer, size_t length);
 
 #endif
