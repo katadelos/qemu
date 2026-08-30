@@ -11,6 +11,7 @@
 #include "qemu/osdep.h"
 #include "hw/misc/mt8113_gce.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "qemu/bitops.h"
 #include "qemu/module.h"
 #include "system/address-spaces.h"
@@ -77,7 +78,6 @@
 #define GCE_WFE_WAIT              BIT(15)
 #define GCE_WFE_WAIT_VALUE        BIT(0)
 
-#define GCE_DPI0_FRAME_DONE_EVENT 9
 /* MT8512/MT8113 GCE stores byte addresses; newer GCE revisions use >> 3. */
 #define GCE_ADDR_SHIFT            0
 
@@ -377,7 +377,7 @@ static void mt8113_gce_execute(MT8113GCEState *s, unsigned thread)
             uint32_t option = ((uint32_t)arg_b << 16) | arg_c;
             unsigned token = arg_a & 0x3ff;
 
-            if (token == GCE_DPI0_FRAME_DONE_EVENT &&
+            if (token == s->frame_done_event &&
                 (option & GCE_WFE_WAIT) &&
                 s->tokens[token] != !!(option & GCE_WFE_WAIT_VALUE)) {
                 s->waiting[thread] = true;
@@ -403,7 +403,18 @@ static void mt8113_gce_execute(MT8113GCEState *s, unsigned thread)
             break;
         }
 
-        if (pc == end && !(op == GCE_CODE_JUMP && arg_a)) {
+        if (s->inclusive_end_address) {
+            /*
+             * MT8113's mailbox driver points END_ADDR at the packet's final
+             * jump.  Execute it so a jump patched by task chaining reaches
+             * the following packet.  An unpatched relative jump terminates
+             * the packet after it has been consumed.
+             */
+            if (pc == end && !(op == GCE_CODE_JUMP && arg_a)) {
+                break;
+            }
+        } else if (next == end) {
+            /* MT8110's mailbox driver programs an exclusive END_ADDR. */
             break;
         }
         pc = next;
@@ -440,7 +451,7 @@ static void mt8113_gce_run_pending(void *opaque)
 static void mt8113_gce_event(void *opaque, int line, int level)
 {
     MT8113GCEState *s = opaque;
-    unsigned token = GCE_DPI0_FRAME_DONE_EVENT;
+    unsigned token = s->frame_done_event;
 
     if (!level) {
         return;
@@ -600,8 +611,15 @@ static void mt8113_gce_finalize(Object *obj)
 static void mt8113_gce_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
+    static const Property properties[] = {
+        DEFINE_PROP_UINT32("frame-done-event", MT8113GCEState,
+                           frame_done_event, 9),
+        DEFINE_PROP_BOOL("inclusive-end-address", MT8113GCEState,
+                         inclusive_end_address, true),
+    };
 
     device_class_set_legacy_reset(dc, mt8113_gce_reset);
+    device_class_set_props(dc, properties);
 }
 
 static const TypeInfo mt8113_gce_type = {
