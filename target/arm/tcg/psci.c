@@ -59,6 +59,7 @@
 #define MTK_OPTEE_SESSION_FBE            1
 #define MTK_OPTEE_SESSION_ENUM           2
 #define MTK_OPTEE_SESSION_KREE_CONSOLE   3
+#define MTK_OPTEE_SESSION_EFUSE          4
 
 #define MTK_OPTEE_RETURN_OK              0
 #define MTK_OPTEE_RETURN_EBADADDR        4
@@ -73,6 +74,7 @@
 #define MTK_OPTEE_MSG_UNREGISTER_SHM     5
 
 #define MTK_OPTEE_ATTR_TYPE_MASK         0xff
+#define MTK_OPTEE_ATTR_VALUE_INPUT       0x1
 #define MTK_OPTEE_ATTR_TMEM_INPUT        0x9
 #define MTK_OPTEE_ATTR_TMEM_OUTPUT       0xa
 #define MTK_OPTEE_ATTR_TMEM_INOUT        0xb
@@ -116,6 +118,11 @@ static const uint8_t mtk_optee_kree_console_uuid[16] = {
 static const uint8_t mtk_optee_enum_uuid[16] = {
     0x70, 0x11, 0xa6, 0x88, 0xdd, 0xde, 0x40, 0x53,
     0xa5, 0xa9, 0x7b, 0x3c, 0x4d, 0xdf, 0x13, 0xb8,
+};
+
+static const uint8_t mtk_optee_efuse_uuid[16] = {
+    0xa2, 0x56, 0x7d, 0x51, 0x01, 0x44, 0x45, 0x43,
+    0xb4, 0x0a, 0xca, 0xba, 0x40, 0x27, 0x97, 0x03,
 };
 
 static bool mtk_optee_ram_range(uint64_t addr, uint64_t size)
@@ -342,6 +349,49 @@ static bool mtk_optee_fbe_get_key(uint8_t *msg, uint32_t num_params)
     return ok;
 }
 
+static bool mtk_optee_efuse_read(uint8_t *msg, uint32_t num_params)
+{
+    uint8_t *fuse_param;
+    uint8_t *output_param;
+    uint8_t *length_param;
+    uint64_t output_addr;
+    uint64_t output_size;
+    uint64_t length;
+    uint64_t fuse;
+    g_autofree uint8_t *data = NULL;
+
+    if (num_params < 3) {
+        return false;
+    }
+    fuse_param = msg + MTK_OPTEE_MSG_ARG_SIZE;
+    output_param = fuse_param + MTK_OPTEE_MSG_PARAM_SIZE;
+    length_param = output_param + MTK_OPTEE_MSG_PARAM_SIZE;
+    if ((ldq_le_p(fuse_param) & MTK_OPTEE_ATTR_TYPE_MASK) !=
+            MTK_OPTEE_ATTR_VALUE_INPUT ||
+        (ldq_le_p(length_param) & MTK_OPTEE_ATTR_TYPE_MASK) !=
+            MTK_OPTEE_ATTR_VALUE_INPUT ||
+        !mtk_optee_resolve_memref(output_param, &output_addr, &output_size)) {
+        return false;
+    }
+
+    fuse = ldq_le_p(fuse_param + 8);
+    length = ldq_le_p(length_param + 8);
+    if (!length || length > output_size || length > SIZE_MAX) {
+        return false;
+    }
+
+    data = g_malloc0(length);
+    /*
+     * MT8110 Rossini uses the newer HWTCON v2 block.  Its stock driver
+     * deliberately identifies that block with the MT8113 efuse value.
+     * Other words are unprogrammed on the emulated development device.
+     */
+    if (fuse == 65 && length >= sizeof(uint32_t)) {
+        stl_le_p(data, 0xca02);
+    }
+    return mtk_optee_write(output_addr, data, length);
+}
+
 static uint32_t mtk_optee_call_with_arg(uint64_t addr)
 {
     uint8_t header[MTK_OPTEE_MSG_ARG_SIZE];
@@ -385,6 +435,10 @@ static uint32_t mtk_optee_call_with_arg(uint64_t addr)
                            mtk_optee_kree_console_uuid,
                            sizeof(mtk_optee_kree_console_uuid))) {
             stl_le_p(msg + 8, MTK_OPTEE_SESSION_KREE_CONSOLE);
+        } else if (!memcmp(msg + MTK_OPTEE_MSG_ARG_SIZE + 8,
+                           mtk_optee_efuse_uuid,
+                           sizeof(mtk_optee_efuse_uuid))) {
+            stl_le_p(msg + 8, MTK_OPTEE_SESSION_EFUSE);
         } else {
             stl_le_p(msg + 20, MTK_TEEC_ERROR_ITEM_NOT_FOUND);
             stl_le_p(msg + 24, MTK_TEEC_ORIGIN_TEE);
@@ -399,6 +453,10 @@ static uint32_t mtk_optee_call_with_arg(uint64_t addr)
         } else if (ldl_le_p(msg + 8) == MTK_OPTEE_SESSION_KREE_CONSOLE &&
                    ldl_le_p(msg + 4) == 0) {
             /* The guest supplied the registered console ring successfully. */
+        } else if (ldl_le_p(msg + 8) == MTK_OPTEE_SESSION_EFUSE &&
+                   ldl_le_p(msg + 4) == 0 &&
+                   mtk_optee_efuse_read(msg, num_params)) {
+            /* Efuse value was copied to the guest's registered buffer. */
         } else if (ldl_le_p(msg + 8) != MTK_OPTEE_SESSION_FBE ||
                    ldl_le_p(msg + 4) != 1 ||
                    !mtk_optee_fbe_get_key(msg, num_params)) {
