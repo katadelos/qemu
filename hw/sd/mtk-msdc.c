@@ -12,6 +12,7 @@
 #include "hw/core/irq.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "qemu/timer.h"
 #include "system/address-spaces.h"
 #include "system/dma.h"
 
@@ -63,6 +64,7 @@
 #define MSDC_BD_PTR_H4_SHIFT    28
 #define MSDC_DMA_ADDR_H4_MASK   0xf
 #define MSDC_MAX_BD_NUM         1024
+#define MSDC_DMA_DELAY_NS        100
 
 typedef struct MTKMSDCDescriptor {
     uint32_t info;
@@ -211,8 +213,9 @@ static bool mtk_msdc_dma_descriptors(MTKMSDCState *s)
     return mtk_msdc_dma_write_info(gpd_addr, gpd.info & ~MSDC_GPD_HWO);
 }
 
-static void mtk_msdc_dma_run(MTKMSDCState *s)
+static void mtk_msdc_dma_run(void *opaque)
 {
+    MTKMSDCState *s = opaque;
     bool ok;
 
     if (!s->dma_active || !s->transfer_remaining) {
@@ -249,6 +252,15 @@ static void mtk_msdc_dma_run(MTKMSDCState *s)
                       TYPE_MTK_MSDC ": DMA failed ok=%u remaining=%u\n",
                       ok, s->transfer_remaining);
         mtk_msdc_set_interrupt(s, MSDC_INT_DATTMO);
+    }
+}
+
+static void mtk_msdc_schedule_dma(MTKMSDCState *s)
+{
+    if (s->dma_active && s->transfer_remaining) {
+        timer_mod(s->dma_timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                  MSDC_DMA_DELAY_NS);
     }
 }
 
@@ -325,10 +337,11 @@ static void mtk_msdc_start_command(MTKMSDCState *s, uint32_t command)
                       TYPE_MTK_MSDC ": data blocks=%u block-size=%u "
                       "write=%u dma-active=%u\n",
                       blocks, block_size, s->transfer_write, s->dma_active);
-        mtk_msdc_dma_run(s);
     }
 
+    /* Command completion precedes the independently-running data engine. */
     mtk_msdc_set_interrupt(s, interrupts);
+    mtk_msdc_schedule_dma(s);
 }
 
 static uint64_t mtk_msdc_fifo_read(MTKMSDCState *s, unsigned size)
@@ -408,6 +421,7 @@ static void mtk_msdc_write(void *opaque, hwaddr offset, uint64_t value,
     case MSDC_CFG:
         s->regs[offset / 4] = (uint32_t)value & ~MSDC_CFG_RST;
         if (value & MSDC_CFG_RST) {
+            timer_del(s->dma_timer);
             s->transfer_remaining = 0;
             s->dma_active = false;
             s->regs[MSDC_DMA_CFG / 4] &= ~MSDC_DMA_CFG_STS;
@@ -423,6 +437,7 @@ static void mtk_msdc_write(void *opaque, hwaddr offset, uint64_t value,
         break;
     case MSDC_FIFOCS:
         if (value & MSDC_FIFOCS_CLR) {
+            timer_del(s->dma_timer);
             s->transfer_remaining = 0;
         }
         break;
@@ -436,13 +451,14 @@ static void mtk_msdc_write(void *opaque, hwaddr offset, uint64_t value,
         s->regs[offset / 4] = value &
             ~(MSDC_DMA_CTRL_START | MSDC_DMA_CTRL_STOP);
         if (value & MSDC_DMA_CTRL_STOP) {
+            timer_del(s->dma_timer);
             s->dma_active = false;
             s->regs[MSDC_DMA_CFG / 4] &= ~MSDC_DMA_CFG_STS;
         }
         if (value & MSDC_DMA_CTRL_START) {
             s->dma_active = true;
             s->regs[MSDC_DMA_CFG / 4] |= MSDC_DMA_CFG_STS;
-            mtk_msdc_dma_run(s);
+            mtk_msdc_schedule_dma(s);
         }
         break;
     default:
@@ -496,6 +512,7 @@ static void mtk_msdc_reset_hold(Object *obj, ResetType type)
 {
     MTKMSDCState *s = MTK_MSDC(obj);
 
+    timer_del(s->dma_timer);
     memset(s->regs, 0, sizeof(s->regs));
     memset(s->top_regs, 0, sizeof(s->top_regs));
     s->regs[MSDC_CFG / 4] = MSDC_CFG_CKSTB;
@@ -519,6 +536,14 @@ static void mtk_msdc_init(Object *obj)
                           TYPE_MTK_MSDC ".top", MTK_MSDC_MMIO_SIZE);
     sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->top_iomem);
     sysbus_init_irq(SYS_BUS_DEVICE(s), &s->irq);
+    s->dma_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, mtk_msdc_dma_run, s);
+}
+
+static void mtk_msdc_finalize(Object *obj)
+{
+    MTKMSDCState *s = MTK_MSDC(obj);
+
+    timer_free(s->dma_timer);
 }
 
 static void mtk_msdc_class_init(ObjectClass *oc, const void *data)
@@ -535,6 +560,7 @@ static const TypeInfo mtk_msdc_type_info = {
     .parent = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(MTKMSDCState),
     .instance_init = mtk_msdc_init,
+    .instance_finalize = mtk_msdc_finalize,
     .class_init = mtk_msdc_class_init,
 };
 

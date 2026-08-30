@@ -29,6 +29,7 @@ struct MTKMSDCState {
     uint32_t transfer_remaining;
     bool transfer_write;
     bool dma_active;
+    QEMUTimer *dma_timer;
 };
 
 #endif /* HW_SD_MTK_MSDC_H */
