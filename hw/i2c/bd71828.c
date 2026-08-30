@@ -22,6 +22,7 @@
 #define BD71828_REG_BAT_STAT         0x67
 #define BD71828_REG_DCIN_STAT        0x68
 #define BD71828_REG_BAT_TEMP         0x6c
+#define BD71828_REG_VBAT_U_MT8110    0x84
 #define BD71828_REG_VBAT_INITIAL1_U  0x86
 #define BD71828_REG_VBAT_INITIAL2_U  0x88
 #define BD71828_REG_OCV_PWRON_U      0x8a
@@ -165,6 +166,7 @@ static void bd71828_reset(DeviceState *dev)
     s->regs[BD71828_REG_BAT_TEMP] = 0;
     s->regs[BD71828_REG_CHG_STATE] = 0;
     s->regs[BD71828_REG_DCIN_STAT] = 0;
+    bd71828_store_be16(s, BD71828_REG_VBAT_U_MT8110, 4000);
     bd71828_store_be16(s, BD71828_REG_VBAT_INITIAL1_U, 4000);
     bd71828_store_be16(s, BD71828_REG_VBAT_INITIAL2_U, 4000);
     bd71828_store_be16(s, BD71828_REG_OCV_PWRON_U, 4000);
