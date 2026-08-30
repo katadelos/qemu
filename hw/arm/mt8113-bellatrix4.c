@@ -687,6 +687,7 @@ static void bellatrix4_attach_emmc(Bellatrix4MachineState *bms)
 static void bellatrix4_init(MachineState *machine)
 {
     Bellatrix4MachineState *bms = BELLATRIX4_MACHINE(machine);
+    const Bellatrix4Board *board = bellatrix4_find_board(bms->board);
     MT8113State *soc;
     I2CSlave *fp9935;
     I2CSlave *bd71828;
@@ -702,6 +703,12 @@ static void bellatrix4_init(MachineState *machine)
     object_property_add_child(OBJECT(machine), "soc", OBJECT(soc));
     object_property_set_uint(OBJECT(soc), "reset-vector",
                              BELLATRIX4_HANDOFF_ADDR, &error_fatal);
+    object_property_set_bool(OBJECT(&soc->hwtcon), "retain-boot-splash",
+                             board->kind == BELLATRIX4_BOARD_SANGRIA_COLOR,
+                             &error_abort);
+    object_property_set_bool(OBJECT(&soc->hwtcon), "scanout-image-buffer",
+                             board->kind == BELLATRIX4_BOARD_SANGRIA,
+                             &error_abort);
     qdev_realize(DEVICE(soc), NULL, &error_fatal);
     bms->soc = soc;
     for (int cpu = 0; cpu < MT8113_NUM_CPUS; cpu++) {
