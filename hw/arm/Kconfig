@@ -238,6 +238,13 @@ config MT8113_BELLATRIX4
     depends on TCG && AARCH64
     select MT8113
 
+config MT8110_BELLATRIX
+    bool
+    default y
+    depends on TCG && AARCH64
+    select MT8113
+    select MT8113_BELLATRIX4
+
 config IMX50_YOSHI
     bool
     default y

@@ -21,6 +21,7 @@
 #include "target/arm/cpu.h"
 
 #define TYPE_MT8113 "mt8113"
+#define TYPE_MT8110 "mt8110"
 OBJECT_DECLARE_SIMPLE_TYPE(MT8113State, MT8113)
 
 #define MT8113_NUM_CPUS          2
@@ -33,6 +34,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(MT8113State, MT8113)
 #define MT8113_TOPCKGEN_ADDR     0x10000000
 #define MT8113_INFRASYS_ADDR     0x10001000
 #define MT8113_SCPSYS_ADDR       0x10006000
+#define MT8113_TOPRGU_ADDR       0x10007000
 #define MT8113_TIMER_ADDR        0x10008000
 #define MT8113_APMIXEDSYS_ADDR   0x1000c000
 #define MT8113_DVFSRC_ADDR       0x10012000
@@ -83,6 +85,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(MT8113State, MT8113)
 #define MT8113_BTIF_TX_DMA_IRQ   35
 #define MT8113_BTIF_RX_DMA_IRQ   36
 #define MT8113_WIFI_IRQ          132
+#define MT8113_MDP_WROT_IRQ      150
 
 #define MT8113_HWTCON_WB_FRAME_DONE_SPI         172
 #define MT8113_HWTCON_WF_LUT_FRAME_DONE_SPI     184
@@ -119,6 +122,7 @@ struct MT8113State {
     MemoryRegion topckgen_iomem;
     MemoryRegion infrasys_iomem;
     MemoryRegion scpsys_iomem;
+    MemoryRegion toprgu_iomem;
     MemoryRegion timer_iomem;
     MemoryRegion apmixedsys_iomem;
     MemoryRegion dvfsrc_iomem;
@@ -139,6 +143,7 @@ struct MT8113State {
     uint32_t topckgen_regs[0x1000 / sizeof(uint32_t)];
     uint32_t infrasys_regs[0x1000 / sizeof(uint32_t)];
     uint32_t scpsys_regs[0x1000 / sizeof(uint32_t)];
+    uint32_t toprgu_regs[0x1000 / sizeof(uint32_t)];
     uint32_t timer_regs[0x1000 / sizeof(uint32_t)];
     uint32_t apmixedsys_regs[0x1000 / sizeof(uint32_t)];
     uint32_t dvfsrc_regs[0x1000 / sizeof(uint32_t)];

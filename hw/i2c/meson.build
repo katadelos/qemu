@@ -31,6 +31,9 @@ i2c_ss.add(when: 'CONFIG_MT8113_BELLATRIX4', if_true: files(
   'lis2du12.c',
   'max20342.c',
 ))
+i2c_ss.add(when: 'CONFIG_MT8110_BELLATRIX', if_true: files(
+  'goodix_gtx8.c',
+))
 i2c_ss.add(when: 'CONFIG_MPC_I2C', if_true: files('mpc_i2c.c'))
 i2c_ss.add(when: 'CONFIG_ALLWINNER_I2C', if_true: files('allwinner-i2c.c'))
 i2c_ss.add(when: 'CONFIG_NRF51_SOC', if_true: files('microbit_i2c.c'))

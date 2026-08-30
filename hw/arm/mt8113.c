@@ -17,6 +17,7 @@
 #include "qemu/timer.h"
 #include "qobject/qlist.h"
 #include "system/dma.h"
+#include "system/runstate.h"
 #include "system/system.h"
 #include "system/address-spaces.h"
 #include "target/arm/cpu-qom.h"
@@ -30,6 +31,18 @@
 #define MT8113_SCPSYS_PWR_ACK            BIT(30)
 #define MT8113_SCPSYS_PWR_ACK_2ND        BIT(31)
 #define MT8113_SCPSYS_CONSYS_TOP2_ACK    BIT(30)
+#define MT8113_SCPSYS_PCM_REG15_DATA     0x13c
+#define MT8113_SCPSYS_SW_RSV_9           0x658
+#define MT8113_SCPSYS_DVFS_EVENT_STA     0x69c
+
+#define MT8113_DVFSRC_LEVEL              0x0dc
+#define MT8113_DVFSRC_FORCE              0x300
+#define MT8113_DVFS_DEFAULT_LEVEL        BIT(7)
+
+#define MT8113_WDT_MODE                  0x00
+#define MT8113_WDT_MODE_KEY              0x22000000
+#define MT8113_WDT_SWRST                 0x14
+#define MT8113_WDT_SWRST_KEY             0x1209
 
 #define MT8113_RNG_CTRL                  0x00
 #define MT8113_RNG_DATA                  0x08
@@ -1729,11 +1742,13 @@ static const MemoryRegionOps mt8113_usb_ippc_ops = {
     },
 };
 
-#define MT8113_GPT_RATE_HZ       13000000
+#define MT8113_GPT_SYS_RATE_HZ   13000000
+#define MT8113_GPT_RTC_RATE_HZ   32768
 #define MT8113_GPT_IRQ_EN        0x00
 #define MT8113_GPT_IRQ_STA       0x04
 #define MT8113_GPT_IRQ_ACK       0x08
 #define MT8113_GPT1_CTRL         0x10
+#define MT8113_GPT1_CLOCK        0x14
 #define MT8113_GPT1_COUNT        0x18
 #define MT8113_GPT1_COMPARE      0x1c
 #define MT8113_GPT2_COUNT        0x28
@@ -1744,10 +1759,22 @@ static const MemoryRegionOps mt8113_usb_ippc_ops = {
 #define MT8113_GPT_CTRL_CLEAR    BIT(1)
 #define MT8113_GPT_CTRL_REPEAT   (1 << 4)
 #define MT8113_GPT_CTRL_OP_MASK  (3 << 4)
+#define MT8113_GPT_CLOCK_RTC     BIT(4)
+#define MT8113_GPT_CLOCK_DIV_MASK 0xf
 
-static uint64_t mt8113_gpt_ticks(int64_t delta_ns)
+static uint32_t mt8113_gpt1_rate(MT8113State *s)
 {
-    return muldiv64(delta_ns, MT8113_GPT_RATE_HZ, NANOSECONDS_PER_SECOND);
+    uint32_t clock =
+        s->timer_regs[MT8113_GPT1_CLOCK / sizeof(uint32_t)];
+    uint32_t rate = (clock & MT8113_GPT_CLOCK_RTC) ?
+        MT8113_GPT_RTC_RATE_HZ : MT8113_GPT_SYS_RATE_HZ;
+
+    return rate >> MIN(clock & MT8113_GPT_CLOCK_DIV_MASK, 15);
+}
+
+static uint64_t mt8113_gpt_ticks(int64_t delta_ns, uint32_t rate)
+{
+    return muldiv64(delta_ns, rate, NANOSECONDS_PER_SECOND);
 }
 
 static void mt8113_gpt_update_irq(MT8113State *s)
@@ -1771,7 +1798,7 @@ static void mt8113_gpt_rearm(MT8113State *s)
     }
 
     period_ns = DIV_ROUND_UP((uint64_t)compare * NANOSECONDS_PER_SECOND,
-                             MT8113_GPT_RATE_HZ);
+                             mt8113_gpt1_rate(s));
     timer_mod_ns(s->gpt_timer, s->gpt_start_ns + period_ns);
 }
 
@@ -1801,7 +1828,7 @@ static uint64_t mt8113_timer_read(void *opaque, hwaddr offset, unsigned size)
      * from the same 13 MHz source on MT8113.
      */
     if (offset == MT8113_GPT2_COUNT || offset == MT8113_GPT4_COUNT) {
-        return mt8113_gpt_ticks(now_ns);
+        return mt8113_gpt_ticks(now_ns, MT8113_GPT_SYS_RATE_HZ);
     }
     if (offset == MT8113_GPT_IRQ_STA) {
         return s->gpt_irq_status;
@@ -1816,7 +1843,8 @@ static uint64_t mt8113_timer_read(void *opaque, hwaddr offset, unsigned size)
         if (!(control & MT8113_GPT_CTRL_ENABLE)) {
             return 0;
         }
-        count = mt8113_gpt_ticks(now_ns - s->gpt_start_ns);
+        count = mt8113_gpt_ticks(now_ns - s->gpt_start_ns,
+                                 mt8113_gpt1_rate(s));
         if ((control & MT8113_GPT_CTRL_OP_MASK) ==
             MT8113_GPT_CTRL_REPEAT && compare) {
             count %= compare;
@@ -1854,6 +1882,14 @@ static void mt8113_timer_write(void *opaque, hwaddr offset, uint64_t value,
         }
         mt8113_gpt_rearm(s);
         break;
+    case MT8113_GPT1_CLOCK:
+        s->timer_regs[offset / sizeof(uint32_t)] = value;
+        if (s->timer_regs[MT8113_GPT1_CTRL / sizeof(uint32_t)] &
+            MT8113_GPT_CTRL_ENABLE) {
+            s->gpt_start_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+            mt8113_gpt_rearm(s);
+        }
+        break;
     case MT8113_GPT1_COMPARE:
         s->timer_regs[offset / sizeof(uint32_t)] = value;
         if (s->timer_regs[MT8113_GPT1_CTRL / sizeof(uint32_t)] &
@@ -1889,8 +1925,25 @@ static void mt8113_dvfsrc_write(void *opaque, hwaddr offset, uint64_t value,
                                 unsigned size)
 {
     MT8113State *s = opaque;
+    uint32_t level;
 
     s->dvfsrc_regs[offset / sizeof(uint32_t)] = value;
+    if (offset != MT8113_DVFSRC_FORCE) {
+        return;
+    }
+
+    /*
+     * The SPM firmware acknowledges a forced DVFS level through SW_RSV_9.
+     * Keep the DVFSRC current-level field and the SPM result coherent so the
+     * Linux driver observes completion instead of spending 1 ms in every
+     * request timeout and dumping the complete controller state.
+     */
+    level = value & 0xffff;
+    if (!level) {
+        level = MT8113_DVFS_DEFAULT_LEVEL;
+    }
+    s->scpsys_regs[MT8113_SCPSYS_SW_RSV_9 / sizeof(uint32_t)] = level;
+    s->dvfsrc_regs[MT8113_DVFSRC_LEVEL / sizeof(uint32_t)] = level << 16;
 }
 
 static const MemoryRegionOps mt8113_dvfsrc_ops = {
@@ -1902,6 +1955,102 @@ static const MemoryRegionOps mt8113_dvfsrc_ops = {
         .max_access_size = 4,
     },
 };
+
+static uint64_t mt8113_toprgu_read(void *opaque, hwaddr offset,
+                                   unsigned size)
+{
+    MT8113State *s = opaque;
+
+    return s->toprgu_regs[offset / sizeof(uint32_t)];
+}
+
+static void mt8113_toprgu_write(void *opaque, hwaddr offset, uint64_t value,
+                                unsigned size)
+{
+    MT8113State *s = opaque;
+
+    if (offset == MT8113_WDT_MODE &&
+        (value & 0xff000000) != MT8113_WDT_MODE_KEY) {
+        return;
+    }
+    s->toprgu_regs[offset / sizeof(uint32_t)] = value;
+    if (offset == MT8113_WDT_SWRST && value == MT8113_WDT_SWRST_KEY) {
+        qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+    }
+}
+
+static const MemoryRegionOps mt8113_toprgu_ops = {
+    .read = mt8113_toprgu_read,
+    .write = mt8113_toprgu_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 4,
+        .max_access_size = 4,
+    },
+};
+
+static void mt8113_reset(DeviceState *dev)
+{
+    MT8113State *s = MT8113(dev);
+
+    timer_del(s->gpt_timer);
+    s->gpt_start_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    s->gpt_irq_status = 0;
+    s->rng_ctrl = 0;
+    s->wifi_firmware_ready = false;
+
+    memset(s->topckgen_regs, 0, sizeof(s->topckgen_regs));
+    memset(s->infrasys_regs, 0, sizeof(s->infrasys_regs));
+    memset(s->scpsys_regs, 0, sizeof(s->scpsys_regs));
+    memset(s->toprgu_regs, 0, sizeof(s->toprgu_regs));
+    memset(s->timer_regs, 0, sizeof(s->timer_regs));
+    memset(s->apmixedsys_regs, 0, sizeof(s->apmixedsys_regs));
+    memset(s->dvfsrc_regs, 0, sizeof(s->dvfsrc_regs));
+    memset(s->mcucfg_regs, 0, sizeof(s->mcucfg_regs));
+    memset(s->svs_regs, 0, sizeof(s->svs_regs));
+    memset(s->btif_regs, 0, sizeof(s->btif_regs));
+    memset(s->btif_tx_dma_regs, 0, sizeof(s->btif_tx_dma_regs));
+    memset(s->btif_rx_dma_regs, 0, sizeof(s->btif_rx_dma_regs));
+    memset(s->wifi_regs, 0, sizeof(s->wifi_regs));
+    for (int i = 0; i < ARRAY_SIZE(s->usbphy); i++) {
+        memset(s->usbphy[i].regs, 0, sizeof(s->usbphy[i].regs));
+    }
+    memset(s->usb.mac_regs, 0, sizeof(s->usb.mac_regs));
+    memset(s->usb.ippc_regs, 0, sizeof(s->usb.ippc_regs));
+
+    s->scpsys_regs[MT8113_SCPSYS_PCM_REG15_DATA / sizeof(uint32_t)] = 1;
+    s->scpsys_regs[MT8113_SCPSYS_SW_RSV_9 / sizeof(uint32_t)] =
+        MT8113_DVFS_DEFAULT_LEVEL;
+    s->apmixedsys_regs[MT8113_APMIXED_UNIVPLL2_CON0 / 4] =
+        MT8113_PLL_ENABLE | MT8113_PLL_RST_BAR;
+    s->apmixedsys_regs[MT8113_APMIXED_UNIVPLL2_CON1 / 4] =
+        MT8113_PLL_PCW_CHG | 0x00180000;
+    s->apmixedsys_regs[MT8113_APMIXED_MAINPLL_CON0 / 4] =
+        MT8113_PLL_ENABLE | MT8113_PLL_RST_BAR;
+    s->apmixedsys_regs[MT8113_APMIXED_MAINPLL_CON1 / 4] =
+        MT8113_PLL_PCW_CHG | BIT(24) | 0x00150000;
+    s->apmixedsys_regs[MT8113_APMIXED_ARMPLL_CON0 / 4] =
+        MT8113_PLL_ENABLE;
+    s->apmixedsys_regs[MT8113_APMIXED_ARMPLL_CON1 / 4] =
+        MT8113_PLL_PCW_CHG | (2 << 24) | 0x001713b2;
+    s->apmixedsys_regs[MT8113_APMIXED_ARMPLL_PWR_CON0 / 4] =
+        MT8113_PLL_POWER_ON;
+    s->apmixedsys_regs[MT8113_APMIXED_TCONPLL_CON0 / 4] =
+        MT8113_PLL_ENABLE;
+    s->apmixedsys_regs[MT8113_APMIXED_TCONPLL_CON1 / 4] = 0x82127627;
+    s->topckgen_regs[0xd0 / 4] = 6 << 24;
+    s->topckgen_regs[0xe0 / 4] = 2;
+    s->mcucfg_regs[MT8113_MCU_BUS_PLL_DIVIDER_CFG / 4] =
+        MT8113_MCU_BUS_SEL_ARMPLL;
+    s->dvfsrc_regs[MT8113_DVFSRC_LEVEL / sizeof(uint32_t)] =
+        MT8113_DVFS_DEFAULT_LEVEL << 16;
+
+    mt8113_btif_wmt_session_reset(s);
+    qemu_set_irq(s->timer_irq, 0);
+    qemu_set_irq(s->svs_irq, 0);
+    qemu_set_irq(s->btif_irq, 0);
+    qemu_set_irq(s->wifi_irq, 0);
+}
 
 static bool mt8113_realize_gic(MT8113State *s, Error **errp)
 {
@@ -2029,8 +2178,17 @@ static void mt8113_realize(DeviceState *dev, Error **errp)
 
     memory_region_init_io(&s->scpsys_iomem, OBJECT(s), &mt8113_scpsys_ops,
                           s, "mt8113.scpsys", 0x1000);
+    s->scpsys_regs[MT8113_SCPSYS_PCM_REG15_DATA / sizeof(uint32_t)] = 1;
+    s->scpsys_regs[MT8113_SCPSYS_SW_RSV_9 / sizeof(uint32_t)] =
+        MT8113_DVFS_DEFAULT_LEVEL;
+    s->scpsys_regs[MT8113_SCPSYS_DVFS_EVENT_STA / sizeof(uint32_t)] = 0;
     memory_region_add_subregion(get_system_memory(), MT8113_SCPSYS_ADDR,
                                 &s->scpsys_iomem);
+
+    memory_region_init_io(&s->toprgu_iomem, OBJECT(s), &mt8113_toprgu_ops, s,
+                          "mt8113.toprgu", sizeof(s->toprgu_regs));
+    memory_region_add_subregion(get_system_memory(), MT8113_TOPRGU_ADDR,
+                                &s->toprgu_iomem);
 
     memory_region_init_io(&s->timer_iomem, OBJECT(s), &mt8113_timer_ops, s,
                           "mt8113.timer", 0x1000);
@@ -2058,6 +2216,8 @@ static void mt8113_realize(DeviceState *dev, Error **errp)
         MT8113_PLL_ENABLE;
     s->apmixedsys_regs[MT8113_APMIXED_TCONPLL_CON1 / 4] =
         0x82127627; /* 480 MHz */
+    /* mm_sel = univpll1_d2 (312 MHz), as handed off by platform firmware. */
+    s->topckgen_regs[0xd0 / 4] = 6 << 24;
     s->topckgen_regs[0xe0 / 4] = 2; /* tconpll_d4 = 120 MHz */
     memory_region_add_subregion(get_system_memory(), MT8113_APMIXEDSYS_ADDR,
                                 &s->apmixedsys_iomem);
@@ -2071,7 +2231,8 @@ static void mt8113_realize(DeviceState *dev, Error **errp)
 
     memory_region_init_io(&s->dvfsrc_iomem, OBJECT(s), &mt8113_dvfsrc_ops, s,
                           "mt8113.dvfsrc", sizeof(s->dvfsrc_regs));
-    s->dvfsrc_regs[0xdc / sizeof(uint32_t)] = BIT(23);
+    s->dvfsrc_regs[MT8113_DVFSRC_LEVEL / sizeof(uint32_t)] =
+        MT8113_DVFS_DEFAULT_LEVEL << 16;
     memory_region_add_subregion(get_system_memory(), MT8113_DVFSRC_ADDR,
                                 &s->dvfsrc_iomem);
 
@@ -2199,6 +2360,8 @@ static void mt8113_realize(DeviceState *dev, Error **errp)
     }
     qdev_connect_gpio_out_named(DEVICE(&s->hwtcon), "gce-frame-done", 0,
         qdev_get_gpio_in_named(DEVICE(&s->gce), "hwtcon-frame-done", 0));
+    qdev_connect_gpio_out_named(DEVICE(&s->hwtcon), "mdp-wrot-irq", 0,
+        qdev_get_gpio_in(gicdev, MT8113_MDP_WROT_IRQ));
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->hwtcon), 0, MT8113_HWTCON_ADDR);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->hwtcon), 1,
                     MT8113_HWTCON_IMG_ADDR);
@@ -2251,6 +2414,7 @@ static void mt8113_class_init(ObjectClass *oc, const void *data)
 
     dc->desc = "MediaTek MT8113 SoC";
     dc->realize = mt8113_realize;
+    device_class_set_legacy_reset(dc, mt8113_reset);
     device_class_set_props(dc, mt8113_properties);
     dc->user_creatable = false;
 }
@@ -2263,8 +2427,28 @@ static const TypeInfo mt8113_type_info = {
     .class_init = mt8113_class_init,
 };
 
+/* MT8110 and MT8113 expose the same MT8512-class integration used here. */
+static void mt8110_init(Object *obj)
+{
+    MT8113State *s = MT8113(obj);
+
+    object_property_set_bool(OBJECT(&s->gce), "inclusive-end-address", false,
+                             &error_abort);
+    object_property_set_bool(OBJECT(&s->hwtcon), "scanout-image-buffer", true,
+                             &error_abort);
+    object_property_set_bool(OBJECT(&s->hwtcon), "retain-boot-splash", true,
+                             &error_abort);
+}
+
+static const TypeInfo mt8110_type_info = {
+    .name = TYPE_MT8110,
+    .parent = TYPE_MT8113,
+    .instance_init = mt8110_init,
+};
+
 static void mt8113_register_types(void)
 {
     type_register_static(&mt8113_type_info);
+    type_register_static(&mt8110_type_info);
 }
 type_init(mt8113_register_types)
