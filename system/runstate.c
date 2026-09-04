@@ -30,6 +30,7 @@
 #include "crypto/cipher.h"
 #include "crypto/init.h"
 #include "exec/cpu-common.h"
+#include "exec/tb-flush.h"
 #include "gdbstub/syscalls.h"
 #include "hw/core/boards.h"
 #include "hw/core/resettable.h"
@@ -60,7 +61,11 @@
 #include "system/runstate-action.h"
 #include "system/confidential-guest-support.h"
 #include "system/system.h"
+#include "system/tcg.h"
 #include "system/tpm.h"
+#ifdef CONFIG_TCG
+#include "tcg/tcg.h"
+#endif
 #include "trace.h"
 
 static NotifierList exit_notifiers =
@@ -555,6 +560,24 @@ void qemu_system_reset(ShutdownCause reason)
     } else {
         qemu_devices_reset(type);
     }
+
+    /*
+     * Preserve valid translations across ordinary guest resets: rewritten
+     * code pages are invalidated normally, while retained translations make
+     * repeated boots substantially faster under TCG.  Flush only when the
+     * cache is already close enough to capacity that a full flush during the
+     * next boot would be likely.  queue_tb_flush() performs that flush in an
+     * exclusive vCPU context after the paused CPUs are resumed.
+     */
+#ifdef CONFIG_TCG
+    if (tcg_enabled() && first_cpu &&
+        (reason == SHUTDOWN_CAUSE_GUEST_RESET ||
+         reason == SHUTDOWN_CAUSE_HOST_QMP_SYSTEM_RESET) &&
+        tcg_code_size() >= tcg_code_capacity() * 3 / 4) {
+        queue_tb_flush(first_cpu);
+    }
+#endif
+
     switch (reason) {
     case SHUTDOWN_CAUSE_NONE:
     case SHUTDOWN_CAUSE_SUBSYSTEM_RESET:
