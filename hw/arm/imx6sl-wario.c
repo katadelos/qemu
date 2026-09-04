@@ -622,6 +622,7 @@ static void wario_machine_init(ObjectClass *oc, const void *data)
     mc->init = wario_init;
     mc->max_cpus = 1;
     mc->default_cpus = 1;
+    mc->minimum_page_bits = 12;
     mc->default_ram_size = 512 * MiB;
     mc->default_ram_id = "wario.ram";
     mc->ignore_memory_transaction_failures = true;
