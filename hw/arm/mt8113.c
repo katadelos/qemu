@@ -15,8 +15,10 @@
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
+#include "net/net.h"
 #include "qobject/qlist.h"
 #include "system/dma.h"
+#include "system/reset.h"
 #include "system/runstate.h"
 #include "system/system.h"
 #include "system/address-spaces.h"
@@ -1649,6 +1651,71 @@ static const MemoryRegionOps mt8113_usbphy_ops = {
 };
 
 /* MTU3 device controller and its IP-port power/clock controller. */
+#define MT8113_USB_LV1ISR             0x0000
+#define MT8113_USB_LV1IER             0x0004
+#define MT8113_USB_LV1IESR            0x0008
+#define MT8113_USB_LV1IECR            0x000c
+#define MT8113_USB_EPISR              0x0080
+#define MT8113_USB_EPIER              0x0084
+#define MT8113_USB_EPIESR             0x0088
+#define MT8113_USB_EPIECR             0x008c
+#define MT8113_USB_EP0CSR             0x0100
+#define MT8113_USB_RXCOUNT0           0x0108
+#define MT8113_USB_TX1CSR0            0x0110
+#define MT8113_USB_TX1CSR1            0x0114
+#define MT8113_USB_RX1CSR0            0x0210
+#define MT8113_USB_RX1CSR1            0x0214
+#define MT8113_USB_FIFO0              0x0300
+#define MT8113_USB_TXQHIAR1           0x0484
+#define MT8113_USB_RXQHIAR1           0x04c4
+#define MT8113_USB_TXQCSR1            0x0510
+#define MT8113_USB_TXQSAR1            0x0514
+#define MT8113_USB_TXQCPR1            0x0518
+#define MT8113_USB_RXQCSR1            0x0610
+#define MT8113_USB_RXQSAR1            0x0614
+#define MT8113_USB_RXQCPR1            0x0618
+#define MT8113_USB_QISAR0             0x0700
+#define MT8113_USB_QIER0              0x0704
+#define MT8113_USB_QIESR0             0x0708
+#define MT8113_USB_QIECR0             0x070c
+#define MT8113_USB_QISAR1             0x0710
+#define MT8113_USB_QIER1              0x0714
+#define MT8113_USB_QIESR1             0x0718
+#define MT8113_USB_QIECR1             0x071c
+#define MT8113_USB_DEVICE_CONF        0x0800
+#define MT8113_USB_DEV_LINK_IER       0x0850
+#define MT8113_USB_DEV_LINK_ISR       0x0854
+#define MT8113_USB_POWER_MANAGEMENT   0x2404
+#define MT8113_USB_COMMON_IER         0x2418
+#define MT8113_USB_COMMON_ISR         0x241c
+#define MT8113_USB_LTSSM_IER          0x153c
+#define MT8113_USB_LTSSM_ISR          0x1540
+
+#define MT8113_USB_LV1_BMU            BIT(0)
+#define MT8113_USB_LV1_QMU            BIT(1)
+#define MT8113_USB_LV1_MAC3           BIT(2)
+#define MT8113_USB_LV1_MAC2           BIT(4)
+#define MT8113_USB_LV1_EP_CTRL        BIT(5)
+#define MT8113_USB_EP0_IRQ            BIT(0)
+#define MT8113_USB_EP0_RX_READY       BIT(16)
+#define MT8113_USB_EP0_SETUP_READY    BIT(17)
+#define MT8113_USB_EP0_TX_READY       BIT(18)
+#define MT8113_USB_EP0_DATA_END       BIT(19)
+#define MT8113_USB_EP0_SENT_STALL     BIT(22)
+#define MT8113_USB_EP0_SEND_STALL     BIT(25)
+#define MT8113_USB_SPEED_CHANGE       BIT(0)
+#define MT8113_USB_RESET              BIT(2)
+#define MT8113_USB_SOFT_CONNECT       BIT(6)
+#define MT8113_USB_Q_ACTIVE           BIT(15)
+#define MT8113_USB_Q_STOP             BIT(2)
+#define MT8113_USB_Q_RESUME           BIT(1)
+#define MT8113_USB_Q_START            BIT(0)
+#define MT8113_USB_DMA_REQUEST        BIT(29)
+#define MT8113_USB_GPD_HWO            BIT(0)
+#define MT8113_USB_GPD_LENGTH_MASK    0xffff
+#define MT8113_USB_GPD_RING_LIMIT     256
+#define MT8113_USB_GPD_IOC            BIT(7)
+
 #define MT8113_USB_CAP_EPNTXFFSZ     0x0c08
 #define MT8113_USB_CAP_EPNRXFFSZ     0x0c0c
 #define MT8113_USB_CAP_EPINFO        0x0c10
@@ -1668,10 +1735,369 @@ static const MemoryRegionOps mt8113_usbphy_ops = {
 #define MT8113_USB_IP_DEV_PDN        BIT(0)
 #define MT8113_USB_XHCI_U2_PORTS     (1 << 8)
 
+typedef struct MT8113USBGpd {
+    uint32_t info;
+    uint32_t next;
+    uint32_t buffer;
+    uint32_t length;
+} QEMU_PACKED MT8113USBGpd;
+
+static hwaddr mt8113_usb_tx_reg(unsigned ep, hwaddr first)
+{
+    return first + (ep - 1) * 0x10;
+}
+
+static hwaddr mt8113_usb_rx_reg(unsigned ep, hwaddr first)
+{
+    return first + (ep - 1) * 0x10;
+}
+
+static void mt8113_usb_update_irq(MT8113USBState *usb)
+{
+    uint32_t level = 0;
+
+    if (usb->mac_regs[MT8113_USB_EPISR / 4] &
+        usb->mac_regs[MT8113_USB_EPIER / 4]) {
+        level |= MT8113_USB_LV1_BMU;
+    }
+    if ((usb->mac_regs[MT8113_USB_QISAR0 / 4] &
+         usb->mac_regs[MT8113_USB_QIER0 / 4]) ||
+        (usb->mac_regs[MT8113_USB_QISAR1 / 4] &
+         usb->mac_regs[MT8113_USB_QIER1 / 4])) {
+        level |= MT8113_USB_LV1_QMU;
+    }
+    if (usb->mac_regs[MT8113_USB_LTSSM_ISR / 4] &
+        usb->mac_regs[MT8113_USB_LTSSM_IER / 4]) {
+        level |= MT8113_USB_LV1_MAC3;
+    }
+    if (usb->mac_regs[MT8113_USB_COMMON_ISR / 4] &
+        usb->mac_regs[MT8113_USB_COMMON_IER / 4]) {
+        level |= MT8113_USB_LV1_MAC2;
+    }
+    if (usb->mac_regs[MT8113_USB_DEV_LINK_ISR / 4] &
+        usb->mac_regs[MT8113_USB_DEV_LINK_IER / 4]) {
+        level |= MT8113_USB_LV1_EP_CTRL;
+    }
+    usb->mac_regs[MT8113_USB_LV1ISR / 4] = level;
+    qemu_set_irq(usb->irq,
+                 (level & usb->mac_regs[MT8113_USB_LV1IER / 4]) != 0);
+}
+
+static bool mt8113_usb_qmu_active(MT8113USBState *usb, unsigned ep,
+                                  bool tx)
+{
+    hwaddr csr = tx ? mt8113_usb_tx_reg(ep, MT8113_USB_TXQCSR1)
+                    : mt8113_usb_rx_reg(ep, MT8113_USB_RXQCSR1);
+
+    return usb->mac_regs[csr / 4] & MT8113_USB_Q_ACTIVE;
+}
+
+static bool mt8113_usb_bulk_ep(MT8113USBState *usb, unsigned ep, bool tx)
+{
+    hwaddr csr0 = tx ? mt8113_usb_tx_reg(ep, MT8113_USB_TX1CSR0)
+                     : mt8113_usb_rx_reg(ep, MT8113_USB_RX1CSR0);
+    hwaddr csr1 = tx ? mt8113_usb_tx_reg(ep, MT8113_USB_TX1CSR1)
+                     : mt8113_usb_rx_reg(ep, MT8113_USB_RX1CSR1);
+
+    return (usb->mac_regs[csr0 / 4] & MT8113_USB_DMA_REQUEST) &&
+           !(usb->mac_regs[csr1 / 4] & (3 << 4));
+}
+
+static bool mt8113_usb_read_gpd(MT8113USBState *usb, unsigned ep, bool tx,
+                                MT8113USBGpd *gpd, hwaddr *address)
+{
+    hwaddr cpr = tx ? mt8113_usb_tx_reg(ep, MT8113_USB_TXQCPR1)
+                    : mt8113_usb_rx_reg(ep, MT8113_USB_RXQCPR1);
+    uint32_t current = usb->mac_regs[cpr / 4] & ~0xfU;
+
+    if (!current || dma_memory_read(&address_space_memory, current, gpd,
+                                    sizeof(*gpd),
+                                    MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
+        return false;
+    }
+    gpd->info = le32_to_cpu(gpd->info);
+    gpd->next = le32_to_cpu(gpd->next);
+    gpd->buffer = le32_to_cpu(gpd->buffer);
+    gpd->length = le32_to_cpu(gpd->length);
+    *address = current;
+    return gpd->info & MT8113_USB_GPD_HWO;
+}
+
+static void mt8113_usb_complete_gpd(MT8113USBState *usb, unsigned ep,
+                                     bool tx, hwaddr address,
+                                     MT8113USBGpd *gpd)
+{
+    hwaddr cpr = tx ? mt8113_usb_tx_reg(ep, MT8113_USB_TXQCPR1)
+                    : mt8113_usb_rx_reg(ep, MT8113_USB_RXQCPR1);
+    uint32_t done = tx ? BIT(ep) : BIT(ep + 16);
+    MT8113USBGpd stored = *gpd;
+
+    stored.info = cpu_to_le32(stored.info & ~MT8113_USB_GPD_HWO);
+    stored.next = cpu_to_le32(stored.next);
+    stored.buffer = cpu_to_le32(stored.buffer);
+    stored.length = cpu_to_le32(stored.length);
+    dma_memory_write(&address_space_memory, address, &stored,
+                     sizeof(stored), MEMTXATTRS_UNSPECIFIED);
+    usb->mac_regs[cpr / 4] = gpd->next & ~0xfU;
+    if (gpd->info & MT8113_USB_GPD_IOC) {
+        usb->mac_regs[MT8113_USB_QISAR0 / 4] |= done;
+    }
+}
+
+static void mt8113_usb_process_tx(MT8113USBState *usb, unsigned ep)
+{
+    bool completed = false;
+    bool bulk = mt8113_usb_bulk_ep(usb, ep, true);
+    hwaddr csr0 = mt8113_usb_tx_reg(ep, MT8113_USB_TX1CSR0);
+    hwaddr csr1 = mt8113_usb_tx_reg(ep, MT8113_USB_TX1CSR1);
+    bool notify = (usb->mac_regs[csr0 / 4] & MT8113_USB_DMA_REQUEST) &&
+                  (usb->mac_regs[csr1 / 4] & (3 << 4)) == (1 << 4);
+
+    if (!usb->nic || qemu_get_queue(usb->nic)->link_down ||
+        usb->processing_tx || (!usb->configured && bulk) ||
+        !mt8113_usb_qmu_active(usb, ep, true) ||
+        (!bulk && !notify)) {
+        return;
+    }
+
+    usb->processing_tx = true;
+    for (unsigned count = 0; count < MT8113_USB_GPD_RING_LIMIT; count++) {
+        MT8113USBGpd gpd;
+        hwaddr address;
+        size_t length;
+        uint8_t *packet;
+
+        if (!mt8113_usb_read_gpd(usb, ep, true, &gpd, &address)) {
+            break;
+        }
+        length = gpd.length & MT8113_USB_GPD_LENGTH_MASK;
+        packet = g_malloc(length ?: 1);
+        /* ECM interrupt-IN notifications complete like ordinary USB IN
+         * requests, but are not Ethernet frames for the network backend. */
+        if (bulk && length &&
+            dma_memory_read(&address_space_memory, gpd.buffer,
+                                      packet, length,
+                                      MEMTXATTRS_UNSPECIFIED) == MEMTX_OK &&
+            length >= 14) {
+            qemu_send_packet(qemu_get_queue(usb->nic), packet, length);
+        }
+        g_free(packet);
+        mt8113_usb_complete_gpd(usb, ep, true, address, &gpd);
+        completed = true;
+    }
+    usb->processing_tx = false;
+    if (completed) {
+        mt8113_usb_update_irq(usb);
+        qemu_flush_queued_packets(qemu_get_queue(usb->nic));
+    }
+}
+
+static void mt8113_usb_tx_timer(void *opaque)
+{
+    MT8113USBState *usb = opaque;
+
+    /* mtu3_gadget_queue() rings Q_RESUME after publishing every GPD.
+     * Defer work out of the MMIO write; no idle ring polling is needed. */
+    for (unsigned ep = 1; ep < MT8113_USB_ENDPOINTS; ep++) {
+        mt8113_usb_process_tx(usb, ep);
+    }
+}
+
+static bool mt8113_usb_can_receive(NetClientState *nc)
+{
+    MT8113USBState *usb = qemu_get_nic_opaque(nc);
+
+    if (usb->processing_tx || !usb->configured || nc->link_down) {
+        return false;
+    }
+    for (unsigned ep = 1; ep < MT8113_USB_ENDPOINTS; ep++) {
+        MT8113USBGpd gpd;
+        hwaddr address;
+
+        if (mt8113_usb_qmu_active(usb, ep, false) &&
+            mt8113_usb_bulk_ep(usb, ep, false) &&
+            mt8113_usb_read_gpd(usb, ep, false, &gpd, &address)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static ssize_t mt8113_usb_receive(NetClientState *nc, const uint8_t *packet,
+                                  size_t size)
+{
+    MT8113USBState *usb = qemu_get_nic_opaque(nc);
+
+    if (!mt8113_usb_can_receive(nc)) {
+        return 0;
+    }
+    for (unsigned ep = 1; ep < MT8113_USB_ENDPOINTS; ep++) {
+        MT8113USBGpd gpd;
+        hwaddr address;
+        size_t capacity;
+
+        if (!mt8113_usb_qmu_active(usb, ep, false) ||
+            !mt8113_usb_bulk_ep(usb, ep, false) ||
+            !mt8113_usb_read_gpd(usb, ep, false, &gpd, &address)) {
+            continue;
+        }
+        capacity = gpd.info >> 16;
+        if (!capacity || size > capacity) {
+            return 0;
+        }
+        if (dma_memory_write(&address_space_memory, gpd.buffer, packet, size,
+                             MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
+            return 0;
+        }
+        gpd.length = (gpd.length & ~MT8113_USB_GPD_LENGTH_MASK) | size;
+        mt8113_usb_complete_gpd(usb, ep, false, address, &gpd);
+        mt8113_usb_update_irq(usb);
+        return size;
+    }
+    return 0;
+}
+
+static bool mt8113_usb_connected(MT8113USBState *usb)
+{
+    return usb->nic && !qemu_get_queue(usb->nic)->link_down &&
+           (usb->mac_regs[MT8113_USB_POWER_MANAGEMENT / 4] &
+            MT8113_USB_SOFT_CONNECT) &&
+           usb->mac_regs[MT8113_USB_LV1IER / 4];
+}
+
+static void mt8113_usb_disconnect(MT8113USBState *usb)
+{
+    usb->configured = false;
+    usb->setup_pending = false;
+    usb->config_phase = 0;
+    if (usb->config_timer) {
+        timer_del(usb->config_timer);
+        timer_del(usb->tx_timer);
+        qemu_purge_queued_packets(qemu_get_queue(usb->nic));
+    }
+}
+
+static void mt8113_usb_link_changed(NetClientState *nc)
+{
+    MT8113USBState *usb = qemu_get_nic_opaque(nc);
+
+    mt8113_usb_disconnect(usb);
+    if (nc->link_down) {
+        /* MTU3 enables RESET, not DISCONN, in high-speed device mode.
+         * A bus reset tears down ECM endpoints and lowers usb0 carrier. */
+        usb->mac_regs[MT8113_USB_COMMON_ISR / 4] |= MT8113_USB_RESET;
+        mt8113_usb_update_irq(usb);
+    } else if (mt8113_usb_connected(usb)) {
+        timer_mod(usb->config_timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1);
+    }
+}
+
+static NetClientInfo mt8113_usb_net_info = {
+    .type = NET_CLIENT_DRIVER_NIC,
+    .size = sizeof(NICState),
+    .can_receive = mt8113_usb_can_receive,
+    .receive = mt8113_usb_receive,
+    .link_status_changed = mt8113_usb_link_changed,
+};
+
+static void mt8113_usb_inject_setup(MT8113USBState *usb,
+                                    const uint8_t setup[8])
+{
+    usb->setup_pending = true;
+    memcpy(usb->ep0_fifo, setup, 8);
+    usb->ep0_fifo_offset = 0;
+    usb->ep0_fifo_length = 8;
+    usb->mac_regs[MT8113_USB_RXCOUNT0 / 4] = 8;
+    usb->mac_regs[MT8113_USB_EP0CSR / 4] |=
+        MT8113_USB_EP0_SETUP_READY;
+    usb->mac_regs[MT8113_USB_EPISR / 4] |= MT8113_USB_EP0_IRQ;
+    mt8113_usb_update_irq(usb);
+}
+
+static void mt8113_usb_config_timer(void *opaque)
+{
+    MT8113USBState *usb = opaque;
+    static const uint8_t set_address[8] = {
+        0x00, 0x05, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+    static const uint8_t set_configuration[8] = {
+        0x00, 0x09, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+    static const uint8_t set_interface[8] = {
+        0x01, 0x0b, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00,
+    };
+
+    static const uint8_t set_packet_filter[8] = {
+        0x21, 0x43, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+
+    if (!mt8113_usb_connected(usb) || usb->configured) {
+        return;
+    }
+    /* Follow mtu3_gadget_ep0.c: a no-data request is complete only when
+     * the driver writes DATAEND. Never replace an unhandled SETUP packet.
+     * Likewise let the guest service reset and speed change before EP0. */
+    if (usb->setup_pending ||
+        (usb->mac_regs[MT8113_USB_COMMON_ISR / 4] & MT8113_USB_RESET) ||
+        (usb->mac_regs[MT8113_USB_DEV_LINK_ISR / 4] & MT8113_USB_SPEED_CHANGE)) {
+        goto wait_for_guest;
+    }
+    if (usb->config_phase >= 2 &&
+        !(usb->mac_regs[MT8113_USB_EPIER / 4] & MT8113_USB_EP0_IRQ)) {
+        goto wait_for_guest;
+    }
+    switch (usb->config_phase) {
+    case 0:
+        usb->config_phase++;
+        usb->mac_regs[MT8113_USB_COMMON_ISR / 4] |= MT8113_USB_RESET;
+        mt8113_usb_update_irq(usb);
+        break;
+    case 1:
+        usb->config_phase++;
+        usb->mac_regs[MT8113_USB_DEVICE_CONF / 4] =
+            (usb->mac_regs[MT8113_USB_DEVICE_CONF / 4] & ~7U) | 3;
+        usb->mac_regs[MT8113_USB_DEV_LINK_ISR / 4] |=
+            MT8113_USB_SPEED_CHANGE;
+        mt8113_usb_update_irq(usb);
+        break;
+    case 2:
+        mt8113_usb_inject_setup(usb, set_address);
+        break;
+    case 3:
+        mt8113_usb_inject_setup(usb, set_configuration);
+        break;
+    case 4:
+        mt8113_usb_inject_setup(usb, set_interface);
+        break;
+    case 5:
+        mt8113_usb_inject_setup(usb, set_packet_filter);
+        break;
+    default:
+        usb->configured = true;
+        timer_mod(usb->tx_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL));
+        qemu_flush_queued_packets(qemu_get_queue(usb->nic));
+        return;
+    }
+wait_for_guest:
+    timer_mod(usb->config_timer,
+              qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 10);
+}
+
 static uint64_t mt8113_usb_mac_read(void *opaque, hwaddr offset,
                                     unsigned size)
 {
     MT8113USBState *usb = opaque;
+
+    if (offset == MT8113_USB_FIFO0) {
+        uint32_t value = 0;
+        unsigned available = usb->ep0_fifo_length - usb->ep0_fifo_offset;
+        unsigned transfer = MIN(size, available);
+
+        memcpy(&value, usb->ep0_fifo + usb->ep0_fifo_offset, transfer);
+        usb->ep0_fifo_offset += transfer;
+        return value;
+    }
 
     switch (offset) {
     case MT8113_USB_CAP_EPNTXFFSZ:
@@ -1688,8 +2114,147 @@ static void mt8113_usb_mac_write(void *opaque, hwaddr offset, uint64_t value,
                                  unsigned size)
 {
     MT8113USBState *usb = opaque;
+    bool soft_connect =
+        offset == MT8113_USB_POWER_MANAGEMENT &&
+        (value & MT8113_USB_SOFT_CONNECT);
+    bool soft_connect_rise =
+        soft_connect &&
+        !(usb->mac_regs[offset / 4] & MT8113_USB_SOFT_CONNECT);
+
+    switch (offset) {
+    case MT8113_USB_LV1IESR:
+        usb->mac_regs[MT8113_USB_LV1IER / 4] |= value;
+        if (mt8113_usb_connected(usb) && !usb->configured &&
+            usb->config_phase == 0) {
+            timer_mod(usb->config_timer,
+                      qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1);
+        }
+        mt8113_usb_update_irq(usb);
+        return;
+    case MT8113_USB_LV1IECR:
+        usb->mac_regs[MT8113_USB_LV1IER / 4] &= ~value;
+        if (!usb->mac_regs[MT8113_USB_LV1IER / 4]) {
+            mt8113_usb_disconnect(usb);
+        }
+        mt8113_usb_update_irq(usb);
+        return;
+    case MT8113_USB_EPIESR:
+        usb->mac_regs[MT8113_USB_EPIER / 4] |= value;
+        mt8113_usb_update_irq(usb);
+        return;
+    case MT8113_USB_EPIECR:
+        usb->mac_regs[MT8113_USB_EPIER / 4] &= ~value;
+        mt8113_usb_update_irq(usb);
+        return;
+    case MT8113_USB_QIESR0:
+        usb->mac_regs[MT8113_USB_QIER0 / 4] |= value;
+        mt8113_usb_update_irq(usb);
+        return;
+    case MT8113_USB_QIECR0:
+        usb->mac_regs[MT8113_USB_QIER0 / 4] &= ~value;
+        mt8113_usb_update_irq(usb);
+        return;
+    case MT8113_USB_QIESR1:
+        usb->mac_regs[MT8113_USB_QIER1 / 4] |= value;
+        mt8113_usb_update_irq(usb);
+        return;
+    case MT8113_USB_QIECR1:
+        usb->mac_regs[MT8113_USB_QIER1 / 4] &= ~value;
+        mt8113_usb_update_irq(usb);
+        return;
+    case MT8113_USB_EPISR:
+    case MT8113_USB_QISAR0:
+    case MT8113_USB_QISAR1:
+    case MT8113_USB_DEV_LINK_ISR:
+    case MT8113_USB_COMMON_ISR:
+    case MT8113_USB_LTSSM_ISR:
+        usb->mac_regs[offset / 4] &= ~value;
+        mt8113_usb_update_irq(usb);
+        return;
+    case MT8113_USB_EP0CSR: {
+        uint32_t csr = usb->mac_regs[offset / 4];
+
+        csr = (csr & ~0x3ffU) | (value & 0x3ffU);
+        if (value & MT8113_USB_EP0_SETUP_READY) {
+            csr &= ~MT8113_USB_EP0_SETUP_READY;
+        }
+        if (value & MT8113_USB_EP0_RX_READY) {
+            csr &= ~MT8113_USB_EP0_RX_READY;
+        }
+        if (value & MT8113_USB_EP0_SENT_STALL) {
+            csr &= ~MT8113_USB_EP0_SENT_STALL;
+        }
+        if (value & MT8113_USB_EP0_SEND_STALL) {
+            csr |= MT8113_USB_EP0_SENT_STALL;
+            if (usb->setup_pending) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "mt8113-usb: ECM setup phase %u stalled\n",
+                              usb->config_phase);
+                timer_del(usb->config_timer);
+            }
+        } else if ((value & MT8113_USB_EP0_DATA_END) && usb->setup_pending) {
+            usb->setup_pending = false;
+            usb->config_phase++;
+        }
+        csr &= ~(MT8113_USB_EP0_TX_READY | MT8113_USB_EP0_DATA_END);
+        usb->mac_regs[offset / 4] = csr;
+        return;
+    }
+    default:
+        break;
+    }
+
+    if ((offset >= MT8113_USB_TXQCSR1 &&
+         offset < MT8113_USB_TXQCSR1 + MT8113_USB_ENDPOINTS * 0x10 &&
+         !((offset - MT8113_USB_TXQCSR1) % 0x10)) ||
+        (offset >= MT8113_USB_RXQCSR1 &&
+         offset < MT8113_USB_RXQCSR1 + MT8113_USB_ENDPOINTS * 0x10 &&
+         !((offset - MT8113_USB_RXQCSR1) % 0x10))) {
+        bool tx = offset < MT8113_USB_RXQCSR1;
+        hwaddr first = tx ? MT8113_USB_TXQCSR1 : MT8113_USB_RXQCSR1;
+        hwaddr sar_first = tx ? MT8113_USB_TXQSAR1 : MT8113_USB_RXQSAR1;
+        hwaddr cpr_first = tx ? MT8113_USB_TXQCPR1 : MT8113_USB_RXQCPR1;
+        unsigned ep = (offset - first) / 0x10 + 1;
+        hwaddr sar = tx ? mt8113_usb_tx_reg(ep, sar_first)
+                        : mt8113_usb_rx_reg(ep, sar_first);
+        hwaddr cpr = tx ? mt8113_usb_tx_reg(ep, cpr_first)
+                        : mt8113_usb_rx_reg(ep, cpr_first);
+
+        if (value & MT8113_USB_Q_STOP) {
+            usb->mac_regs[offset / 4] = 0;
+        } else if (value & (MT8113_USB_Q_START | MT8113_USB_Q_RESUME)) {
+            usb->mac_regs[offset / 4] = MT8113_USB_Q_ACTIVE;
+            if (value & MT8113_USB_Q_START) {
+                usb->mac_regs[cpr / 4] = usb->mac_regs[sar / 4];
+            }
+            if (tx && usb->tx_timer) {
+                timer_mod(usb->tx_timer,
+                          qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL));
+            } else if (usb->nic) {
+                qemu_flush_queued_packets(qemu_get_queue(usb->nic));
+            }
+        }
+        return;
+    }
 
     usb->mac_regs[offset / sizeof(uint32_t)] = value;
+
+    if (offset == MT8113_USB_LV1IER ||
+        offset == MT8113_USB_EPIER ||
+        offset == MT8113_USB_QIER0 ||
+        offset == MT8113_USB_QIER1 ||
+        offset == MT8113_USB_DEV_LINK_IER ||
+        offset == MT8113_USB_COMMON_IER ||
+        offset == MT8113_USB_LTSSM_IER) {
+        mt8113_usb_update_irq(usb);
+    }
+    if (offset == MT8113_USB_POWER_MANAGEMENT && !soft_connect) {
+        mt8113_usb_disconnect(usb);
+    } else if (soft_connect_rise && mt8113_usb_connected(usb)) {
+        mt8113_usb_disconnect(usb);
+        timer_mod(usb->config_timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1);
+    }
 }
 
 static const MemoryRegionOps mt8113_usb_mac_ops = {
@@ -1989,6 +2554,27 @@ static const MemoryRegionOps mt8113_toprgu_ops = {
     },
 };
 
+static void mt8113_usb_reset(MT8113USBState *usb)
+{
+    mt8113_usb_disconnect(usb);
+    memset(usb->mac_regs, 0, sizeof(usb->mac_regs));
+    memset(usb->ippc_regs, 0, sizeof(usb->ippc_regs));
+    usb->ep0_fifo_length = 0;
+    usb->ep0_fifo_offset = 0;
+    usb->config_phase = 0;
+    usb->setup_pending = false;
+    usb->configured = false;
+    usb->processing_tx = false;
+    qemu_set_irq(usb->irq, 0);
+}
+
+static void mt8113_usb_system_reset(void *opaque)
+{
+    MT8113State *s = opaque;
+
+    mt8113_usb_reset(&s->usb);
+}
+
 static void mt8113_reset(DeviceState *dev)
 {
     MT8113State *s = MT8113(dev);
@@ -2015,8 +2601,7 @@ static void mt8113_reset(DeviceState *dev)
     for (int i = 0; i < ARRAY_SIZE(s->usbphy); i++) {
         memset(s->usbphy[i].regs, 0, sizeof(s->usbphy[i].regs));
     }
-    memset(s->usb.mac_regs, 0, sizeof(s->usb.mac_regs));
-    memset(s->usb.ippc_regs, 0, sizeof(s->usb.ippc_regs));
+    mt8113_usb_reset(&s->usb);
 
     s->scpsys_regs[MT8113_SCPSYS_PCM_REG15_DATA / sizeof(uint32_t)] = 1;
     s->scpsys_regs[MT8113_SCPSYS_SW_RSV_9 / sizeof(uint32_t)] =
@@ -2253,6 +2838,7 @@ static void mt8113_realize(DeviceState *dev, Error **errp)
     s->btif_rx_dma_irq =
         qdev_get_gpio_in(gicdev, MT8113_BTIF_RX_DMA_IRQ);
     s->wifi_irq = qdev_get_gpio_in(gicdev, MT8113_WIFI_IRQ);
+    s->usb.irq = qdev_get_gpio_in(gicdev, MT8113_USB_IRQ);
     memory_region_init_io(&s->btif_iomem, OBJECT(s), &mt8113_btif_ops, s,
                           "mt8113.btif", sizeof(s->btif_regs));
     memory_region_add_subregion(get_system_memory(), MT8113_BTIF_ADDR,
@@ -2312,6 +2898,19 @@ static void mt8113_realize(DeviceState *dev, Error **errp)
                           "mt8113.usb-ippc", MT8113_USB_IPPC_SIZE);
     memory_region_add_subregion(get_system_memory(), MT8113_USB_IPPC_ADDR,
                                 &s->usb.ippc_iomem);
+    if (s->usb.nic_conf.peers.ncs[0]) {
+        s->usb.nic = qemu_new_nic(&mt8113_usb_net_info, &s->usb.nic_conf,
+                                  object_get_typename(OBJECT(dev)), dev->id,
+                                  &dev->mem_reentrancy_guard, &s->usb);
+        qemu_format_nic_info_str(qemu_get_queue(s->usb.nic),
+                                 s->usb.nic_conf.macaddr.a);
+        s->usb.config_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
+                                            mt8113_usb_config_timer,
+                                            &s->usb);
+        s->usb.tx_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
+                                       mt8113_usb_tx_timer,
+                                       &s->usb);
+    }
 
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->gpio), errp)) {
         return;
@@ -2379,10 +2978,19 @@ static void mt8113_realize(DeviceState *dev, Error **errp)
         sysbus_connect_irq(SYS_BUS_DEVICE(&s->hwtcon), i,
                            qdev_get_gpio_in(gicdev, hwtcon_irq[i]));
     }
+
+    /* The busless SoC is not otherwise reached by the system reset tree. */
+    qemu_register_reset(mt8113_usb_system_reset, s);
+}
+
+static void mt8113_unrealize(DeviceState *dev)
+{
+    qemu_unregister_reset(mt8113_usb_system_reset, MT8113(dev));
 }
 
 static const Property mt8113_properties[] = {
     DEFINE_PROP_UINT64("reset-vector", MT8113State, reset_vector, 0),
+    DEFINE_NIC_PROPERTIES(MT8113State, usb.nic_conf),
 };
 
 static void mt8113_init(Object *obj)
@@ -2414,6 +3022,7 @@ static void mt8113_class_init(ObjectClass *oc, const void *data)
 
     dc->desc = "MediaTek MT8113 SoC";
     dc->realize = mt8113_realize;
+    dc->unrealize = mt8113_unrealize;
     device_class_set_legacy_reset(dc, mt8113_reset);
     device_class_set_props(dc, mt8113_properties);
     dc->user_creatable = false;

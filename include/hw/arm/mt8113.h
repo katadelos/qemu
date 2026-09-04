@@ -15,6 +15,7 @@
 #include "hw/misc/mt8113_gce.h"
 #include "hw/misc/mt8113_iommu.h"
 #include "hw/sd/mtk-msdc.h"
+#include "net/net.h"
 #include "qemu/timer.h"
 #include "qemu/units.h"
 #include "qom/object.h"
@@ -85,6 +86,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(MT8113State, MT8113)
 #define MT8113_BTIF_TX_DMA_IRQ   35
 #define MT8113_BTIF_RX_DMA_IRQ   36
 #define MT8113_WIFI_IRQ          132
+#define MT8113_USB_IRQ           16
 #define MT8113_MDP_WROT_IRQ      150
 
 #define MT8113_HWTCON_WB_FRAME_DONE_SPI         172
@@ -105,6 +107,18 @@ typedef struct MT8113USBState {
     MemoryRegion ippc_iomem;
     uint32_t mac_regs[MT8113_USB_MAC_SIZE / sizeof(uint32_t)];
     uint32_t ippc_regs[MT8113_USB_IPPC_SIZE / sizeof(uint32_t)];
+    NICConf nic_conf;
+    NICState *nic;
+    QEMUTimer *config_timer;
+    QEMUTimer *tx_timer;
+    qemu_irq irq;
+    uint8_t ep0_fifo[64];
+    unsigned ep0_fifo_length;
+    unsigned ep0_fifo_offset;
+    unsigned config_phase;
+    bool setup_pending;
+    bool configured;
+    bool processing_tx;
 } MT8113USBState;
 
 struct MT8113State {

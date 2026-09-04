@@ -450,6 +450,10 @@ static void bellatrix4_profile_reset(void *opaque)
                                             "gpio-in", hwid_pins[bit]),
                      profile->hwid & BIT(bit));
     }
+
+    /* The emulated USB cable is permanently attached to the SLIRP host. */
+    qemu_set_irq(qdev_get_gpio_in_named(DEVICE(&bms->soc->gpio),
+                                        "gpio-in", 16), 0);
 }
 
 /*
