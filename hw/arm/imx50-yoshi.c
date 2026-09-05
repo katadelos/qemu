@@ -736,8 +736,8 @@ static void yoshi_init(MachineState *machine)
         object_property_set_uint(OBJECT(soc), "ddr-type", 0x100,
                                  &error_fatal);
     }
-    if (tms->whitney || tms->celeste) {
-        /* Whitney and Celeste mount the landscape panel scan clockwise. */
+    if (tms->celeste) {
+        /* Celeste mounts the landscape panel scan clockwise. */
         object_property_set_bool(OBJECT(&soc->epdc), "rotate-ccw", false,
                                  &error_fatal);
     }
