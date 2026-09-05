@@ -6,6 +6,7 @@
  */
 #include "qemu/osdep.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/ssi/mc13892.h"
 #include "migration/vmstate.h"
 #include "qemu/module.h"
@@ -16,6 +17,7 @@
 #define MC13892_NUM_REGS       64
 #define MC13892_REG_INT_STAT0   0
 #define MC13892_REG_INT_MASK0   1
+#define MC13892_REG_INT_SENSE0  2
 #define MC13892_REG_INT_STAT1   3
 #define MC13892_REG_INT_MASK1   4
 #define MC13892_REG_INT_SENSE1  5
@@ -43,6 +45,7 @@ struct MC13892State {
     uint8_t reg;
     bool write;
     bool power_down;
+    bool usb_connected;
     int64_t rtc_offset;
     QEMUTimer *rtc_timer;
 };
@@ -235,6 +238,8 @@ static void mc13892_reset(DeviceState *dev)
     s->regs[MC13892_REG_RTCDAYA] = 0x7fff;
     /* PWRON1 is active low and the physical button powers up released. */
     s->regs[MC13892_REG_INT_SENSE1] = MC13892_PWRON1;
+    /* CHGDETS lets the stock K4 UDC leave its unplugged low-power state. */
+    s->regs[MC13892_REG_INT_SENSE0] = s->usb_connected ? (1U << 6) : 0;
     /* MC13892 revision 2.0A, as fitted to production Whitney boards. */
     s->regs[MC13892_REG_IDENT] = 0x0045d0;
     s->tx_frame = 0;
@@ -293,10 +298,15 @@ static const VMStateDescription vmstate_mc13892 = {
     }
 };
 
+static const Property mc13892_properties[] = {
+    DEFINE_PROP_BOOL("usb-connected", MC13892State, usb_connected, false),
+};
+
 static void mc13892_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     SSIPeripheralClass *ssc = SSI_PERIPHERAL_CLASS(klass);
+    device_class_set_props(dc, mc13892_properties);
 
     ssc->realize = mc13892_realize;
     ssc->transfer = mc13892_transfer;
