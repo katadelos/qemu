@@ -224,7 +224,7 @@ static void tlbiall_hyp_is_write(CPUARMState *env, const ARMCPRegInfo *ri,
 static int vae1_tlbmask(CPUARMState *env)
 {
     uint64_t hcr = arm_hcr_el2_eff(env);
-    MMUIdxMap mask;
+    uint16_t mask;
 
     assert(arm_feature(env, ARM_FEATURE_AARCH64));
 
@@ -239,7 +239,6 @@ static int vae1_tlbmask(CPUARMState *env)
         mask = ARMMMUIdxBit_E10_1 |
                ARMMMUIdxBit_E10_1_PAN |
                ARMMMUIdxBit_E10_1_GCS |
-               ARMMMUIdxBit_E10_1_SWPAN |
                ARMMMUIdxBit_E10_0 |
                ARMMMUIdxBit_E10_0_GCS;
     }
