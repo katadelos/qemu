@@ -38,12 +38,8 @@
 #define YOSHI_IRAM_TOP   0xf8020000
 #define YOSHI_IDME_BASE  0x0003f000
 /*
- * The Kobo-derived Whitney image is a second-stage U-Boot linked for SDRAM,
- * matching the Kobo Touch loader contract rather than Lab126's OCRAM image.
+ * Optional kernel preload used with SDRAM boot images on Whitney.
  */
-#define WHITNEY_KOBO_UBOOT_ADDR  0x77800000
-#define WHITNEY_KOBO_UBOOT_ENTRY 0x77800ae0
-#define WHITNEY_KOBO_UBOOT_MAX   0x000c0000
 #define WHITNEY_KOBO_KERNEL_ADDR 0x70800000
 #define WHITNEY_KOBO_KERNEL_MAX  0x00400000
 
@@ -481,9 +477,9 @@ static void yoshi_firmware_reset(void *opaque)
 static void yoshi_load_firmware(MachineState *machine,
                                 YoshiMachineState *tms)
 {
-    hwaddr addr = tms->whitney ? WHITNEY_KOBO_UBOOT_ADDR : YOSHI_UBOOT_ADDR;
-    hwaddr entry = tms->whitney ? WHITNEY_KOBO_UBOOT_ENTRY : YOSHI_UBOOT_ADDR;
-    size_t max_size = tms->whitney ? WHITNEY_KOBO_UBOOT_MAX : YOSHI_UBOOT_MAX;
+    hwaddr addr = YOSHI_UBOOT_ADDR;
+    hwaddr entry = YOSHI_UBOOT_ADDR;
+    size_t max_size = YOSHI_UBOOT_MAX;
     ssize_t size;
 
     if (!machine->firmware) {
