@@ -68,12 +68,14 @@ static void imx50_pll_write(void *opaque, hwaddr offset, uint64_t value,
 
     if (offset == PLL_DP_CTL) {
         /*
-         * LRF is read-only.  An enabled PLL retains an existing lock, and a
-         * manual RST write starts it and establishes a new lock.
+         * LRF is read-only. Powering up a PLL starts acquisition, as does
+         * a manual RST write. K4's _clk_pll_enable only raises UPEN.
+         * An already enabled PLL retains its existing lock.
          */
         value &= ~PLL_DP_CTL_LRF;
         if ((value & PLL_DP_CTL_UPEN) &&
-            ((value & PLL_DP_CTL_RST) || (old & PLL_DP_CTL_LRF))) {
+            (!(old & PLL_DP_CTL_UPEN) || (value & PLL_DP_CTL_RST) ||
+             (old & PLL_DP_CTL_LRF))) {
             value |= PLL_DP_CTL_LRF;
         }
     }
