@@ -249,7 +249,11 @@ static void imx_gpt_compute_next_timeout(IMXGPTState *s, bool event)
     }
 
     /* the new range to count down from */
-    limit = timeout - imx_gpt_update_count(s);
+    /* Widen before subtracting: the counter can pass the compare value
+     * between the two reads. Unsigned subtraction would turn that missed
+     * deadline into a nearly full 32-bit timer period, starving Linux's
+     * clock events (and its I/O and UI wakeups) until the next wrap. */
+    limit = (int64_t)timeout - imx_gpt_update_count(s);
 
     if (limit < 0) {
         /*
