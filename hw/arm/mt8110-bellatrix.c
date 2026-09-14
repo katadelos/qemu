@@ -7,6 +7,7 @@
 #include "qemu/osdep.h"
 #include <libfdt.h>
 #include "hw/arm/mt8113.h"
+#include "hw/adc/mt6577_auxadc.h"
 #include "hw/arm/machines-qom.h"
 #include "hw/core/boards.h"
 #include "hw/core/cpu.h"
@@ -15,6 +16,11 @@
 #include "hw/core/qdev-properties.h"
 #include "hw/i2c/bd71828.h"
 #include "hw/i2c/fp9935.h"
+#include "hw/i2c/fp9966.h"
+#include "hw/i2c/bq25611d.h"
+#include "hw/i2c/ti-opt-sensors.h"
+#include "hw/i2c/kx132.h"
+#include "hw/i2c/wacom_emr.h"
 #include "hw/i2c/goodix_gtx8.h"
 #include "hw/i2c/max20342.h"
 #include "hw/sd/sd.h"
@@ -24,6 +30,7 @@
 #include "qemu/units.h"
 #include "system/block-backend.h"
 #include "system/reset.h"
+#include "system/runstate.h"
 
 #define BELLATRIX_HANDOFF_ADDR      0x40001000
 #define BELLATRIX_BOOTARGS_ADDR     0x40000100
@@ -37,11 +44,17 @@
 #define BELLATRIX_IDME_VERSION      "2.1"
 
 #define TYPE_BELLATRIX_MACHINE MACHINE_TYPE_NAME("mt8110-bellatrix")
+#define TYPE_BELLATRIX3_MACHINE MACHINE_TYPE_NAME("mt8113-bellatrix3")
 OBJECT_DECLARE_SIMPLE_TYPE(BellatrixMachineState, BELLATRIX_MACHINE)
 
 typedef struct BellatrixMachineState {
     MachineState parent_obj;
     MT8113State *soc;
+    Object *pmic;
+    Object *charger;
+    qemu_irq usb_vbus_input;
+    Notifier powerdown_notifier;
+    bool powerdown_registered;
     char *board;
     char *device_profile;
     char *bl2;
@@ -71,6 +84,7 @@ typedef struct BellatrixIdmeField {
 typedef struct BellatrixDeviceProfile {
     const char *name;
     unsigned hwid;
+    const char *tattoo;
 } BellatrixDeviceProfile;
 
 typedef struct BellatrixBoard {
@@ -79,6 +93,16 @@ typedef struct BellatrixBoard {
     const char *serial;
     const char *device_type;
     ram_addr_t ram_size;
+    const char *soc_type;
+    const char *manufacturing;
+    const BellatrixDeviceProfile *profiles;
+    unsigned num_profiles;
+    unsigned hwid_pins[4];
+    unsigned touch_reset;
+    unsigned touch_width;
+    unsigned touch_height;
+    unsigned power_good;
+    bool scribe;
 } BellatrixBoard;
 
 /* The board tattoo selects Cava or Rossini; HWID pins select its phase. */
@@ -90,6 +114,23 @@ static const BellatrixDeviceProfile bellatrix_device_profiles[] = {
     { .name = "proto",      .hwid = 0 },
 };
 
+/* The stock Bellatrix3 board source names each Barolo tattoo phase. */
+static const BellatrixDeviceProfile barolo_device_profiles[] = {
+    { "production", 6, "2WS" },
+    { "dvt",        6, "2WS" },
+    { "evt",        4, "2TG" },
+    { "evt-doe",    5, "2TB" },
+    { "hvt",        3, "2Q7" },
+    { "hvt-a",      2, "2P4" },
+    { "proto",      1, "2K5" },
+};
+
+/* Pisco's source identifies DVT explicitly; do not invent earlier phases. */
+static const BellatrixDeviceProfile pisco_device_profiles[] = {
+    { "production", 6, "3XE" },
+    { "dvt",        6, "3XE" },
+};
+
 static const BellatrixBoard bellatrix_boards[] = {
     {
         .name = "cava",
@@ -97,26 +138,62 @@ static const BellatrixBoard bellatrix_boards[] = {
         .serial = "G0022D0000000000",
         .device_type = "22D",
         .ram_size = 512 * MiB,
+        .soc_type = TYPE_MT8110,
+        .manufacturing = "KINDLE11QEMU000000",
+        .profiles = bellatrix_device_profiles,
+        .num_profiles = ARRAY_SIZE(bellatrix_device_profiles),
+        .hwid_pins = { 14, 15, 16, 17 },
+        .touch_reset = 1, .touch_width = 1072, .touch_height = 1448,
+        .power_good = 10,
     }, {
         .name = "rossini",
         .board_id = "0003M5000000000",
         .serial = "G003KM0000000000",
         .device_type = "3KM",
         .ram_size = 1 * GiB,
+        .soc_type = TYPE_MT8110,
+        .manufacturing = "KINDLE11QEMU000000",
+        .profiles = bellatrix_device_profiles,
+        .num_profiles = ARRAY_SIZE(bellatrix_device_profiles),
+        .hwid_pins = { 14, 15, 16, 17 },
+        .touch_reset = 1, .touch_width = 1072, .touch_height = 1448,
+        .power_good = 10,
+    }, {
+        .name = "barolo",
+        .board_id = "0002WS0000000000",
+        .serial = "G002WS0000000000", .device_type = "2WS",
+        .ram_size = 1 * GiB, .soc_type = TYPE_MT8113,
+        .manufacturing = "SCRIBE1QEMU000000",
+        .profiles = barolo_device_profiles,
+        .num_profiles = ARRAY_SIZE(barolo_device_profiles),
+        .hwid_pins = { 113, 112, 114, 115 },
+        .touch_reset = 20, .touch_width = 1860, .touch_height = 2480,
+        .power_good = 37, .scribe = true,
+    }, {
+        .name = "pisco",
+        .board_id = "0003XE0000000000",
+        .serial = "G003XE0000000000", .device_type = "3XE",
+        .ram_size = 1 * GiB, .soc_type = TYPE_MT8113,
+        .manufacturing = "SCRIBE2QEMU000000",
+        .profiles = pisco_device_profiles,
+        .num_profiles = ARRAY_SIZE(pisco_device_profiles),
+        .hwid_pins = { 113, 112, 114, 115 },
+        .touch_reset = 20, .touch_width = 1860, .touch_height = 2480,
+        .power_good = 37, .scribe = true,
     },
 };
 
 static const BellatrixDeviceProfile *
-bellatrix_find_device_profile(const char *name)
+bellatrix_find_device_profile(const BellatrixBoard *board, const char *name)
 {
-    for (size_t i = 0; i < ARRAY_SIZE(bellatrix_device_profiles); i++) {
-        if (!strcmp(bellatrix_device_profiles[i].name, name)) {
-            return &bellatrix_device_profiles[i];
+    for (size_t i = 0; i < board->num_profiles; i++) {
+        if (!strcmp(board->profiles[i].name, name)) {
+            return &board->profiles[i];
         }
     }
 
-    error_report("invalid Bellatrix device-profile '%s' (expected "
-                 "production, dvt, evt, hvt, or proto)", name);
+    error_report("device-profile '%s' is not defined for board '%s'",
+                 name, board->name);
     exit(EXIT_FAILURE);
 }
 
@@ -128,7 +205,8 @@ static const BellatrixBoard *bellatrix_find_board(const char *name)
         }
     }
 
-    error_report("invalid Bellatrix board '%s' (expected cava or rossini)",
+    error_report("invalid Bellatrix board '%s' "
+                 "(expected cava, rossini, barolo, or pisco)",
                  name);
     exit(EXIT_FAILURE);
 }
@@ -137,7 +215,7 @@ static void bellatrix_apply_identity(BellatrixMachineState *bms)
 {
     const BellatrixBoard *board = bellatrix_find_board(bms->board);
     const BellatrixDeviceProfile *profile =
-        bellatrix_find_device_profile(bms->device_profile);
+        bellatrix_find_device_profile(board, bms->device_profile);
 
     g_free(bms->idme_board_id);
     g_free(bms->idme_serial);
@@ -145,9 +223,11 @@ static void bellatrix_apply_identity(BellatrixMachineState *bms)
     g_free(bms->idme_product_name);
     g_free(bms->idme_device_type);
     g_free(bms->idme_hwid);
-    bms->idme_board_id = g_strdup(board->board_id);
+    bms->idme_board_id = profile->tattoo ?
+        g_strdup_printf("000%s0000000000", profile->tattoo) :
+        g_strdup(board->board_id);
     bms->idme_serial = g_strdup(board->serial);
-    bms->idme_mfg = g_strdup("KINDLE11QEMU000000");
+    bms->idme_mfg = g_strdup(board->manufacturing);
     bms->idme_product_name = g_strdup("");
     bms->idme_device_type = g_strdup(board->device_type);
     bms->idme_hwid = g_strdup_printf("%u", profile->hwid);
@@ -165,7 +245,7 @@ static void bellatrix_set_board_identity(BellatrixMachineState *bms,
 static void bellatrix_set_device_profile_identity(
     BellatrixMachineState *bms, const char *name)
 {
-    bellatrix_find_device_profile(name);
+    bellatrix_find_device_profile(bellatrix_find_board(bms->board), name);
     g_free(bms->device_profile);
     bms->device_profile = g_strdup(name);
     bellatrix_apply_identity(bms);
@@ -181,13 +261,13 @@ static void bellatrix_firmware_reset(void *opaque)
 static void bellatrix_profile_reset(void *opaque)
 {
     BellatrixMachineState *bms = opaque;
+    const BellatrixBoard *board = bellatrix_find_board(bms->board);
     const BellatrixDeviceProfile *profile =
-        bellatrix_find_device_profile(bms->device_profile);
-    static const unsigned hwid_pins[] = { 14, 15, 16, 17 };
+        bellatrix_find_device_profile(board, bms->device_profile);
 
-    for (size_t bit = 0; bit < ARRAY_SIZE(hwid_pins); bit++) {
+    for (size_t bit = 0; bit < ARRAY_SIZE(board->hwid_pins); bit++) {
         qemu_set_irq(qdev_get_gpio_in_named(DEVICE(&bms->soc->gpio),
-                                            "gpio-in", hwid_pins[bit]),
+                                            "gpio-in", board->hwid_pins[bit]),
                      profile->hwid & BIT(bit));
     }
 }
@@ -404,6 +484,7 @@ static void bellatrix_attach_emmc(BellatrixMachineState *bms)
 
     qdev_prop_set_uint64(card, "boot-partition-size", 4 * MiB);
     qdev_prop_set_bit(card, "boot-partitions-in-memory", true);
+    qdev_prop_set_bit(card, "trim", bellatrix_find_board(bms->board)->scribe);
     qdev_prop_set_drive_err(card, "drive", blk, &error_fatal);
     qdev_realize(card, bus, &error_fatal);
 
@@ -416,6 +497,28 @@ static void bellatrix_attach_emmc(BellatrixMachineState *bms)
                                    bms->quickboot, "quickboot");
     bellatrix_populate_idme(card, bms);
     object_unref(OBJECT(card));
+}
+
+static void bellatrix_powerdown(Notifier *notifier, void *data)
+{
+    BellatrixMachineState *bms = container_of(notifier, BellatrixMachineState,
+                                             powerdown_notifier);
+
+    /* Standard host power requests are short physical gestures. The stock
+     * PMIC IRQ handler and powerd decide whether to sleep or power off. */
+    object_property_set_bool(bms->pmic, "power-button", true, &error_abort);
+    object_property_set_bool(bms->pmic, "power-button", false, &error_abort);
+}
+
+static void bellatrix_usb_vbus(void *opaque, int line, int level)
+{
+    BellatrixMachineState *bms = opaque;
+
+    /* Signed DT: GPIO31 is the active-low extcon VBUS detector. The same
+     * cable supplies the fitted charger; guest extcon owns UDC activation. */
+    qemu_set_irq(qdev_get_gpio_in_named(DEVICE(&bms->soc->gpio), "gpio-in", 31),
+                 !level);
+    object_property_set_bool(bms->charger, "vbus", !!level, &error_abort);
 }
 
 static void bellatrix_init(MachineState *machine)
@@ -434,31 +537,106 @@ static void bellatrix_init(MachineState *machine)
         exit(EXIT_FAILURE);
     }
 
-    soc = MT8113(object_new(TYPE_MT8110));
+    soc = MT8113(object_new(board->soc_type));
     object_property_add_child(OBJECT(machine), "soc", OBJECT(soc));
     object_property_set_uint(OBJECT(soc), "reset-vector",
                              BELLATRIX_HANDOFF_ADDR, &error_fatal);
+    if (board->scribe) {
+        /* Linux 4.9 mtk-cmdq-mailbox.c writes the first byte after the
+         * packet into END_ADDR, including the segmented-buffer path. */
+        qdev_prop_set_bit(DEVICE(&soc->gce), "inclusive-end-address", false);
+        qdev_prop_set_bit(DEVICE(&soc->hwtcon), "scanout-image-buffer", true);
+        qdev_prop_set_uint32(DEVICE(&soc->hwtcon), "initial-width",
+                             board->touch_width);
+        qdev_prop_set_uint32(DEVICE(&soc->hwtcon), "initial-height",
+                             board->touch_height);
+    }
     qdev_realize(DEVICE(soc), NULL, &error_fatal);
     bms->soc = soc;
+    if (board->scribe) {
+        DeviceState *adc = qdev_new(TYPE_MT6577_AUXADC);
+        object_property_add_child(OBJECT(machine), "auxadc", OBJECT(adc));
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(adc), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(adc), 0, 0x11001000);
+    }
     for (int cpu = 0; cpu < MT8113_NUM_CPUS; cpu++) {
         qemu_register_reset(bellatrix_firmware_reset, &soc->cpu[cpu]);
     }
 
     fp9930 = i2c_slave_create_simple(soc->i2c[0].bus, TYPE_FP9935, 0x18);
     i2c_slave_create_simple(soc->i2c[0].bus, TYPE_MAX20342, 0x35);
-    bd71828 = i2c_slave_create_simple(soc->i2c[1].bus, TYPE_BD71828, 0x4b);
+    bd71828 = i2c_slave_new(TYPE_BD71828, 0x4b);
+    if (board->scribe) {
+        object_property_add_child(OBJECT(machine), "pmic", OBJECT(bd71828));
+        qdev_prop_set_bit(DEVICE(bd71828), "power-button-support", true);
+    }
+    i2c_slave_realize_and_unref(bd71828, soc->i2c[1].bus, &error_fatal);
+    if (board->scribe) {
+        bms->pmic = OBJECT(bd71828);
+        bms->powerdown_notifier.notify = bellatrix_powerdown;
+        qemu_register_powerdown_notifier(&bms->powerdown_notifier);
+        bms->powerdown_registered = true;
+    }
     i2c_slave_create_simple(soc->i2c[1].bus, TYPE_BD71828, 0x4d);
-    gtx8 = i2c_slave_create_simple(soc->i2c[2].bus, TYPE_GOODIX_GTX8, 0x5d);
+    gtx8 = i2c_slave_new(TYPE_GOODIX_GTX8, 0x5d);
+    qdev_prop_set_uint32(DEVICE(gtx8), "width", board->touch_width);
+    qdev_prop_set_uint32(DEVICE(gtx8), "height", board->touch_height);
+    i2c_slave_realize_and_unref(gtx8, soc->i2c[2].bus, &error_fatal);
+
+    if (board->scribe) {
+        qdev_connect_gpio_out_named(DEVICE(bd71828), "irq", 0,
+            qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in", 62));
+        I2CSlave *charger = i2c_slave_new(TYPE_BQ25611D, 0x6b);
+        object_property_add_child(OBJECT(machine), "charger", OBJECT(charger));
+        i2c_slave_realize_and_unref(charger, soc->i2c[0].bus, &error_fatal);
+        bms->charger = OBJECT(charger);
+        bms->usb_vbus_input = qemu_allocate_irq(bellatrix_usb_vbus, bms, 0);
+        qdev_connect_gpio_out_named(DEVICE(soc), "usb-vbus", 0,
+                                    bms->usb_vbus_input);
+        qdev_connect_gpio_out_named(DEVICE(charger), "irq", 0,
+            qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in", 35));
+        I2CSlave *motion = i2c_slave_new(TYPE_KX132, 0x1f);
+        object_property_add_child(OBJECT(machine), "motion", OBJECT(motion));
+        /* The signed board DT negates sensor Z: -1 g is display face up. */
+        qdev_prop_set_int32(DEVICE(motion), "z-mg", -1000);
+        i2c_slave_realize_and_unref(motion, soc->i2c[0].bus, &error_fatal);
+        qdev_connect_gpio_out_named(DEVICE(motion), "irq", 0,
+            qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in", 70));
+        I2CSlave *stylus = i2c_slave_new(TYPE_WACOM_EMR, 0x09);
+        object_property_add_child(OBJECT(machine), "stylus", OBJECT(stylus));
+        i2c_slave_realize_and_unref(stylus, soc->i2c[2].bus, &error_fatal);
+        qdev_connect_gpio_out_named(DEVICE(stylus), "irq", 0,
+            qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in", 17));
+        qdev_connect_gpio_out_named(DEVICE(stylus), "pen-detect", 0,
+            qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in", 16));
+        qdev_connect_gpio_out_named(DEVICE(&soc->gpio), "gpio-out", 32,
+            qdev_get_gpio_in_named(DEVICE(stylus), "reset", 0));
+        for (unsigned sensor = 0; sensor < 2; sensor++) {
+            I2CSlave *als = i2c_slave_create_simple(
+                soc->i2c[0].bus, TYPE_TI_OPT3001, 0x44 + sensor);
+            qdev_connect_gpio_out(DEVICE(als), 0,
+                qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in",
+                                      sensor ? 73 : 33));
+        }
+        for (unsigned channel = 0; channel < 2; channel++) {
+            I2CSlave *light = i2c_slave_create_simple(
+                soc->i2c[channel * 2].bus, TYPE_FP9966, 0x34);
+            qdev_connect_gpio_out_named(DEVICE(&soc->gpio), "gpio-out",
+                channel, qdev_get_gpio_in_named(DEVICE(light), "enable", 0));
+        }
+    }
 
     qdev_connect_gpio_out_named(DEVICE(bd71828), "gpio", 1,
         qdev_get_gpio_in_named(DEVICE(fp9930), "enable", 0));
     qdev_connect_gpio_out_named(DEVICE(fp9930), "power-good", 0,
-        qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in", 10));
-    qemu_set_irq(qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in", 10),
+        qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in", board->power_good));
+    qemu_set_irq(qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in",
+                                      board->power_good),
                  0);
     qdev_connect_gpio_out_named(DEVICE(gtx8), "irq", 0,
-        qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in", 0));
-    qdev_connect_gpio_out_named(DEVICE(&soc->gpio), "gpio-out", 1,
+        qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in",
+                              board->scribe ? 26 : 0));
+    qdev_connect_gpio_out_named(DEVICE(&soc->gpio), "gpio-out", board->touch_reset,
         qdev_get_gpio_in_named(DEVICE(gtx8), "reset", 0));
     bellatrix_profile_reset(bms);
 
@@ -547,6 +725,10 @@ static void bellatrix_machine_instance_finalize(Object *obj)
 {
     BellatrixMachineState *bms = BELLATRIX_MACHINE(obj);
 
+    if (bms->powerdown_registered) {
+        notifier_remove(&bms->powerdown_notifier);
+    }
+    qemu_free_irq(bms->usb_vbus_input);
     if (bms->soc) {
         for (int cpu = 0; cpu < MT8113_NUM_CPUS; cpu++) {
             qemu_unregister_reset(bellatrix_firmware_reset,
@@ -624,8 +806,27 @@ static const TypeInfo bellatrix_machine_type = {
     .interfaces = arm_machine_interfaces,
 };
 
+static void bellatrix3_instance_init(Object *obj)
+{
+    bellatrix_set_board_identity(BELLATRIX_MACHINE(obj), "barolo");
+}
+
+static void bellatrix3_class_init(ObjectClass *oc, const void *data)
+{
+    MACHINE_CLASS(oc)->desc =
+        "Amazon/Lab126 Bellatrix3 Scribe platform (MediaTek MT8113)";
+}
+
+static const TypeInfo bellatrix3_machine_type = {
+    .name = TYPE_BELLATRIX3_MACHINE,
+    .parent = TYPE_BELLATRIX_MACHINE,
+    .instance_init = bellatrix3_instance_init,
+    .class_init = bellatrix3_class_init,
+};
+
 static void bellatrix_machine_register_types(void)
 {
     type_register_static(&bellatrix_machine_type);
+    type_register_static(&bellatrix3_machine_type);
 }
 type_init(bellatrix_machine_register_types)
