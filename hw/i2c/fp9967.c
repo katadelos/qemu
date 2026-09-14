@@ -3,10 +3,12 @@
 #include "qemu/osdep.h"
 #include "hw/i2c/fp9967.h"
 #include "migration/vmstate.h"
+#include "hw/core/irq.h"
 #include "qemu/module.h"
 
 struct FP9967State {
     I2CSlave parent_obj;
+    qemu_irq nirq;
     uint8_t regs[0x14];
     uint8_t pointer;
     bool expect_pointer;
@@ -20,7 +22,11 @@ static int fp9967_send(I2CSlave *i2c, uint8_t data)
         s->pointer = data;
         s->expect_pointer = false;
     } else if (s->pointer < sizeof(s->regs)) {
-        s->regs[s->pointer++] = data;
+        uint8_t reg = s->pointer++;
+        /* Fault/OTP status is supplied by the device, not writable config. */
+        if (reg != 0x0f && reg != 0x11) {
+            s->regs[reg] = data;
+        }
     }
     return 0;
 }
@@ -62,6 +68,13 @@ static void fp9967_reset(DeviceState *dev)
     memcpy(s->regs, defaults, sizeof(s->regs));
     s->pointer = 0;
     s->expect_pointer = true;
+    qemu_set_irq(s->nirq, 1); /* No modeled electrical/thermal fault. */
+}
+
+static void fp9967_init(Object *obj)
+{
+    FP9967State *s = FP9967(obj);
+    qdev_init_gpio_out(DEVICE(obj), &s->nirq, 1);
 }
 
 static const VMStateDescription fp9967_vmstate = {
@@ -94,6 +107,7 @@ static const TypeInfo fp9967_info = {
     .parent = TYPE_I2C_SLAVE,
     .instance_size = sizeof(FP9967State),
     .class_init = fp9967_class_init,
+    .instance_init = fp9967_init,
 };
 
 static void fp9967_register_types(void)

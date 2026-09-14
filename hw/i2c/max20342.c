@@ -3,14 +3,28 @@
 #include "qemu/osdep.h"
 #include "hw/i2c/max20342.h"
 #include "migration/vmstate.h"
+#include "hw/core/irq.h"
 #include "qemu/module.h"
 
 struct MAX20342State {
     I2CSlave parent_obj;
+    qemu_irq nirq;
     uint8_t regs[256];
     uint8_t pointer;
     bool expect_pointer;
 };
+
+static void max20342_reset(DeviceState *dev);
+
+static void max20342_update_irq(MAX20342State *s)
+{
+    unsigned pending = 0;
+    for (unsigned reg = 1; reg <= 6; reg++) {
+        /* A set mask bit enables this source (vendor driver defaults). */
+        pending |= s->regs[reg] & s->regs[reg + 11];
+    }
+    qemu_set_irq(s->nirq, !(pending && (s->regs[0x15] & 0x80)));
+}
 
 static int max20342_send(I2CSlave *i2c, uint8_t data)
 {
@@ -20,7 +34,16 @@ static int max20342_send(I2CSlave *i2c, uint8_t data)
         s->pointer = data;
         s->expect_pointer = false;
     } else {
-        s->regs[s->pointer++] = data;
+        uint8_t reg = s->pointer++;
+        if (reg == 0x19 && (data & 2)) {
+            max20342_reset(DEVICE(s));
+        } else if (reg >= 0x0c && reg != 0x18 &&
+                   !(reg >= 0x2c && reg <= 0x2f) &&
+                   !(reg >= 0x54 && reg <= 0x5b) &&
+                   !(reg >= 0x60 && reg <= 0x62)) {
+            s->regs[reg] = data;
+        }
+        max20342_update_irq(s);
     }
     return 0;
 }
@@ -29,7 +52,13 @@ static uint8_t max20342_recv(I2CSlave *i2c)
 {
     MAX20342State *s = MAX20342(i2c);
 
-    return s->regs[s->pointer++];
+    uint8_t reg = s->pointer++;
+    uint8_t value = s->regs[reg];
+    if (reg >= 1 && reg <= 6) {
+        s->regs[reg] = 0; /* Interrupt latches clear on read. */
+        max20342_update_irq(s);
+    }
+    return value;
 }
 
 static int max20342_event(I2CSlave *i2c, enum i2c_event event)
@@ -47,9 +76,18 @@ static void max20342_reset(DeviceState *dev)
     MAX20342State *s = MAX20342(dev);
 
     memset(s->regs, 0, sizeof(s->regs));
-    s->regs[0x00] = 0x01;
+    s->regs[0x00] = 0x01; /* Virtual silicon revision. */
+    s->regs[0x07] = 0x02; /* Unplugged: VBUS at safe 0 V. */
+    s->regs[0x0b] = 0x80; /* I2C interface ready, OVP switch open. */
     s->pointer = 0;
     s->expect_pointer = true;
+    max20342_update_irq(s);
+}
+
+static void max20342_init(Object *obj)
+{
+    MAX20342State *s = MAX20342(obj);
+    qdev_init_gpio_out(DEVICE(obj), &s->nirq, 1);
 }
 
 static const VMStateDescription max20342_vmstate = {
@@ -82,6 +120,7 @@ static const TypeInfo max20342_info = {
     .parent = TYPE_I2C_SLAVE,
     .instance_size = sizeof(MAX20342State),
     .class_init = max20342_class_init,
+    .instance_init = max20342_init,
 };
 
 static void max20342_register_types(void)
