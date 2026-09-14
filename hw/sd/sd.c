@@ -1594,6 +1594,7 @@ static enum SDCardModes sd_mode(SDState *sd)
     case sd_receivingdata_state:
     case sd_programming_state:
     case sd_disconnect_state:
+    case sd_sleep_state: /* eMMC retains its RCA while asleep. */
         return sd_data_transfer_mode;
     default:
         g_assert_not_reached();
@@ -2730,6 +2731,9 @@ static void emmc_function_switch(SDState *sd, uint32_t arg)
     uint8_t value = extract32(arg, 8, 8);
     uint8_t b = sd->ext_csd[index];
 
+    /* A new SWITCH must not inherit the preceding switch's failure. */
+    sd->card_status &= ~R_CSR_SWITCH_ERROR_MASK;
+
     trace_sdcard_switch(access, index, value, extract32(arg, 0, 2));
 
     if (index >= 192) {
@@ -3039,6 +3043,10 @@ static sd_rsp_type_t emmc_cmd_SET_RELATIVE_ADDR(SDState *sd, SDRequest req)
 static sd_rsp_type_t emmc_cmd_sleep_awake(SDState *sd, SDRequest req)
 {
     bool do_sleep = extract32(req.arg, 15, 1);
+
+    if (!sd_req_rca_same(sd, req)) {
+        return sd_r0;
+    }
 
     switch (sd->state) {
     case sd_sleep_state:
@@ -3838,7 +3846,10 @@ static size_t sd_do_command(SDState *sd, SDRequest *req,
         req->cmd &= 0x3f;
     }
 
-    if (sd->state == sd_sleep_state && req->cmd) {
+    /* eMMC accepts GO_IDLE_STATE and its addressed SLEEP/AWAKE command
+     * while asleep. Other commands receive no response until it wakes. */
+    if (sd->state == sd_sleep_state && req->cmd != 0 &&
+        !(sd_is_emmc(sd) && req->cmd == 5)) {
         qemu_log_mask(LOG_GUEST_ERROR, "SD: Card is sleeping\n");
         rtype = sd_r0;
         goto send_response;
@@ -3927,6 +3938,14 @@ send_response:
          * sent any response
          */
         sd->card_status &= ~CARD_STATUS_B;
+        /*
+         * SWITCH_ERROR describes execution after CMD6's R1b response.
+         * Keep it for the following command (normally SEND_STATUS), then
+         * clear it once the host has received that result.
+         */
+        if (sd_is_emmc(sd) && req->cmd != 6) {
+            sd->card_status &= ~R_CSR_SWITCH_ERROR_MASK;
+        }
     }
 
 #ifdef DEBUG_SD
