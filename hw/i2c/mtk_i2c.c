@@ -6,6 +6,7 @@
 
 #include "qemu/osdep.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/i2c/mtk_i2c.h"
 #include "qapi/error.h"
 #include "qemu/log.h"
@@ -36,6 +37,8 @@
 #define DMA_REG_RX_MEM_ADDR      0x20
 #define DMA_REG_TX_LEN           0x24
 #define DMA_REG_RX_LEN           0x28
+#define DMA_REG_TX_ADDR_HIGH     0x54
+#define DMA_REG_RX_ADDR_HIGH     0x58
 
 static uint64_t mtk_i2c_load(const uint8_t *regs, hwaddr offset,
                              unsigned size)
@@ -58,12 +61,25 @@ static void mtk_i2c_store(uint8_t *regs, hwaddr offset, uint64_t value,
 
 static uint16_t mtk_i2c_reg16(MTKI2CState *s, hwaddr offset)
 {
-    return mtk_i2c_load(s->regs, offset, 2);
+    return mtk_i2c_load(s->regs, s->ap_offset + offset, 2);
 }
 
 static uint32_t mtk_i2c_dma_reg32(MTKI2CState *s, hwaddr offset)
 {
     return mtk_i2c_load(s->dma_regs, offset, 4);
+}
+
+static hwaddr mtk_i2c_dma_address(MTKI2CState *s, bool receive)
+{
+    hwaddr address = mtk_i2c_dma_reg32(s, receive ? DMA_REG_RX_MEM_ADDR :
+                                                 DMA_REG_TX_MEM_ADDR);
+
+    if (s->version2) {
+        address |= (uint64_t)(mtk_i2c_dma_reg32(s,
+                    receive ? DMA_REG_RX_ADDR_HIGH : DMA_REG_TX_ADDR_HIGH) &
+                    0xf) << 32;
+    }
+    return address;
 }
 
 static void mtk_i2c_update_irq(MTKI2CState *s)
@@ -138,7 +154,7 @@ static bool mtk_i2c_recv_bytes(MTKI2CState *s, uint8_t address,
 
 static void mtk_i2c_transfer(MTKI2CState *s)
 {
-    uint16_t slave = mtk_i2c_reg16(s, I2C_REG_SLAVE_ADDR);
+    uint16_t slave = mtk_i2c_reg16(s, s->version2 ? 0x94 : I2C_REG_SLAVE_ADDR);
     uint16_t control = mtk_i2c_reg16(s, I2C_REG_CONTROL);
     uint16_t transactions = mtk_i2c_reg16(s, I2C_REG_TRANSAC_LEN);
     bool combined = (control & I2C_CONTROL_DIR_CHANGE) && transactions == 2;
@@ -149,6 +165,7 @@ static void mtk_i2c_transfer(MTKI2CState *s)
                           mtk_i2c_reg16(s, I2C_REG_TRANSFER_LEN);
     size_t rx_len = dma ? mtk_i2c_dma_reg32(s, DMA_REG_RX_LEN) :
                           (combined ? mtk_i2c_reg16(s,
+                                           s->version2 ? 0x44 :
                                            I2C_REG_TRANSFER_LEN_AUX) :
                                       mtk_i2c_reg16(s,
                                            I2C_REG_TRANSFER_LEN));
@@ -165,8 +182,7 @@ static void mtk_i2c_transfer(MTKI2CState *s)
 
     if (combined || !is_read) {
         if (dma) {
-            ok = mtk_i2c_dma_read(mtk_i2c_dma_reg32(s,
-                                      DMA_REG_TX_MEM_ADDR), tx, tx_len);
+            ok = mtk_i2c_dma_read(mtk_i2c_dma_address(s, false), tx, tx_len);
         } else {
             for (size_t i = 0; i < tx_len; i++) {
                 tx[i] = mtk_i2c_fifo_pop(s);
@@ -180,8 +196,7 @@ static void mtk_i2c_transfer(MTKI2CState *s)
     if (ok && (combined || is_read)) {
         ok = mtk_i2c_recv_bytes(s, address, rx, rx_len);
         if (ok && dma) {
-            ok = mtk_i2c_dma_write(mtk_i2c_dma_reg32(s,
-                                       DMA_REG_RX_MEM_ADDR), rx, rx_len);
+            ok = mtk_i2c_dma_write(mtk_i2c_dma_address(s, true), rx, rx_len);
         } else if (ok) {
             mtk_i2c_fifo_clear(s);
             for (size_t i = 0; i < rx_len; i++) {
@@ -194,9 +209,9 @@ done:
     if (i2c_bus_busy(s->bus)) {
         i2c_end_transfer(s->bus);
     }
-    s->regs[I2C_REG_INTR_STAT] |= I2C_INTR_COMPLETE;
+    s->regs[s->ap_offset + I2C_REG_INTR_STAT] |= I2C_INTR_COMPLETE;
     if (!ok) {
-        s->regs[I2C_REG_INTR_STAT] |= I2C_INTR_ACKERR;
+        s->regs[s->ap_offset + I2C_REG_INTR_STAT] |= I2C_INTR_ACKERR;
     }
     mtk_i2c_update_irq(s);
 }
@@ -205,8 +220,12 @@ static uint64_t mtk_i2c_read(void *opaque, hwaddr offset, unsigned size)
 {
     MTKI2CState *s = opaque;
 
-    if (offset == I2C_REG_DATA_PORT && size == 1) {
+    if (offset == s->ap_offset + I2C_REG_DATA_PORT &&
+        (size == 1 || s->version2)) {
         return mtk_i2c_fifo_pop(s);
+    }
+    if (s->version2 && offset == s->ap_offset + 0xf4) {
+        return s->fifo_count;
     }
     return mtk_i2c_load(s->regs, offset, size);
 }
@@ -216,7 +235,18 @@ static void mtk_i2c_write(void *opaque, hwaddr offset, uint64_t value,
 {
     MTKI2CState *s = opaque;
 
-    if (offset == I2C_REG_DATA_PORT && size == 1) {
+    /* The multi-host shadow/SCP bank is distinct from the AP channel.
+     * Only the AP channel is connected to this model's DMA and IRQ.
+     */
+    if (offset < s->ap_offset || offset >= s->ap_offset + 0x100) {
+        if ((offset & 0xff) == I2C_REG_INTR_STAT) {
+            value = mtk_i2c_load(s->regs, offset, size) & ~value;
+        }
+        mtk_i2c_store(s->regs, offset, value, size);
+        return;
+    }
+    offset -= s->ap_offset;
+    if (offset == I2C_REG_DATA_PORT && (size == 1 || s->version2)) {
         mtk_i2c_fifo_push(s, value);
         return;
     }
@@ -224,7 +254,7 @@ static void mtk_i2c_write(void *opaque, hwaddr offset, uint64_t value,
         uint16_t status = mtk_i2c_reg16(s, I2C_REG_INTR_STAT);
 
         status &= ~(uint16_t)value;
-        mtk_i2c_store(s->regs, I2C_REG_INTR_STAT, status, 2);
+        mtk_i2c_store(s->regs, s->ap_offset + I2C_REG_INTR_STAT, status, 2);
         mtk_i2c_update_irq(s);
         return;
     }
@@ -233,11 +263,11 @@ static void mtk_i2c_write(void *opaque, hwaddr offset, uint64_t value,
     }
     if (offset == I2C_REG_SOFTRESET && (value & 1)) {
         mtk_i2c_fifo_clear(s);
-        s->regs[I2C_REG_INTR_STAT] = 0;
-        s->regs[I2C_REG_INTR_STAT + 1] = 0;
+        s->regs[s->ap_offset + I2C_REG_INTR_STAT] = 0;
+        s->regs[s->ap_offset + I2C_REG_INTR_STAT + 1] = 0;
         mtk_i2c_update_irq(s);
     }
-    mtk_i2c_store(s->regs, offset, value, size);
+    mtk_i2c_store(s->regs, s->ap_offset + offset, value, size);
     if (offset == I2C_REG_INTR_MASK) {
         mtk_i2c_update_irq(s);
     }
@@ -318,11 +348,26 @@ static void mtk_i2c_init(Object *obj)
     s->bus = i2c_init_bus(DEVICE(obj), "i2c");
 }
 
+static void mtk_i2c_realize(DeviceState *dev, Error **errp)
+{
+    MTKI2CState *s = MTK_I2C(dev);
+
+    if (s->ap_offset != 0 && !(s->version2 && s->ap_offset == 0x100)) {
+        error_setg(errp, "mtk-i2c: AP offset must be 0 or v2 channel 0x100");
+    }
+}
+
+static const Property mtk_i2c_properties[] = {
+    DEFINE_PROP_UINT32("ap-offset", MTKI2CState, ap_offset, 0),
+};
+
 static void mtk_i2c_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
 
     dc->desc = "MediaTek MT65xx I2C controller";
+    dc->realize = mtk_i2c_realize;
+    device_class_set_props(dc, mtk_i2c_properties);
     device_class_set_legacy_reset(dc, mtk_i2c_reset);
 }
 
@@ -334,8 +379,24 @@ static const TypeInfo mtk_i2c_info = {
     .class_init = mtk_i2c_class_init,
 };
 
+/* MT8171/MT8115 uses the v2 register layout, including DCM at 0xf88. */
+static void mtk_i2c_v2_init(Object *obj)
+{
+    MTKI2CState *s = MTK_I2C(obj);
+
+    s->version2 = true;
+    memory_region_set_size(&s->iomem, 0x1000);
+}
+
+static const TypeInfo mtk_i2c_v2_info = {
+    .name = TYPE_MTK_I2C_V2,
+    .parent = TYPE_MTK_I2C,
+    .instance_init = mtk_i2c_v2_init,
+};
+
 static void mtk_i2c_register_types(void)
 {
     type_register_static(&mtk_i2c_info);
+    type_register_static(&mtk_i2c_v2_info);
 }
 type_init(mtk_i2c_register_types)

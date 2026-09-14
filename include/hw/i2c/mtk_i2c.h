@@ -8,6 +8,7 @@
 #include "qom/object.h"
 
 #define TYPE_MTK_I2C "mtk-i2c"
+#define TYPE_MTK_I2C_V2 "mtk-i2c-v2"
 OBJECT_DECLARE_SIMPLE_TYPE(MTKI2CState, MTK_I2C)
 
 #define MTK_I2C_MMIO_SIZE 0x100
@@ -21,7 +22,9 @@ struct MTKI2CState {
     MemoryRegion dma_iomem;
     qemu_irq irq;
     I2CBus *bus;
-    uint8_t regs[MTK_I2C_MMIO_SIZE];
+    uint8_t regs[0x1000];
+    bool version2;
+    uint32_t ap_offset;
     uint8_t dma_regs[MTK_I2C_DMA_MMIO_SIZE];
     uint8_t fifo[MTK_I2C_FIFO_SIZE];
     unsigned fifo_head;
