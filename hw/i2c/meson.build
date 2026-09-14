@@ -26,10 +26,8 @@ i2c_ss.add(when: 'CONFIG_IMX6SLL_REX', if_true: files(
 i2c_ss.add(when: 'CONFIG_MT8113_BELLATRIX4', if_true: files(
   'bd71828.c',
   'fp9935.c',
-  'fp9967.c',
   'ft5536g.c',
   'lis2du12.c',
-  'max20342.c',
 ))
 i2c_ss.add(when: 'CONFIG_MT8110_BELLATRIX', if_true: files(
   'goodix_gtx8.c',
@@ -50,4 +48,8 @@ i2c_ss.add(when: 'CONFIG_PPC4XX', if_true: files('ppc4xx_i2c.c'))
 i2c_ss.add(when: 'CONFIG_PCA954X', if_true: files('i2c_mux_pca954x.c'))
 i2c_ss.add(when: 'CONFIG_PMBUS', if_true: files('pmbus_device.c'))
 i2c_ss.add(when: 'CONFIG_BCM2835_I2C', if_true: files('bcm2835_i2c.c'))
+i2c_ss.add(when: ['CONFIG_MT8113_BELLATRIX4'], if_true: files('fp9967.c', 'max20342.c'))
+i2c_ss.add(when: 'CONFIG_MT8115_PA6_CS8', if_true: files('fp9967.c', 'max20342.c', 'sgm66075.c', 'fp9936.c', 'ti-opt-sensors.c', 'parade-tt7010.c', 'focaltech-ft3a81.c'))
+i2c_ss.add(when: 'CONFIG_MT8115_PA6_CS8', if_true: files('lsm6dso16is.c'))
+
 system_ss.add_all(when: 'CONFIG_I2C', if_true: i2c_ss)
