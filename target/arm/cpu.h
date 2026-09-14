@@ -1041,7 +1041,10 @@ struct ArchCPU {
      */
     uint32_t psci_conduit;
     uint32_t mtk_sip_vcorefs;
+    /* Optional board monitor service; no firmware-private global state. */
+    int32_t (*mtk_iommu_config)(uint64_t command, uint64_t ports);
     uint32_t mtk_optee_fbe;
+    uint64_t mtk_rollback_versions[6];
 
     /* For v8M, initial value of the Secure VTOR */
     uint32_t init_svtor;

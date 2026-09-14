@@ -30,3 +30,5 @@ arm_mtk_optee_message(uint64_t addr, uint32_t cmd, uint32_t num_params, uint32_t
 
 # machine.c
 cpu_post_load(uint32_t cpreg_vmstate_array_len, uint32_t cpreg_array_len) "cpreg_vmstate_array_len=%d cpreg_array_len=%d"
+
+arm_mtk_optee_invoke(uint32_t session, uint32_t func, uint64_t attr, uint64_t a, uint64_t b, uint64_t c) "MTK OP-TEE session=%u func=%u attr=%"PRIu64" a=0x%"PRIx64" b=0x%"PRIx64" c=0x%"PRIx64""

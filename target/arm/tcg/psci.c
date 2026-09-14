@@ -23,6 +23,7 @@
 #include "qemu/main-loop.h"
 #include "exec/cpu-common.h"
 #include "system/runstate.h"
+#include "hw/core/boards.h"
 #include "internals.h"
 #include "arm-powerctl.h"
 #include "target/arm/multiprocessing.h"
@@ -55,11 +56,11 @@
 #define MTK_OPTEE_SHM_BASE               0x43400000ULL
 #define MTK_OPTEE_SHM_SIZE               0x00100000ULL
 #define MTK_OPTEE_RAM_BASE               0x40000000ULL
-#define MTK_OPTEE_RAM_SIZE               0x40000000ULL
 #define MTK_OPTEE_SESSION_FBE            1
 #define MTK_OPTEE_SESSION_ENUM           2
 #define MTK_OPTEE_SESSION_KREE_CONSOLE   3
 #define MTK_OPTEE_SESSION_EFUSE          4
+#define MTK_OPTEE_SESSION_ROLLBACK       5
 
 #define MTK_OPTEE_RETURN_OK              0
 #define MTK_OPTEE_RETURN_EBADADDR        4
@@ -120,6 +121,11 @@ static const uint8_t mtk_optee_enum_uuid[16] = {
     0xa5, 0xa9, 0x7b, 0x3c, 0x4d, 0xdf, 0x13, 0xb8,
 };
 
+static const uint8_t mtk_optee_rollback_uuid[16] = {
+    0xf2, 0x8a, 0xec, 0xd9, 0x80, 0xce, 0x18, 0x23,
+    0xbc, 0x9d, 0xf3, 0x0b, 0x2b, 0xf9, 0x00, 0xc2,
+};
+
 static const uint8_t mtk_optee_efuse_uuid[16] = {
     0xa2, 0x56, 0x7d, 0x51, 0x01, 0x44, 0x45, 0x43,
     0xb4, 0x0a, 0xca, 0xba, 0x40, 0x27, 0x97, 0x03,
@@ -127,9 +133,11 @@ static const uint8_t mtk_optee_efuse_uuid[16] = {
 
 static bool mtk_optee_ram_range(uint64_t addr, uint64_t size)
 {
+    uint64_t ram_size = MACHINE(qdev_get_machine())->ram_size;
+
     return addr >= MTK_OPTEE_RAM_BASE &&
-           size <= MTK_OPTEE_RAM_SIZE &&
-           addr - MTK_OPTEE_RAM_BASE <= MTK_OPTEE_RAM_SIZE - size;
+           size <= ram_size &&
+           addr - MTK_OPTEE_RAM_BASE <= ram_size - size;
 }
 
 static bool mtk_optee_read(uint64_t addr, void *buf, size_t size)
@@ -302,6 +310,10 @@ static bool mtk_optee_fbe_get_key(uint8_t *msg, uint32_t num_params)
         uint64_t addr;
         uint64_t size;
 
+        if (type == MTK_OPTEE_ATTR_RMEM_INPUT &&
+            !ldq_le_p(param + 16) && !ldq_le_p(param + 24)) {
+            continue;
+        }
         if (type == MTK_OPTEE_ATTR_TMEM_INPUT ||
             type == MTK_OPTEE_ATTR_TMEM_INOUT ||
             type == MTK_OPTEE_ATTR_RMEM_INPUT ||
@@ -392,7 +404,7 @@ static bool mtk_optee_efuse_read(uint8_t *msg, uint32_t num_params)
     return mtk_optee_write(output_addr, data, length);
 }
 
-static uint32_t mtk_optee_call_with_arg(uint64_t addr)
+static uint32_t mtk_optee_call_with_arg(ARMCPU *cpu, uint64_t addr)
 {
     uint8_t header[MTK_OPTEE_MSG_ARG_SIZE];
     uint8_t *msg;
@@ -436,6 +448,10 @@ static uint32_t mtk_optee_call_with_arg(uint64_t addr)
                            sizeof(mtk_optee_kree_console_uuid))) {
             stl_le_p(msg + 8, MTK_OPTEE_SESSION_KREE_CONSOLE);
         } else if (!memcmp(msg + MTK_OPTEE_MSG_ARG_SIZE + 8,
+                           mtk_optee_rollback_uuid,
+                           sizeof(mtk_optee_rollback_uuid))) {
+            stl_le_p(msg + 8, MTK_OPTEE_SESSION_ROLLBACK);
+        } else if (!memcmp(msg + MTK_OPTEE_MSG_ARG_SIZE + 8,
                            mtk_optee_efuse_uuid,
                            sizeof(mtk_optee_efuse_uuid))) {
             stl_le_p(msg + 8, MTK_OPTEE_SESSION_EFUSE);
@@ -445,7 +461,32 @@ static uint32_t mtk_optee_call_with_arg(uint64_t addr)
         }
         break;
     case MTK_OPTEE_MSG_INVOKE_COMMAND:
-        if (ldl_le_p(msg + 8) == MTK_OPTEE_SESSION_ENUM &&
+        for (unsigned i = 0; i < num_params; i++) {
+            uint8_t *p = msg + MTK_OPTEE_MSG_ARG_SIZE + i * MTK_OPTEE_MSG_PARAM_SIZE;
+            trace_arm_mtk_optee_invoke(ldl_le_p(msg + 8), ldl_le_p(msg + 4),
+                                      ldq_le_p(p), ldq_le_p(p + 8),
+                                      ldq_le_p(p + 16), ldq_le_p(p + 24));
+        }
+        if (ldl_le_p(msg + 8) == MTK_OPTEE_SESSION_ROLLBACK &&
+            ldl_le_p(msg + 4) == 0 && num_params == 3) {
+            /* Six rollback versions, packed as three value-input pairs. */
+            bool valid = true;
+            for (unsigned i = 0; i < 3; i++) {
+                uint8_t *p = msg + MTK_OPTEE_MSG_ARG_SIZE + i * 32;
+                valid &= ldq_le_p(p) == MTK_OPTEE_ATTR_VALUE_INPUT;
+                valid &= ldq_le_p(p + 8) >= cpu->mtk_rollback_versions[i * 2];
+                valid &= ldq_le_p(p + 16) >= cpu->mtk_rollback_versions[i * 2 + 1];
+            }
+            if (valid) {
+                for (unsigned i = 0; i < 3; i++) {
+                    uint8_t *p = msg + MTK_OPTEE_MSG_ARG_SIZE + i * 32;
+                    cpu->mtk_rollback_versions[i * 2] = ldq_le_p(p + 8);
+                    cpu->mtk_rollback_versions[i * 2 + 1] = ldq_le_p(p + 16);
+                }
+            } else {
+                stl_le_p(msg + 20, MTK_TEEC_ERROR_BAD_PARAMETERS);
+            }
+        } else if (ldl_le_p(msg + 8) == MTK_OPTEE_SESSION_ENUM &&
             ldl_le_p(msg + 4) <= 1) {
             if (num_params) {
                 stq_le_p(msg + MTK_OPTEE_MSG_ARG_SIZE + 16, 0);
@@ -552,7 +593,7 @@ static bool arm_handle_mtk_optee(ARMCPU *cpu, uint64_t param[4])
         return true;
     case MTK_OPTEE_CALL_WITH_ARG:
         mtk_optee_set_results(env,
-                              mtk_optee_call_with_arg(param[1] << 32 |
+                              mtk_optee_call_with_arg(cpu, param[1] << 32 |
                                                       param[2]),
                               0, 0, 0);
         return true;
@@ -687,6 +728,11 @@ void arm_handle_psci_call(ARMCPU *cpu)
             return;
         }
         ret = QEMU_PSCI_RET_NOT_SUPPORTED;
+        break;
+    case 0xc2000514: /* MediaTek IOMMU service, local packed command ABI. */
+        ret = cpu->mtk_iommu_config ?
+              cpu->mtk_iommu_config(param[1], param[2]) :
+              QEMU_PSCI_RET_NOT_SUPPORTED;
         break;
     case MTK_SIP_VCOREFS_CONTROL:
         if (cpu->mtk_sip_vcorefs) {
