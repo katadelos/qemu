@@ -183,3 +183,6 @@ system_ss.add(when: 'CONFIG_BD72720', if_true: files('bd72720.c'))
 system_ss.add(when: 'CONFIG_MT8115_PA6_CS8', if_true: files('mt8171-m4u.c', 'mt8171-mcupm.c'))
 
 system_ss.add(when: 'CONFIG_MT8115_PA6_CS8', if_true: files('mt8171-gce.c'))
+system_ss.add(when: 'CONFIG_MT8115_PA6_CS8', if_true: files('mt8171-consys.c'))
+system_ss.add(when: 'CONFIG_MT8115_PA6_CS8', if_true: files('mt8171-wlan.c'))
+system_ss.add(when: 'CONFIG_MT8115_PA6_CS8', if_true: files('mt8171-btif.c', 'mt8171-btif-protocol.c'))
