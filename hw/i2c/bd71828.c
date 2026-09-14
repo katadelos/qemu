@@ -3,12 +3,17 @@
 #include "qemu/osdep.h"
 #include "hw/i2c/bd71828.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "qemu/bcd.h"
 #include "qemu/module.h"
 #include "system/rtc.h"
+#include "system/runstate.h"
 
 #define BD71828_REG_BOOTSRC          0x02
+#define BD71828_REG_PS_CTRL1         0x04
+#define BD71828_SHIP_MODE            BIT(0)
+#define BD71828_HIBERNATE            BIT(1)
 #define BD71828_REG_GPIO_CTRL1       0x47
 #define BD71828_REG_GPIO_CTRL3       0x49
 #define BD71828_REG_RTC_SEC          0x4c
@@ -36,6 +41,13 @@
 #define BD71828_REG_CC_CNT3          0xb5
 #define BD71828_REG_CC_FULL3         0xbd
 #define BD71828_REG_COULOMB_CTRL2    0xd2
+#define BD71828_REG_INT_MASK        0xd3
+#define BD71828_REG_INT_MAIN        0xdf
+#define BD71828_REG_INT_STATUS      0xe0
+#define BD71828_REG_INT_DCIN2       0xe2
+#define BD71828_REG_IO_STAT         0xed
+#define BD71828_SHORTPUSH           BIT(4)
+#define BD71828_PUSH                BIT(5)
 
 #define BD71828_RTC_24H              BIT(7)
 #define BD71828_BAT_DET              BIT(5)
@@ -51,7 +63,57 @@ struct BD71828State {
     uint8_t len;
     int64_t rtc_offset;
     qemu_irq gpio_out[3];
+    qemu_irq nirq;
+    bool power_button_support;
+    bool power_button;
+    uint64_t power_presses;
+    uint64_t power_releases;
+    uint64_t power_short_acks;
 };
+
+static void bd71828_update_irq(BD71828State *s)
+{
+    static const uint8_t main_bit[12] = { 7, 6, 6, 5, 4, 3, 2, 2, 2, 2, 1, 0 };
+    uint8_t pending = 0;
+
+    if (!s->power_button_support) {
+        return;
+    }
+    /* rohm-bd71828.c uses mask_invert: one enables an interrupt. */
+    for (unsigned i = 0; i < 12; i++) {
+        if (s->regs[BD71828_REG_INT_STATUS + i] &
+            s->regs[BD71828_REG_INT_MASK + i]) {
+            pending |= BIT(main_bit[i]);
+        }
+    }
+    s->regs[BD71828_REG_INT_MAIN] = pending;
+    qemu_set_irq(s->nirq, !pending);
+}
+
+static bool bd71828_get_power_button(Object *obj, Error **errp)
+{
+    return BD71828(obj)->power_button;
+}
+
+static void bd71828_set_power_button(Object *obj, bool value, Error **errp)
+{
+    BD71828State *s = BD71828(obj);
+
+    if (!s->power_button_support || value == s->power_button) {
+        return;
+    }
+    s->power_button = value;
+    if (value) {
+        s->power_presses++;
+        s->regs[BD71828_REG_INT_DCIN2] |= BD71828_PUSH;
+    } else {
+        /* This host input represents a short button gesture. Long-press
+         * emergency power removal is not synthesized by this interface. */
+        s->power_releases++;
+        s->regs[BD71828_REG_INT_DCIN2] |= BD71828_SHORTPUSH;
+    }
+    bd71828_update_irq(s);
+}
 
 static void bd71828_update_gpio(BD71828State *s, unsigned gpio)
 {
@@ -113,7 +175,26 @@ static int bd71828_send(I2CSlave *i2c, uint8_t data)
         s->pointer = data;
         return 0;
     }
-    s->regs[s->pointer] = data;
+    if (s->power_button_support && s->pointer >= BD71828_REG_INT_STATUS &&
+        s->pointer < BD71828_REG_INT_STATUS + 12) {
+        if (s->pointer == BD71828_REG_INT_DCIN2 &&
+            (s->regs[s->pointer] & data & BD71828_SHORTPUSH)) {
+            s->power_short_acks++;
+        }
+        s->regs[s->pointer] &= ~data;
+    } else if (!s->power_button_support ||
+               s->pointer != BD71828_REG_INT_MAIN) {
+        s->regs[s->pointer] = data;
+    }
+    bd71828_update_irq(s);
+    /* The stock MFD power-off callback selects HBNT (2) or SHPM (1).
+     * Both remove the running SoC supply; RESERVED2 is only a reason latch.
+     * Enable this rail-control behavior only on the fitted Scribe PMIC. */
+    if (s->power_button_support && s->pointer == BD71828_REG_PS_CTRL1 &&
+        ((data & 3) == BD71828_SHIP_MODE ||
+         (data & 3) == BD71828_HIBERNATE)) {
+        qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
+    }
     if (s->pointer == BD71828_REG_COULOMB_CTRL2 &&
         (data & BD71828_FULL_CC_CLR)) {
         memset(&s->regs[BD71828_REG_CC_FULL3], 0, sizeof(uint32_t));
@@ -159,6 +240,13 @@ static void bd71828_reset(DeviceState *dev)
     s->pointer = 0;
     s->len = 0;
     s->rtc_offset = 0;
+    s->power_button = false;
+    s->power_presses = 0;
+    s->power_releases = 0;
+    s->power_short_acks = 0;
+    if (s->power_button_support) {
+        s->regs[BD71828_REG_IO_STAT] = 1; /* Hall sensor: cover open. */
+    }
 
     s->regs[BD71828_REG_BOOTSRC] = 1;
     s->regs[BD71828_REG_BAT_STAT] =
@@ -183,6 +271,7 @@ static void bd71828_reset(DeviceState *dev)
     for (unsigned gpio = 0; gpio < ARRAY_SIZE(s->gpio_out); gpio++) {
         bd71828_update_gpio(s, gpio);
     }
+    bd71828_update_irq(s);
 }
 
 static void bd71828_init(Object *obj)
@@ -191,11 +280,20 @@ static void bd71828_init(Object *obj)
 
     qdev_init_gpio_out_named(DEVICE(obj), s->gpio_out, "gpio",
                              ARRAY_SIZE(s->gpio_out));
+    qdev_init_gpio_out_named(DEVICE(obj), &s->nirq, "irq", 1);
+    object_property_add_bool(obj, "power-button", bd71828_get_power_button,
+                              bd71828_set_power_button);
+    object_property_add_uint64_ptr(obj, "power-presses", &s->power_presses,
+                                    OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "power-releases", &s->power_releases,
+                                    OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "power-short-acks", &s->power_short_acks,
+                                    OBJ_PROP_FLAG_READ);
 }
 
 static const VMStateDescription bd71828_vmstate = {
     .name = TYPE_BD71828,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_I2C_SLAVE(parent_obj, BD71828State),
@@ -203,8 +301,17 @@ static const VMStateDescription bd71828_vmstate = {
         VMSTATE_UINT8(pointer, BD71828State),
         VMSTATE_UINT8(len, BD71828State),
         VMSTATE_INT64(rtc_offset, BD71828State),
+        VMSTATE_BOOL_V(power_button, BD71828State, 2),
+        VMSTATE_UINT64_V(power_presses, BD71828State, 2),
+        VMSTATE_UINT64_V(power_releases, BD71828State, 2),
+        VMSTATE_UINT64_V(power_short_acks, BD71828State, 2),
         VMSTATE_END_OF_LIST()
     },
+};
+
+static const Property bd71828_properties[] = {
+    DEFINE_PROP_BOOL("power-button-support", BD71828State,
+                     power_button_support, false),
 };
 
 static void bd71828_class_init(ObjectClass *oc, const void *data)
@@ -214,6 +321,7 @@ static void bd71828_class_init(ObjectClass *oc, const void *data)
 
     device_class_set_legacy_reset(dc, bd71828_reset);
     dc->vmsd = &bd71828_vmstate;
+    device_class_set_props(dc, bd71828_properties);
     sc->send = bd71828_send;
     sc->recv = bd71828_recv;
     sc->event = bd71828_event;
