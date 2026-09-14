@@ -33,6 +33,11 @@ i2c_ss.add(when: 'CONFIG_MT8113_BELLATRIX4', if_true: files(
 ))
 i2c_ss.add(when: 'CONFIG_MT8110_BELLATRIX', if_true: files(
   'goodix_gtx8.c',
+  'fp9966.c',
+  'bq25611d.c',
+  'kx132.c',
+  'wacom_emr.c',
+  'ti-opt-sensors.c',
 ))
 i2c_ss.add(when: 'CONFIG_MPC_I2C', if_true: files('mpc_i2c.c'))
 i2c_ss.add(when: 'CONFIG_ALLWINNER_I2C', if_true: files('allwinner-i2c.c'))
