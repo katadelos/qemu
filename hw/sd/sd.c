@@ -169,6 +169,9 @@ struct SDState {
     uint8_t boot_config;
     bool boot_parts_in_memory;
     bool discard_writes;
+    bool emmc_trim;
+    uint64_t trim_commands;
+    uint64_t trim_bytes;
     uint64_t reported_capacity;
     uint8_t *boot_parts;
     uint32_t boot_parts_size;
@@ -1776,6 +1779,15 @@ static void emmc_set_ext_csd(SDState *sd, uint64_t size)
     sd->ext_csd[EXT_CSD_REV] = 5;
     sd->ext_csd[EXT_CSD_RPMB_MULT] = sd->rpmb_part_size / (128 * KiB);
     sd->ext_csd[EXT_CSD_PARTITION_SUPPORT] = 0b111;
+    if (sd->emmc_trim) {
+        /* MMC 4.41 normal TRIM, not secure erase/trim or sanitize. The stock
+         * Bellatrix3 SBIOS derives its discard_en from this precise bit.
+         * Keep REV=5: advertising 4.5's DISCARD would require more features.
+         */
+        sd->ext_csd[EXT_CSD_SEC_FEATURE_SUPPORT] = 1 << 4;
+        sd->ext_csd[EXT_CSD_TRIM_MULT] = 1;
+        sd->ext_csd[EXT_CSD_ERASED_MEM_CONT] = 0; /* erased bytes read as zero */
+    }
 
     /* Mode segment (RW) */
     sd->ext_csd[EXT_CSD_PART_CONFIG] = sd->boot_config;
@@ -3495,6 +3507,71 @@ static sd_rsp_type_t sd_cmd_ERASE(SDState *sd, SDRequest req)
     return sd_r1b;
 }
 
+/* MMC CMD38. Opt-in normal TRIM uses actual backing-store zeroing, including
+ * an inclusive sector end. The legacy card profile keeps its old behavior.
+ * Secure erase/trim, sanitize and MMC4.5 DISCARD are not advertised or ACKed.
+ */
+static sd_rsp_type_t emmc_cmd_ERASE(SDState *sd, SDRequest req)
+{
+    uint64_t start, end, length;
+    int ret;
+
+    if (!sd->emmc_trim) {
+        return sd_cmd_ERASE(sd, req);
+    }
+    if (sd->state != sd_transfer_state) {
+        return sd_invalid_state_for_cmd(sd, req);
+    }
+    if (req.arg != 0 && req.arg != 1) {
+        return sd_illegal;
+    }
+    /* Boot/RPMB data is outside this normal user-area TRIM implementation. */
+    if (sd->ext_csd[EXT_CSD_PART_CONFIG] & EXT_CSD_PART_CONFIG_ACC_MASK) {
+        return sd_illegal;
+    }
+    if (sd->csd[14] & 0x30) {
+        sd->card_status |= WP_VIOLATION;
+        return sd_r1b;
+    }
+    if (sd->erase_start == INVALID_ADDRESS || sd->erase_end == INVALID_ADDRESS) {
+        sd->card_status |= ERASE_SEQ_ERROR;
+        return sd_r1b;
+    }
+    start = sd->erase_start;
+    end = sd->erase_end;
+    sd->erase_start = sd->erase_end = INVALID_ADDRESS;
+    if (FIELD_EX32(sd->ocr, OCR, CARD_CAPACITY)) {
+        start <<= HWBLOCK_SHIFT;
+        end <<= HWBLOCK_SHIFT;
+    }
+    if (start > end || !QEMU_IS_ALIGNED(start, 512) ||
+        !QEMU_IS_ALIGNED(end, 512) || sd->size < 512 || end > sd->size - 512) {
+        sd->card_status |= OUT_OF_RANGE;
+        return sd_r1b;
+    }
+    length = end - start + 512;
+    sd->state = sd_programming_state;
+    /* MAY_UNMAP permits sparse storage while guaranteeing zero on readback.
+     * Unlike a successful no-op, this destroys the requested user data.
+     */
+    ret = sd->discard_writes ? 0 : sd->blk ?
+        blk_pwrite_zeroes(sd->blk, sd_part_offset(sd) + start, length,
+                         BDRV_REQ_MAY_UNMAP) : -ENOMEDIUM;
+    if (ret < 0) {
+        sd->card_status |= R_CSR_CC_ERROR_MASK;
+        qemu_log_mask(LOG_GUEST_ERROR, "eMMC: CMD38 backing erase failed: %s\n",
+                      strerror(-ret));
+    } else {
+        sd->csd[14] |= 0x40;
+        if (req.arg == 1) {
+            sd->trim_commands++;
+            sd->trim_bytes += length;
+        }
+    }
+    sd->state = sd_transfer_state;
+    return sd_r1b;
+}
+
 /* CMD42 */
 static sd_rsp_type_t sd_cmd_LOCK_UNLOCK(SDState *sd, SDRequest req)
 {
@@ -4645,7 +4722,7 @@ static const SDProto sd_proto_emmc = {
         [31] = {6,  sd_adtc, "SEND_WRITE_PROT_TYPE", sd_cmd_unimplemented},
         [35] = {5,  sd_ac,   "ERASE_WR_BLK_START", sd_cmd_ERASE_WR_BLK_START},
         [36] = {5,  sd_ac,   "ERASE_WR_BLK_END", sd_cmd_ERASE_WR_BLK_END},
-        [38] = {5,  sd_ac,   "ERASE", sd_cmd_ERASE},
+        [38] = {5,  sd_ac,   "ERASE", emmc_cmd_ERASE},
         [39] = {9,  sd_ac,   "FAST_IO", sd_cmd_unimplemented},
         [40] = {9,  sd_bcr,  "GO_IRQ_STATE", sd_cmd_unimplemented},
         [42] = {7,  sd_adtc, "LOCK_UNLOCK", sd_cmd_LOCK_UNLOCK},
@@ -4663,6 +4740,12 @@ static void sd_instance_init(Object *obj)
     sd->proto = sc->proto;
     sd->last_cmd_name = "UNSET";
     sd->ocr_power_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, sd_ocr_powerup, sd);
+    if (sd_is_emmc(sd)) {
+        object_property_add_uint64_ptr(obj, "trim-commands", &sd->trim_commands,
+                                       OBJ_PROP_FLAG_READ);
+        object_property_add_uint64_ptr(obj, "trim-bytes", &sd->trim_bytes,
+                                       OBJ_PROP_FLAG_READ);
+    }
 }
 
 static void sd_instance_finalize(Object *obj)
@@ -4877,6 +4960,7 @@ static const Property sd_properties[] = {
 };
 
 static const Property emmc_properties[] = {
+    DEFINE_PROP_BOOL("trim", SDState, emmc_trim, false),
     DEFINE_PROP_UINT64("boot-partition-size", SDState, boot_part_size, 0),
     DEFINE_PROP_BOOL("boot-partitions-in-memory", SDState,
                      boot_parts_in_memory, false),
