@@ -658,6 +658,9 @@ void arm_handle_psci_call(ARMCPU *cpu)
     trace_arm_psci_call(param[0], param[1], param[2], param[3],
                         arm_cpu_mp_affinity(cpu));
 
+    /* SMCCC function identifiers are in W0, including for AArch64 callers. */
+    param[0] = (uint32_t)param[0];
+
     if ((param[0] & QEMU_PSCI_0_2_64BIT) && !is_a64(env)) {
         ret = QEMU_PSCI_RET_NOT_SUPPORTED;
         goto err;
