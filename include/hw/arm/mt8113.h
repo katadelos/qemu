@@ -113,6 +113,7 @@ typedef struct MT8113USBState {
     QEMUTimer *tx_timer;
     qemu_irq irq;
     uint8_t ep0_fifo[64];
+    qemu_irq vbus;
     unsigned ep0_fifo_length;
     unsigned ep0_fifo_offset;
     unsigned config_phase;

@@ -1981,6 +1981,7 @@ static void mt8113_usb_link_changed(NetClientState *nc)
 {
     MT8113USBState *usb = qemu_get_nic_opaque(nc);
 
+    qemu_set_irq(usb->vbus, !nc->link_down);
     mt8113_usb_disconnect(usb);
     if (nc->link_down) {
         /* MTU3 enables RESET, not DISCONN, in high-speed device mode.
@@ -2566,6 +2567,8 @@ static void mt8113_usb_reset(MT8113USBState *usb)
     usb->configured = false;
     usb->processing_tx = false;
     qemu_set_irq(usb->irq, 0);
+    qemu_set_irq(usb->vbus, usb->nic &&
+                 !qemu_get_queue(usb->nic)->link_down);
 }
 
 static void mt8113_usb_system_reset(void *opaque)
@@ -2997,6 +3000,7 @@ static void mt8113_init(Object *obj)
 {
     MT8113State *s = MT8113(obj);
 
+    qdev_init_gpio_out_named(DEVICE(obj), &s->usb.vbus, "usb-vbus", 1);
     for (int cpu = 0; cpu < MT8113_NUM_CPUS; cpu++) {
         g_autofree char *name = g_strdup_printf("cpu%d", cpu);
 
