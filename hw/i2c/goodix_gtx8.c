@@ -2,6 +2,8 @@
 
 #include "qemu/osdep.h"
 #include "hw/i2c/goodix_gtx8.h"
+#include "hw/core/qdev-properties.h"
+#include "qapi/error.h"
 #include "hw/core/irq.h"
 #include "migration/vmstate.h"
 #include "qemu/module.h"
@@ -22,8 +24,6 @@
 #define GTX8_VERSION_LENGTH      0x48
 #define GTX8_TOUCH_DATA_SIZE     12
 #define GTX8_TOUCH_QUEUE_SIZE    16
-#define GTX8_MAX_X               1072
-#define GTX8_MAX_Y               1448
 
 #define GTX8_DOZE_DISABLE        0xaa
 #define GTX8_DOZE_DISABLED       0xbb
@@ -36,6 +36,8 @@
 
 struct GoodixGTX8State {
     I2CSlave parent_obj;
+    uint32_t width;
+    uint32_t height;
     uint8_t regs[UINT16_MAX + 1];
     uint16_t pointer;
     uint8_t pointer_bytes;
@@ -187,9 +189,9 @@ static void gtx8_input_sync(DeviceState *dev)
     uint16_t x, y;
 
     x = qemu_input_scale_axis(s->input_x, INPUT_EVENT_ABS_MIN,
-                              INPUT_EVENT_ABS_MAX, 0, GTX8_MAX_X);
+                              INPUT_EVENT_ABS_MAX, 0, s->width);
     y = qemu_input_scale_axis(s->input_y, INPUT_EVENT_ABS_MIN,
-                              INPUT_EVENT_ABS_MAX, 0, GTX8_MAX_Y);
+                              INPUT_EVENT_ABS_MAX, 0, s->height);
     if (s->input_pressed == s->report_pressed &&
         (!s->input_pressed || (x == s->report_x && y == s->report_y))) {
         return;
@@ -362,6 +364,12 @@ static void gtx8_realize(DeviceState *dev, Error **errp)
 {
     GoodixGTX8State *s = GOODIX_GTX8(dev);
 
+    if (!s->width || !s->height || s->width > UINT16_MAX ||
+        s->height > UINT16_MAX) {
+        error_setg(errp, "GTX8 dimensions must fit nonzero 16-bit coordinates");
+        return;
+    }
+
     s->irq_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
                                 gtx8_deliver_touch_report, s);
     s->input_handler = qemu_input_handler_register(dev,
@@ -385,6 +393,11 @@ static void gtx8_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(obj), &s->irq, "irq", 1);
 }
 
+static const Property gtx8_properties[] = {
+    DEFINE_PROP_UINT32("width", GoodixGTX8State, width, 1072),
+    DEFINE_PROP_UINT32("height", GoodixGTX8State, height, 1448),
+};
+
 static void gtx8_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
@@ -394,6 +407,7 @@ static void gtx8_class_init(ObjectClass *oc, const void *data)
     dc->realize = gtx8_realize;
     dc->unrealize = gtx8_unrealize;
     dc->vmsd = &gtx8_vmstate;
+    device_class_set_props(dc, gtx8_properties);
     sc->send = gtx8_send;
     sc->recv = gtx8_recv;
     sc->event = gtx8_event;
