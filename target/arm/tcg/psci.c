@@ -746,8 +746,11 @@ void arm_handle_psci_call(ARMCPU *cpu)
          * by the same exception level on the calling CPU.
          * The CPU should be started with the context_id value
          * in x0 (if AArch64) or r0 (if AArch32).
+         * Boards emulating a firmware handoff below the highest implemented
+         * EL can explicitly configure the firmware's NS entry level.
          */
-        int target_el = arm_feature(env, ARM_FEATURE_EL2) ? 2 : 1;
+        int target_el = cpu->psci_target_el ?:
+                        (arm_feature(env, ARM_FEATURE_EL2) ? 2 : 1);
         bool target_aarch64 = arm_el_is_aa64(env, target_el);
 
         mpidr = param[1];
@@ -769,7 +772,8 @@ void arm_handle_psci_call(ARMCPU *cpu)
         }
         if (param[1] & QEMU_PSCI_0_2_POWER_STATE_TYPE_MASK) {
             CPUState *cs = CPU(cpu);
-            int target_el = arm_feature(env, ARM_FEATURE_EL2) ? 2 : 1;
+            int target_el = cpu->psci_target_el ?:
+                            (arm_feature(env, ARM_FEATURE_EL2) ? 2 : 1);
 
             cpu->psci_powerdown_entry = param[2];
             cpu->psci_powerdown_context_id = param[3];

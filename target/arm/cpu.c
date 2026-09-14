@@ -1245,6 +1245,9 @@ static const Property arm_cpu_reset_hivecs_property =
 static const Property arm_cpu_has_el2_property =
             DEFINE_PROP_BOOL("has_el2", ARMCPU, has_el2, true);
 
+static const Property arm_cpu_psci_target_el_property =
+            DEFINE_PROP_UINT8("psci-target-el", ARMCPU, psci_target_el, 0);
+
 static const Property arm_cpu_has_el3_property =
             DEFINE_PROP_BOOL("has_el3", ARMCPU, has_el3, true);
 #endif
@@ -1584,6 +1587,7 @@ static void arm_cpu_post_init(Object *obj)
     object_property_add_uint32_ptr(obj, "psci-conduit",
                                    &cpu->psci_conduit,
                                    OBJ_PROP_FLAG_READWRITE);
+    qdev_property_add_static(DEVICE(obj), &arm_cpu_psci_target_el_property);
     object_property_add_uint32_ptr(obj, "mtk-sip-vcorefs",
                                    &cpu->mtk_sip_vcorefs,
                                    OBJ_PROP_FLAG_READWRITE);
@@ -2045,6 +2049,12 @@ static void arm_cpu_realizefn(DeviceState *dev, Error **errp)
 
     if (!cpu->has_el2) {
         unset_feature(env, ARM_FEATURE_EL2);
+    }
+
+    if (cpu->psci_target_el > 2 ||
+        (cpu->psci_target_el == 2 && !arm_feature(env, ARM_FEATURE_EL2))) {
+        error_setg(errp, "psci-target-el must be 0, 1, or an implemented EL2");
+        return;
     }
 
     if (!cpu->has_pmu) {

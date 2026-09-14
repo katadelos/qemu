@@ -996,6 +996,9 @@ struct ArchCPU {
      */
     uint32_t psci_version;
 
+    /* Firmware's NS entry EL for CPU_ON/SUSPEND; zero selects highest EL. */
+    uint8_t psci_target_el;
+
     /* Current power state, access guarded by BQL */
     ARMPSCIState power_state;
 
