@@ -94,8 +94,6 @@
 #define HWTCON_LUT_COMPLETE_NS   (10 * SCALE_MS)
 #define HWTCON_SCANOUT_DEBOUNCE_MS 50
 #define HWTCON_BOOT_HANDOFF_MS      60000
-#define HWTCON_PANEL_WIDTH       1272
-#define HWTCON_PANEL_HEIGHT      1696
 #define MT8113_IOMMU_PAGE_SIZE   0x1000
 #define MT8113_IOMMU_IOVA_LIMIT  0x10000000
 
@@ -830,6 +828,34 @@ static bool mt8113_hwtcon_use_rotated_fb_plane(MT8113HWTCONState *s,
     return true;
 }
 
+/* WROT starts at BASE + OFST_ADDR; rotation makes subsequent writes walk
+ * backwards from that first pixel.  Return the top-left of the output tile. */
+static bool mt8113_hwtcon_wrot_top(uint32_t base, uint32_t offset,
+                                 uint32_t width, uint32_t height,
+                                 uint32_t pitch, uint32_t rotation,
+                                 uint64_t *top)
+{
+    uint64_t start = (uint64_t)base + offset;
+    uint64_t bias = 0;
+
+    switch (rotation) {
+    case 1:
+        bias = height - 1;
+        break;
+    case 2:
+        bias = (uint64_t)(height - 1) * pitch + width - 1;
+        break;
+    case 3:
+        bias = (uint64_t)(width - 1) * pitch;
+        break;
+    }
+    if (start > UINT32_MAX || start < bias) {
+        return false;
+    }
+    *top = start - bias;
+    return true;
+}
+
 static bool mt8113_hwtcon_mdp_writeback(MT8113HWTCONState *s,
                                          MT8113HWTCONBank *bank)
 {
@@ -873,26 +899,9 @@ static bool mt8113_hwtcon_mdp_writeback(MT8113HWTCONState *s,
         return false;
     }
 
-    switch (rotation) {
-    case 0:
-        destination_top += destination_offset;
-        break;
-    case 1:
-        if (destination_offset != height - 1) {
-            return false;
-        }
-        break;
-    case 2:
-        destination_top -= (uint64_t)(height - 1) * destination_pitch +
-                           width - 1;
-        break;
-    case 3:
-        destination_top -= (uint64_t)(width - 1) * destination_pitch;
-        break;
-    default:
-        break;
-    }
-    if (destination_top > UINT32_MAX) {
+    if (!mt8113_hwtcon_wrot_top(destination, destination_offset, width,
+                                 height, destination_pitch, rotation,
+                                 &destination_top)) {
         return false;
     }
 
@@ -975,25 +984,9 @@ static bool mt8113_hwtcon_select_image_buffer(MT8113HWTCONState *s,
         return false;
     }
 
-    switch (rotation) {
-    case 0:
-        destination_top += destination_offset;
-        break;
-    case 2:
-        if (destination_top <
-            (uint64_t)(height - 1) * pitch + width - 1) {
-            return false;
-        }
-        destination_top -= (uint64_t)(height - 1) * pitch + width - 1;
-        break;
-    case 3:
-        if (destination_top < (uint64_t)(width - 1) * pitch) {
-            return false;
-        }
-        destination_top -= (uint64_t)(width - 1) * pitch;
-        break;
-    default:
-        break;
+    if (!mt8113_hwtcon_wrot_top(destination, destination_offset, width,
+                                 height, pitch, rotation, &destination_top)) {
+        return false;
     }
     destination_end = destination_top +
         (uint64_t)(output_height - 1) * pitch + output_width;
@@ -1244,6 +1237,16 @@ static void mt8113_hwtcon_write(void *opaque, hwaddr offset, uint64_t value,
             s->last_update_height = (extent >> 16) & 0x3fff;
             s->last_pipeline_flags = pipeline_flag;
             s->last_pipeline_lut = lut;
+            /* The first MDP batch can precede the panel/image descriptor.
+             * Resolve that descriptor when PAPER accepts the completed image,
+             * before capturing the frame for the waveform commit. */
+            if (!s->image_scanout_active && s->mdp_writebacks) {
+                uint32_t panel =
+                    *mt8113_hwtcon_reg(s, PAPER_TCTOP_PANEL_SIZE);
+
+                mt8113_hwtcon_select_image_buffer(
+                    s, &s->bank[1], panel & 0x3fff, (panel >> 16) & 0x3fff);
+            }
             *void_lut = pipeline_flag & PAPER_TCTOP_PIPELINE_CLEAR ?
                 BIT(1) : 0;
             if (s->image_scanout_active &&
@@ -1492,11 +1495,16 @@ static void mt8113_hwtcon_realize(DeviceState *dev, Error **errp)
         error_setg(errp, "HWTCON requires an MT8113 IOMMU link");
         return;
     }
+    if (!s->initial_width || !s->initial_height ||
+        s->initial_width > 4096 || s->initial_height > 4096) {
+        error_setg(errp, "HWTCON initial dimensions must be between 1 and 4096");
+        return;
+    }
     s->console = graphic_console_init(dev, 0, &mt8113_hwtcon_gfx_ops, s);
-    surface = mt8113_hwtcon_prepare_surface(s, HWTCON_PANEL_WIDTH,
-                                            HWTCON_PANEL_HEIGHT);
+    surface = mt8113_hwtcon_prepare_surface(s, s->initial_width,
+                                            s->initial_height);
     memset(surface_data(surface), 0xff,
-           (size_t)surface_stride(surface) * HWTCON_PANEL_HEIGHT);
+           (size_t)surface_stride(surface) * s->initial_height);
     dpy_gfx_update_full(s->console);
     s->refresh_timer = timer_new_ms(QEMU_CLOCK_REALTIME,
                                     mt8113_hwtcon_refresh_scanout, s);
@@ -1518,6 +1526,8 @@ static void mt8113_hwtcon_unrealize(DeviceState *dev)
 }
 
 static const Property mt8113_hwtcon_properties[] = {
+    DEFINE_PROP_UINT32("initial-width", MT8113HWTCONState, initial_width, 1272),
+    DEFINE_PROP_UINT32("initial-height", MT8113HWTCONState, initial_height, 1696),
     DEFINE_PROP_LINK("iommu", MT8113HWTCONState, iommu,
                      TYPE_MT8113_IOMMU, MT8113IOMMUState *),
     DEFINE_PROP_BOOL("scanout-image-buffer", MT8113HWTCONState,

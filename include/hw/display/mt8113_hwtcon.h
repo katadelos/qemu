@@ -40,6 +40,8 @@ typedef struct MT8113HWTCONBank {
 
 struct MT8113HWTCONState {
     SysBusDevice parent_obj;
+    uint32_t initial_width;
+    uint32_t initial_height;
     MT8113HWTCONBank bank[MT8113_HWTCON_MMIO_BANKS];
     MemoryRegion cfa_mailbox;
     uint32_t cfa_mailbox_regs[MT8113_HWTCON_CFA_MAILBOX_SIZE /
