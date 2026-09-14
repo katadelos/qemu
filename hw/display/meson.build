@@ -145,3 +145,9 @@ endif
 system_ss.add(when: 'CONFIG_OMAP', if_true: files('omap_lcdc.c'))
 
 modules += { 'hw-display': hw_display_modules }
+
+system_ss.add(when: 'CONFIG_MT8115_PA6_CS8', if_true: files('mt8171-mdp.c'))
+
+system_ss.add(when: 'CONFIG_MT8115_PA6_CS8', if_true: files('mt8171-hwtcon.c'))
+
+system_ss.add(when: 'CONFIG_MT8115_PA6_CS8', if_true: files('mt8171-panel.c'))
