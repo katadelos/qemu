@@ -9,6 +9,7 @@
 #include "hw/usb/mtu3.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
 #include "qapi/error.h"
 #include "qemu/bswap.h"
 #include "qemu/module.h"
@@ -87,6 +88,7 @@ static void mtu3_reset_state(MTU3State *s)
         mtu3_endpoint_reset(s, true, n);
     }
     mtu3_update_irq(s);
+    mtu3_ecm_reset(s);
 }
 
 static void mtu3_qmu_pointer(MTU3State *s, bool in, unsigned n, hwaddr addr)
@@ -117,7 +119,7 @@ static bool mtu3_qmu_complete(MTU3State *s, bool in, unsigned n,
     uint32_t flags = ldl_le_p(gpd), info = ldl_le_p(gpd + 12);
     bool extended = R(s, 0x428) & BIT(n + (in ? 0 : 16));
     uint32_t ext = in ? flags : info;
-    hwaddr next = ldl_le_p(gpd + 4) |
+    hwaddr next = (uint32_t)ldl_le_p(gpd + 4) |
         (uint64_t)((ext >> (extended ? 28 : 20)) & 15) << 32;
 
     if (!in) {
@@ -210,7 +212,7 @@ static int mtu3_qmu_packet(MTU3State *s, bool in, unsigned n, uint8_t *data,
     flags = ldl_le_p(gpd);
     info = ldl_le_p(gpd + 12);
     ext = in ? flags : info;
-    buffer = ldl_le_p(gpd + 8) |
+    buffer = (uint32_t)ldl_le_p(gpd + 8) |
              (uint64_t)((ext >> (extended ? 24 : 16)) & 15) << 32;
     limit = in ? info & (extended ? 0xfffff : 0xffff) :
                  flags >> (extended ? 12 : 16);
@@ -252,7 +254,7 @@ static int mtu3_qmu_packet(MTU3State *s, bool in, unsigned n, uint8_t *data,
     return amount;
 }
 
-static bool mtu3_connected(MTU3State *s)
+bool mtu3_connected(MTU3State *s)
 {
     bool vbus = (R(s, 0xc84) & 1) ? R(s, 0xc84) & 2 : s->vbus;
 
@@ -285,6 +287,14 @@ int mtu3_out_packet(MTU3State *s, unsigned n, const uint8_t *data,
     if (length > MIN(MTU3_FIFO_SIZE, csr & (n ? 0x7ff : 0x3ff))) {
         return -EIO;
     }
+    /* The device MAC consumes the OUT status ZLP after a control read. */
+    if (!n && !setup && !length && (csr & BIT(20))) {
+        if (!(csr & BIT(19))) {
+            return -EAGAIN;
+        }
+        R(s, 0x100) &= ~(BIT(19) | BIT(20));
+        return 0;
+    }
     if (!setup && (csr & BIT(16))) {
         return -EAGAIN;
     }
@@ -292,13 +302,13 @@ int mtu3_out_packet(MTU3State *s, unsigned n, const uint8_t *data,
         if (csr & (BIT(16) | BIT(18) | BIT(19))) {
             R(s, 0x80) |= BIT(16); /* Previous control transfer aborted. */
         }
-        R(s, 0x100) &= ~(BIT(25) | BIT(22) | BIT(20) | BIT(19) | BIT(18));
+        R(s, 0x100) &= ~(BIT(25) | BIT(22) | BIT(20) | BIT(19) | BIT(18) | BIT(16));
         s->ep[true][0].length = s->ep[true][0].position = 0;
     }
     memcpy(ep->fifo, data, length);
     ep->length = length;
     ep->position = 0;
-    R(s, EP_CSR(false, n)) |= BIT(16) | (setup ? BIT(17) : 0);
+    R(s, EP_CSR(false, n)) |= setup ? BIT(17) : BIT(16);
     if (!n) {
         R(s, 0x108) = length;
     }
@@ -399,7 +409,7 @@ static uint64_t mtu3_read(void *opaque, hwaddr offset, unsigned size)
     }
 }
 
-static void mtu3_write(void *opaque, hwaddr offset, uint64_t value, unsigned size)
+static void mtu3_register_write(void *opaque, hwaddr offset, uint64_t value, unsigned size)
 {
     MTU3State *s = opaque;
 
@@ -511,6 +521,12 @@ static void mtu3_write(void *opaque, hwaddr offset, uint64_t value, unsigned siz
     mtu3_update_irq(s);
 }
 
+static void mtu3_write(void *opaque, hwaddr offset, uint64_t value, unsigned size)
+{
+    mtu3_register_write(opaque, offset, value, size);
+    mtu3_ecm_kick(opaque);
+}
+
 static void mtu3_reset_input(void *opaque, int n, int level)
 {
     MTU3State *s = opaque;
@@ -533,6 +549,7 @@ static void mtu3_vbus_input(void *opaque, int n, int level)
             R(s, 0x241c) |= BIT(5);
         }
         mtu3_update_irq(s);
+        mtu3_ecm_kick(s);
     }
 }
 
@@ -554,6 +571,7 @@ static void mtu3_power_input(void *opaque, int n, int level)
         }
     }
     mtu3_update_irq(s);
+    mtu3_ecm_kick(s);
 }
 
 static bool mtu3_accepts(void *opaque, hwaddr offset, unsigned size,
@@ -587,7 +605,14 @@ static void mtu3_realize(DeviceState *dev, Error **errp)
     if (!s->endpoints || s->endpoints >= MTU3_ENDPOINTS ||
         !s->fifo_bytes || s->fifo_bytes > 64 * 1024) {
         error_setg(errp, "mtu3: invalid endpoint count or FIFO capacity");
+        return;
     }
+    mtu3_ecm_realize(s);
+}
+
+static void mtu3_unrealize(DeviceState *dev)
+{
+    mtu3_ecm_unrealize(MTU3(dev));
 }
 
 static void mtu3_init(Object *obj)
@@ -603,6 +628,7 @@ static void mtu3_init(Object *obj)
 }
 
 static const Property mtu3_properties[] = {
+    DEFINE_NIC_PROPERTIES(MTU3State, nic_conf),
     DEFINE_PROP_UINT32("endpoints", MTU3State, endpoints, 15),
     DEFINE_PROP_UINT32("fifo-bytes", MTU3State, fifo_bytes, 32 * 1024),
 };
@@ -612,6 +638,7 @@ static void mtu3_class_init(ObjectClass *klass, const void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     dc->desc = "MediaTek USB device MAC and QMU";
     dc->realize = mtu3_realize;
+    dc->unrealize = mtu3_unrealize;
     device_class_set_legacy_reset(dc, mtu3_reset);
     device_class_set_props(dc, mtu3_properties);
 }

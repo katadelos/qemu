@@ -13,7 +13,7 @@ system_ss.add(when: 'CONFIG_USB', if_true: files(
 stub_ss.add(files('bus-stub.c'))
 
 # MediaTek device controller
-system_ss.add(when: 'CONFIG_USB_MTU3', if_true: files('mtu3.c'))
+system_ss.add(when: 'CONFIG_USB_MTU3', if_true: files('mtu3.c', 'mtu3-ecm.c'))
 
 # usb host adapters
 system_ss.add(when: 'CONFIG_USB_UHCI', if_true: files('hcd-uhci.c'))

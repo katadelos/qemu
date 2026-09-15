@@ -3,6 +3,7 @@
 #define HW_USB_MTU3_H
 
 #include "hw/core/sysbus.h"
+#include "net/net.h"
 
 #define TYPE_MTU3 "mtu3"
 OBJECT_DECLARE_SIMPLE_TYPE(MTU3State, MTU3)
@@ -17,6 +18,8 @@ typedef struct MTU3Endpoint {
     bool active;
 } MTU3Endpoint;
 
+typedef struct MTU3EcmHost MTU3EcmHost;
+
 struct MTU3State {
     SysBusDevice parent_obj;
     MemoryRegion iomem;
@@ -25,16 +28,23 @@ struct MTU3State {
     MTU3Endpoint ep[2][MTU3_ENDPOINTS]; /* OUT, IN */
     uint32_t endpoints, fifo_bytes;
     bool vbus, reset, powered;
+    NICConf nic_conf;
+    MTU3EcmHost *host;
 };
 
 /* USB wire interface. Queues complete only when a host supplies tokens.
  * Return a byte count, -EAGAIN (NAK), -EPIPE (STALL), -EIO (DMA/protocol
  * error), or -ENOSPC (host buffer too small).
- * No host transport is attached by the board at present.
+ * The optional CDC ECM host attaches when a netdev is configured.
  */
 int mtu3_out_packet(MTU3State *s, unsigned ep, const uint8_t *data,
                     size_t length, bool setup);
 int mtu3_in_packet(MTU3State *s, unsigned ep, uint8_t *data, size_t capacity);
 void mtu3_bus_reset(MTU3State *s);
+bool mtu3_connected(MTU3State *s);
+void mtu3_ecm_realize(MTU3State *s);
+void mtu3_ecm_unrealize(MTU3State *s);
+void mtu3_ecm_reset(MTU3State *s);
+void mtu3_ecm_kick(MTU3State *s);
 
 #endif
