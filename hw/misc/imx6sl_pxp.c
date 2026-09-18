@@ -252,6 +252,9 @@ static bool pxp_do_dma(IMX6SLPXPState *s)
     uint32_t ctrl = *pxp_reg(s, PXP_CTRL);
     unsigned out_w = ((out_lrc >> 16) & 0x3fff) + 1;
     unsigned out_h = (out_lrc & 0x3fff) + 1;
+    unsigned rotation = (ctrl & CTRL_ROTATE_MASK) >> 8;
+    unsigned dst_w = (rotation & 1) ? out_h : out_w;
+    unsigned dst_h = (rotation & 1) ? out_w : out_h;
     unsigned left = (ps_ulc >> 16) & 0x3fff;
     unsigned top = ps_ulc & 0x3fff;
     unsigned right = (ps_lrc >> 16) & 0x3fff;
@@ -284,7 +287,7 @@ static bool pxp_do_dma(IMX6SLPXPState *s)
 
     src_size = (size_t)src_pitch *
                (((uint64_t)(bottom - top + 1) * yscale >> 12) + 2);
-    dst_size = (size_t)dst_pitch * out_h;
+    dst_size = (size_t)dst_pitch * dst_h;
     if (src_size > PXP_MAX_DMA_BYTES || dst_size > PXP_MAX_DMA_BYTES) {
         return false;
     }
@@ -315,13 +318,13 @@ static bool pxp_do_dma(IMX6SLPXPState *s)
 
             if (ctrl & CTRL_HFLIP) { sx = right - left - sx; }
             if (ctrl & CTRL_VFLIP) { sy = bottom - top - sy; }
-            switch ((ctrl & CTRL_ROTATE_MASK) >> 8) {
-            case 1: tx = out_w - 1 - y; ty = x; break;
+            switch (rotation) {
+            case 1: tx = out_h - 1 - y; ty = x; break;
             case 2: tx = out_w - 1 - x; ty = out_h - 1 - y; break;
-            case 3: tx = y; ty = out_h - 1 - x; break;
+            case 3: tx = y; ty = out_w - 1 - x; break;
             default: break;
             }
-            if (tx >= out_w || ty >= out_h ||
+            if (tx >= dst_w || ty >= dst_h ||
                 (size_t)sy * src_pitch >= src_size) {
                 continue;
             }
@@ -329,7 +332,8 @@ static bool pxp_do_dma(IMX6SLPXPState *s)
                  (src_bpp ? sx * src_bpp : sx / 2);
             dp = dst + (size_t)ty * dst_pitch +
                  (dst_bpp ? tx * dst_bpp : tx / 2);
-            if (sp >= src + src_size || dp >= dst + dst_size) {
+            if (sp + MAX(src_bpp, 1) > src + src_size ||
+                dp + MAX(dst_bpp, 1) > dst + dst_size) {
                 continue;
             }
             lum = pxp_luma(sp, src_fmt, sx);
