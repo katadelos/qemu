@@ -20,6 +20,9 @@ struct IMX6SLPXPState {
     uint8_t lut[256];
     uint16_t lut_addr;
     bool running;
+    uint32_t last_source_addr;
+    uint32_t last_source_pitch;
+    uint8_t last_source_bpp;
 };
 
 typedef struct IMX6SLPXPFetch {

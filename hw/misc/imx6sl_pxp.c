@@ -352,6 +352,10 @@ static bool pxp_do_dma(IMX6SLPXPState *s)
     }
     *pxp_reg(s, PXP_HIST_CTRL) =
         (*pxp_reg(s, PXP_HIST_CTRL) & ~0xfU) | 0xf;
+    /* Preserve scanout format across the driver's per-job register resets. */
+    s->last_source_addr = *pxp_reg(s, PXP_PS_BUF);
+    s->last_source_pitch = src_pitch;
+    s->last_source_bpp = src_bpp;
     return true;
 }
 
@@ -507,19 +511,25 @@ static void imx6sl_pxp_reset(DeviceState *dev)
     s->regs[PXP_VERSION >> 2] = 0x02000000;
     s->lut_addr = 0;
     s->running = false;
+    s->last_source_addr = 0;
+    s->last_source_pitch = 0;
+    s->last_source_bpp = 0;
     qemu_set_irq(s->irq, 0);
 }
 
 static const VMStateDescription vmstate_imx6sl_pxp = {
     .name = TYPE_IMX6SL_PXP,
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IMX6SLPXPState,
                              IMX6SL_PXP_SIZE / sizeof(uint32_t)),
         VMSTATE_UINT8_ARRAY(lut, IMX6SLPXPState, 256),
         VMSTATE_UINT16(lut_addr, IMX6SLPXPState),
         VMSTATE_BOOL(running, IMX6SLPXPState),
+        VMSTATE_UINT32(last_source_addr, IMX6SLPXPState),
+        VMSTATE_UINT32(last_source_pitch, IMX6SLPXPState),
+        VMSTATE_UINT8(last_source_bpp, IMX6SLPXPState),
         VMSTATE_TIMER(completion_timer, IMX6SLPXPState),
         VMSTATE_END_OF_LIST()
     },

@@ -101,7 +101,7 @@ static DisplaySurface *imx_epdc_prepare_surface(IMXEPDCState *s,
 static bool imx_epdc_has_framebuffer(IMXEPDCState *s)
 {
     return s->fb_addr && s->fb_width && s->fb_height &&
-           (s->fb_bpp == 1 || s->fb_bpp == 2) &&
+           (s->fb_bpp == 1 || s->fb_bpp == 2 || s->fb_bpp == 4) &&
            s->fb_width <= EPDC_MAX_PANEL_DIMENSION &&
            s->fb_height <= EPDC_MAX_PANEL_DIMENSION &&
            s->fb_stride >= s->fb_width &&
@@ -120,12 +120,27 @@ static void imx_epdc_render_framebuffer(IMXEPDCState *s)
     size_t buffer_size;
     MemTxResult result;
     unsigned x, y;
+    unsigned bpp = s->fb_bpp;
 
     if (!s->console || !imx_epdc_has_framebuffer(s)) {
         return;
     }
 
-    buffer_size = (size_t)s->fb_stride * s->fb_height * s->fb_bpp;
+    /* Forma switches from RGB565 during boot to XRGB8888 in Nickel. */
+    if (s->fb_follow_pxp && s->pxp) {
+        IMX6SLPXPState *pxp = s->pxp;
+        uint64_t end = s->fb_addr +
+                       (uint64_t)pxp->last_source_pitch * s->fb_height;
+
+        if ((pxp->last_source_bpp == 1 || pxp->last_source_bpp == 2 ||
+             pxp->last_source_bpp == 4) &&
+            pxp->last_source_addr >= s->fb_addr &&
+            pxp->last_source_addr < end &&
+            pxp->last_source_pitch == s->fb_stride * pxp->last_source_bpp) {
+            bpp = pxp->last_source_bpp;
+        }
+    }
+    buffer_size = (size_t)s->fb_stride * s->fb_height * bpp;
     s->fb_buffer = g_realloc(s->fb_buffer, buffer_size);
     result = dma_memory_read(&address_space_memory, s->fb_addr,
                              s->fb_buffer, buffer_size,
@@ -142,10 +157,13 @@ static void imx_epdc_render_framebuffer(IMXEPDCState *s)
         pixels = (uint32_t *)((uint8_t *)surface_data(surface) +
                               (size_t)y * surface_stride(surface));
         for (x = 0; x < s->fb_width; x++) {
-            size_t offset = ((size_t)y * s->fb_stride + x) * s->fb_bpp;
+            size_t offset = ((size_t)y * s->fb_stride + x) * bpp;
             uint8_t gray;
 
-            if (s->fb_bpp == 2) {
+            if (bpp == 4) {
+                const uint8_t *rgb = s->fb_buffer + offset;
+                gray = (77 * rgb[2] + 150 * rgb[1] + 29 * rgb[0]) >> 8;
+            } else if (bpp == 2) {
                 uint16_t rgb565 = lduw_le_p(s->fb_buffer + offset);
                 unsigned red = ((rgb565 >> 11) & 0x1f) * 255 / 31;
                 unsigned green = ((rgb565 >> 5) & 0x3f) * 255 / 63;
@@ -578,6 +596,7 @@ static const Property imx_epdc_properties[] = {
     DEFINE_PROP_UINT32("fb-height", IMXEPDCState, fb_height, 0),
     DEFINE_PROP_UINT32("fb-stride", IMXEPDCState, fb_stride, 0),
     DEFINE_PROP_UINT8("fb-bpp", IMXEPDCState, fb_bpp, 1),
+    DEFINE_PROP_BOOL("fb-follow-pxp", IMXEPDCState, fb_follow_pxp, false),
 };
 
 static void imx_epdc_init(Object *obj)
