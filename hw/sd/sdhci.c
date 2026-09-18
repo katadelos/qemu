@@ -364,6 +364,17 @@ static void sdhci_send_command(SDHCIState *s)
                  (request.cmd == 19 || request.cmd == 21) &&
                  (s->cmdreg & SDHC_CMD_DATA_PRESENT);
 
+    if (object_dynamic_cast(OBJECT(s), TYPE_IMX_USDHC) &&
+        (s->mix_ctrl & BIT(7)) &&
+        (request.cmd == 18 || request.cmd == 25)) {
+        /*
+         * USDHC MIX_CTRL.AC23EN uses DS_ADDR as the CMD23 argument.
+         * The card must receive it before an ADMA bounded transfer.
+         */
+        SDRequest count = { .cmd = 23, .arg = s->sdmasysad };
+        sdbus_do_command(&s->sdbus, &count, response, sizeof(response));
+    }
+
     trace_sdhci_send_command(request.cmd, request.arg);
     rlen = sdbus_do_command(&s->sdbus, &request, response, sizeof(response));
 
@@ -757,7 +768,8 @@ static void sdhci_sdma_transfer_multi_blocks(SDHCIState *s)
         }
     }
 
-    if (s->norintstsen & SDHC_NISEN_DMA) {
+    if ((s->norintstsen & SDHC_NISEN_DMA) ||
+        object_dynamic_cast(OBJECT(s), TYPE_IMX_USDHC)) {
         s->norintsts |= SDHC_NIS_DMA;
     }
 
@@ -784,7 +796,8 @@ static void sdhci_sdma_transfer_single_block(SDHCIState *s)
     }
     s->blkcnt--;
 
-    if (s->norintstsen & SDHC_NISEN_DMA) {
+    if ((s->norintstsen & SDHC_NISEN_DMA) ||
+        object_dynamic_cast(OBJECT(s), TYPE_IMX_USDHC)) {
         s->norintsts |= SDHC_NIS_DMA;
     }
 
@@ -1976,8 +1989,8 @@ esdhc_write(void *opaque, hwaddr offset, uint64_t val, unsigned size)
          * into a write to ESDHC_MIX_CTRL, so we do the opposite in
          * order to get where we started
          *
-         * Note that Auto CMD23 Enable bit is located in a wrong place
-         * on i.MX, but since it is not used by QEMU we do not care.
+         * Auto CMD23 Enable is bit 7 on i.MX. It is handled directly
+         * from mix_ctrl when dispatching a multi-block command.
          *
          * We don't want to call sdhci_write(.., SDHC_TRNMOD, ...)
          * here because it will result in a call to
