@@ -224,6 +224,14 @@ config IMX6SLL_REX
     select SD
     select SSI_M25P80
 
+config IMX6SLL_FORMA
+    bool
+    default y
+    depends on TCG && ARM
+    select FSL_IMX6
+    select IMX6SL_WARIO
+    select SD
+
 config MT8115_PA6_CS8
     bool
     select BD72720
