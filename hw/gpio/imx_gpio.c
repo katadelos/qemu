@@ -160,7 +160,8 @@ static uint64_t imx_gpio_read(void *opaque, hwaddr offset, unsigned size)
         break;
 
     case PSR_ADDR:
-        reg_value = s->psr & ~s->gdir;
+        /* Driven output pins are also visible through the pad status register. */
+        reg_value = (s->dr & s->gdir) | (s->psr & ~s->gdir);
         break;
 
     case ICR1_ADDR:
