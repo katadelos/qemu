@@ -311,6 +311,24 @@ static const GraphicHwOps imx_epdc_gfx_ops = {
     .gfx_update = imx_epdc_update_display,
 };
 
+static void imx_epdc_complete_luts(void *opaque)
+{
+    IMXEPDCState *s = opaque;
+
+    /* The working buffer is released before the panel waveform finishes.
+     * Keep those completions separate even if the guest handles WB slowly. */
+    if (*epdc_reg(s, EPDC_IRQ) & EPDC_IRQ_WB_CMPLT) {
+        timer_mod(s->lut_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1);
+        return;
+    }
+    *epdc_reg(s, EPDC_STATUS_LUTS) &= ~(uint32_t)s->pending_luts;
+    *epdc_reg(s, EPDC_STATUS_LUTS2) &= ~(uint32_t)(s->pending_luts >> 32);
+    *epdc_reg(s, EPDC_IRQ1) |= s->pending_luts;
+    *epdc_reg(s, EPDC_IRQ2) |= s->pending_luts >> 32;
+    s->pending_luts = 0;
+    imx_epdc_update_irq(s);
+}
+
 static void imx_epdc_complete(void *opaque)
 {
     IMXEPDCState *s = opaque;
@@ -348,12 +366,9 @@ static void imx_epdc_complete(void *opaque)
     }
 
     *epdc_reg(s, EPDC_STATUS) &= ~EPDC_STATUS_WB_BUSY;
-    if (lut < 32) {
-        *epdc_reg(s, EPDC_STATUS_LUTS) &= ~(1U << lut);
-        *epdc_reg(s, EPDC_IRQ1) |= 1U << lut;
-    } else {
-        *epdc_reg(s, EPDC_STATUS_LUTS2) &= ~(1U << (lut - 32));
-        *epdc_reg(s, EPDC_IRQ2) |= 1U << (lut - 32);
+    s->pending_luts |= 1ULL << lut;
+    if (!timer_pending(s->lut_timer)) {
+        timer_mod(s->lut_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 100);
     }
     *epdc_reg(s, EPDC_IRQ) |= EPDC_IRQ_WB_CMPLT;
     qemu_log_mask(LOG_UNIMP,
@@ -506,17 +521,21 @@ static void imx_epdc_reset(DeviceState *dev)
     *epdc_reg(s, EPDC_CTRL) = EPDC_CTRL_CLKGATE;
     *epdc_reg(s, EPDC_VERSION) = EPDC_VERSION_2_1_0;
     s->update_pending = false;
+    s->pending_luts = 0;
+    timer_del(s->lut_timer);
     qemu_set_irq(s->irq, 0);
 }
 
 static const VMStateDescription vmstate_imx_epdc = {
     .name = TYPE_IMX_EPDC,
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IMXEPDCState,
                              IMX_EPDC_MMIO_SIZE / sizeof(uint32_t)),
         VMSTATE_BOOL(update_pending, IMXEPDCState),
+        VMSTATE_UINT64(pending_luts, IMXEPDCState),
+        VMSTATE_TIMER_PTR(lut_timer, IMXEPDCState),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -531,6 +550,7 @@ static void imx_epdc_realize(DeviceState *dev, Error **errp)
         return;
     }
     s->complete_bh = qemu_bh_new(imx_epdc_complete, s);
+    s->lut_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, imx_epdc_complete_luts, s);
     s->console = graphic_console_init(dev, 0, &imx_epdc_gfx_ops, s);
     s->refresh_timer = timer_new_ms(QEMU_CLOCK_REALTIME,
                                     imx_epdc_refresh_scanout, s);
@@ -545,6 +565,7 @@ static void imx_epdc_unrealize(DeviceState *dev)
 
     qemu_bh_delete(s->complete_bh);
     timer_free(s->refresh_timer);
+    timer_free(s->lut_timer);
     g_free(s->fb_buffer);
     s->fb_buffer = NULL;
 }

@@ -25,6 +25,8 @@ struct IMXEPDCState {
     qemu_irq irq;
     QEMUBH *complete_bh;
     QEMUTimer *refresh_timer;
+    QEMUTimer *lut_timer;
+    uint64_t pending_luts;
     QemuConsole *console;
     IMX6SLPXPState *pxp;
     uint8_t *fb_buffer;
