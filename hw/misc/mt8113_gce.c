@@ -320,7 +320,13 @@ static void mt8113_gce_execute(MT8113GCEState *s, unsigned thread)
             uint32_t value = mt8113_gce_operand(s, arg_b, arg_c,
                                                  arg_b_reg);
 
-            if (op == GCE_CODE_WRITE_S_MASK) {
+            /* Legacy CMDQ WRITE encodes masking in address bit zero.
+             * Kobo's userspace MDP service still emits these packets. */
+            bool legacy_mask = op == GCE_CODE_WRITE && (addr & 1);
+            if (legacy_mask) {
+                addr &= ~(hwaddr)1;
+            }
+            if (op == GCE_CODE_WRITE_S_MASK || legacy_mask) {
                 uint32_t old = mt8113_gce_load32(addr);
 
                 value = (old & mask) | (value & ~mask);
