@@ -23,6 +23,7 @@ arm_common_ss.add(when: 'CONFIG_IMX6SL_EANAB', if_true: files('imx60_heisenberg.
 arm_common_ss.add(when: 'CONFIG_IMX6SLL_REX', if_true: files('imx6sll-rex.c'))
 arm_common_ss.add(when: 'CONFIG_IMX6SLL_FORMA', if_true: files('imx6sll-kobo-forma.c'))
 arm_common_ss.add(when: 'CONFIG_MT8113', if_true: files('mt8113.c'))
+arm_common_ss.add(when: 'CONFIG_MT8113_ELIPSA2E', if_true: files('mt8113-kobo-elipsa2e.c'))
 arm_common_ss.add(when: 'CONFIG_MT8115_PA6_CS8', if_true: files('mt8115-pa6-cs8.c', 'mt8115-board.c', 'mt8115-preload.c'))
 arm_common_ss.add(when: 'CONFIG_MT8110_BELLATRIX', if_true: files('mt8110-bellatrix.c'))
 arm_common_ss.add(when: 'CONFIG_MT8113_BELLATRIX4', if_true: files('mt8113-bellatrix4.c'))
