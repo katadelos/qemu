@@ -67,6 +67,7 @@ struct MT8113HWTCONState {
     uint32_t fb_pitch;
     uint32_t fb_format;
     uint32_t fb_rotation;
+    bool fb_flip_x;
     uint32_t last_update_x;
     uint32_t last_update_y;
     uint32_t last_update_width;

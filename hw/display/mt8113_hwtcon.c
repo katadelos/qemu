@@ -64,7 +64,9 @@
 #define MDP_RDMA_SRC_OFFSET      0x7118
 #define MDP_RDMA_SRC_BASE        0x7f00
 #define MDP_RDMA_FORMAT_MASK     0xf
+#define MDP_RDMA_FORMAT_RGB565   0x0
 #define MDP_RDMA_FORMAT_RGBA8888 0x2
+#define MDP_RDMA_FORMAT_ARGB8888 0x3
 #define MDP_RDMA_FORMAT_Y8       0x7
 #define MDP_MUTEX0_EN            0x1020
 #define MDP_MUTEX6_EN            0x10e0
@@ -79,11 +81,14 @@
 #define MDP_WROT_INPUT_SIZE      0xa078
 #define MDP_WROT_ROT_EN          0xa07c
 #define MDP_WROT_Y_MODE          0xa088
+#define MDP_WROT_CROP_OFFSET     0xa020
 #define MDP_WROT_BASE            0xaf00
 #define MDP_WROT_ROTATION_SHIFT  20
 #define MDP_WROT_ROTATION_MASK   0x3
+#define MDP_WROT_FLIP_X          BIT(24)
 #define MDP_WROT_Y8              0
 #define MDP_WROT_Y4_M0           1
+#define MDP_WROT_Y1_M1           5
 #define MDP_MAX_DMA_BYTES        (64 * MiB)
 
 /* The MM display bank also contains the MT8512 SMI common block. */
@@ -486,6 +491,9 @@ static void mt8113_hwtcon_render_framebuffer(MT8113HWTCONState *s)
                 source_y = y;
                 break;
             }
+            if (s->fb_flip_x) {
+                source_x = s->fb_source_width - 1 - source_x;
+            }
             source = s->fb_buffer + (size_t)source_y * s->fb_pitch +
                      (size_t)source_x * bytes_per_pixel;
             if (bytes_per_pixel == 4) {
@@ -667,6 +675,7 @@ static void mt8113_hwtcon_capture_cfa_source(MT8113HWTCONState *s)
     s->fb_pitch = pitch;
     s->fb_format = MDP_RDMA_FORMAT_RGBA8888;
     s->fb_rotation = rotation;
+    s->fb_flip_x = false;
     s->cfa_fault_va = 0;
     s->cfa_fault_cpu = 0;
     s->fb_buffer_ready = false;
@@ -825,6 +834,7 @@ static bool mt8113_hwtcon_use_rotated_fb_plane(MT8113HWTCONState *s,
     s->fb_pitch = pitch;
     s->fb_format = MDP_RDMA_FORMAT_Y8;
     s->fb_rotation = 0;
+    s->fb_flip_x = false;
     return true;
 }
 
@@ -833,22 +843,30 @@ static bool mt8113_hwtcon_use_rotated_fb_plane(MT8113HWTCONState *s,
 static bool mt8113_hwtcon_wrot_top(uint32_t base, uint32_t offset,
                                  uint32_t width, uint32_t height,
                                  uint32_t pitch, uint32_t rotation,
+                                 bool flip_x,
                                  uint64_t *top)
 {
     uint64_t start = (uint64_t)base + offset;
-    uint64_t bias = 0;
+    uint64_t bias;
+    uint32_t first_x = 0, first_y = 0;
+    uint32_t output_width = rotation & 1 ? height : width;
 
     switch (rotation) {
     case 1:
-        bias = height - 1;
+        first_x = height - 1;
         break;
     case 2:
-        bias = (uint64_t)(height - 1) * pitch + width - 1;
+        first_x = width - 1;
+        first_y = height - 1;
         break;
     case 3:
-        bias = (uint64_t)(width - 1) * pitch;
+        first_y = width - 1;
         break;
     }
+    if (flip_x) {
+        first_x = output_width - 1 - first_x;
+    }
+    bias = (uint64_t)first_y * pitch + first_x;
     if (start > UINT32_MAX || start < bias) {
         return false;
     }
@@ -860,22 +878,32 @@ static bool mt8113_hwtcon_mdp_writeback(MT8113HWTCONState *s,
                                          MT8113HWTCONBank *bank)
 {
     uint32_t source_size = bank->regs[MDP_RDMA_SRC_SIZE / 4];
-    uint32_t width = source_size & 0x3fff;
-    uint32_t height = (source_size >> 16) & 0x3fff;
+    uint32_t source_width = source_size & 0x3fff;
+    uint32_t source_height = (source_size >> 16) & 0x3fff;
     uint32_t source_pitch = bank->regs[MDP_RDMA_SRC_PITCH / 4] & 0x1fffff;
     uint32_t source = bank->regs[MDP_RDMA_SRC_BASE / 4];
     uint32_t source_offset = bank->regs[MDP_RDMA_SRC_OFFSET / 4];
     uint32_t source_format = bank->regs[MDP_RDMA_SRC_CON / 4] &
                              MDP_RDMA_FORMAT_MASK;
     uint32_t source_y4 = bank->regs[MDP_RDMA_Y4_MODE_CFG / 4] & 0xf;
+    unsigned source_bpp = source_format == MDP_RDMA_FORMAT_Y8 ? 1 :
+        source_format == MDP_RDMA_FORMAT_RGB565 ? 2 : 4;
     uint32_t target_size = bank->regs[MDP_WROT_TARGET_SIZE / 4];
     uint32_t input_size = bank->regs[MDP_WROT_INPUT_SIZE / 4];
+    uint32_t width = target_size & 0x3fff;
+    uint32_t height = (target_size >> 16) & 0x3fff;
+    uint32_t input_width = input_size & 0x3fff;
+    uint32_t input_height = (input_size >> 16) & 0x3fff;
+    uint32_t crop = bank->regs[MDP_WROT_CROP_OFFSET / 4];
+    uint32_t crop_x = crop & 0x3fff;
+    uint32_t crop_y = (crop >> 16) & 0x3fff;
     uint32_t destination = bank->regs[MDP_WROT_BASE / 4];
     uint32_t destination_pitch = bank->regs[MDP_WROT_STRIDE / 4] & 0x3fff;
     uint32_t destination_mode = bank->regs[MDP_WROT_Y_MODE / 4] & 0xf;
     uint32_t rotation =
         (bank->regs[MDP_WROT_CTRL / 4] >> MDP_WROT_ROTATION_SHIFT) &
         MDP_WROT_ROTATION_MASK;
+    bool flip_x = bank->regs[MDP_WROT_CTRL / 4] & MDP_WROT_FLIP_X;
     uint32_t destination_offset =
         bank->regs[MDP_WROT_OFFSET_ADDR / 4] & 0x0fffffff;
     uint32_t output_width = rotation & 1 ? height : width;
@@ -887,25 +915,30 @@ static bool mt8113_hwtcon_mdp_writeback(MT8113HWTCONState *s,
     g_autofree uint8_t *source_pixels = NULL;
     g_autofree uint8_t *output_pixels = NULL;
 
-    if (!width || !height || width > 4096 || height > 4096 ||
-        source_format != MDP_RDMA_FORMAT_Y8 || source_y4 != 0 ||
-        source_pitch < width || destination_pitch < output_width ||
+    if (!width || !height || source_width > 4096 || source_height > 4096 ||
+        (source_format != MDP_RDMA_FORMAT_Y8 &&
+         source_format != MDP_RDMA_FORMAT_RGB565 &&
+         source_format != MDP_RDMA_FORMAT_RGBA8888 &&
+         source_format != MDP_RDMA_FORMAT_ARGB8888) || source_y4 != 0 ||
+        source_pitch < source_width * source_bpp ||
+        destination_pitch < output_width ||
         (destination_mode != MDP_WROT_Y8 &&
-         destination_mode != MDP_WROT_Y4_M0) ||
-        (target_size & 0x3fff) != width ||
-        ((target_size >> 16) & 0x3fff) != height ||
-        (input_size & 0x3fff) != width ||
-        ((input_size >> 16) & 0x3fff) != height) {
+         destination_mode != MDP_WROT_Y4_M0 &&
+         destination_mode != MDP_WROT_Y1_M1) ||
+        crop_x + width > input_width || crop_y + height > input_height ||
+        input_width > source_width || input_height > source_height) {
         return false;
     }
 
     if (!mt8113_hwtcon_wrot_top(destination, destination_offset, width,
-                                 height, destination_pitch, rotation,
+                                 height, destination_pitch, rotation, flip_x,
                                  &destination_top)) {
         return false;
     }
 
-    source_bytes = (uint64_t)(height - 1) * source_pitch + width;
+    /* RDMA may fetch an aligned row wider than WROT's visible tile. */
+    source_bytes = (uint64_t)(source_height - 1) * source_pitch +
+                   source_width * source_bpp;
     output_bytes = (uint64_t)(output_height - 1) * destination_pitch +
                    output_width;
     if (source_bytes > MDP_MAX_DMA_BYTES ||
@@ -929,28 +962,52 @@ static bool mt8113_hwtcon_mdp_writeback(MT8113HWTCONState *s,
             uint32_t source_y;
             uint8_t pixel;
 
+            uint32_t rotated_x = flip_x ? output_width - 1 - x : x;
             switch (rotation) {
             case 1:
                 source_x = y;
-                source_y = height - 1 - x;
+                source_y = height - 1 - rotated_x;
                 break;
             case 2:
-                source_x = width - 1 - x;
+                source_x = width - 1 - rotated_x;
                 source_y = height - 1 - y;
                 break;
             case 3:
                 source_x = width - 1 - y;
-                source_y = x;
+                source_y = rotated_x;
                 break;
             default:
-                source_x = x;
+                source_x = rotated_x;
                 source_y = y;
                 break;
             }
-            pixel = source_pixels[(size_t)source_y * source_pitch +
-                                  source_x];
-            output_pixels[(size_t)y * destination_pitch + x] =
-                destination_mode == MDP_WROT_Y4_M0 ? pixel & 0xf0 : pixel;
+            const uint8_t *src = source_pixels +
+                (size_t)(source_y + crop_y) * source_pitch +
+                (source_x + crop_x) * source_bpp;
+            if (source_bpp == 1) {
+                pixel = *src;
+            } else {
+                unsigned r, g, b;
+                if (source_bpp == 2) {
+                    uint16_t rgb = lduw_le_p(src);
+                    r = ((rgb >> 11) & 31) * 255 / 31;
+                    g = ((rgb >> 5) & 63) * 255 / 63;
+                    b = (rgb & 31) * 255 / 31;
+                } else {
+                    unsigned offset = source_format == MDP_RDMA_FORMAT_ARGB8888;
+                    r = src[offset];
+                    g = src[offset + 1];
+                    b = src[offset + 2];
+                }
+                pixel = (77 * r + 150 * g + 29 * b + 128) >> 8;
+            }
+            if (destination_mode == MDP_WROT_Y4_M0) {
+                pixel &= 0xf0;
+            } else if (destination_mode == MDP_WROT_Y1_M1) {
+                /* One luminance bit repeated across the upper nibble. */
+                pixel = pixel >= 128 ? 0xf0 : 0;
+            }
+            output_pixels[(size_t)y * destination_pitch + x] = pixel;
         }
     }
     return mt8113_iommu_dma_write(s->iommu, destination_top, output_pixels,
@@ -963,7 +1020,7 @@ static bool mt8113_hwtcon_select_image_buffer(MT8113HWTCONState *s,
                                                uint32_t panel_height)
 {
     uint32_t image = *mt8113_hwtcon_reg(s, PAPER_TCTOP_IMG_ST_ADDR);
-    uint32_t size = bank->regs[MDP_RDMA_SRC_SIZE / 4];
+    uint32_t size = bank->regs[MDP_WROT_TARGET_SIZE / 4];
     uint32_t width = size & 0x3fff;
     uint32_t height = (size >> 16) & 0x3fff;
     uint32_t pitch = bank->regs[MDP_WROT_STRIDE / 4] & 0x3fff;
@@ -971,6 +1028,7 @@ static bool mt8113_hwtcon_select_image_buffer(MT8113HWTCONState *s,
     uint32_t rotation =
         (bank->regs[MDP_WROT_CTRL / 4] >> MDP_WROT_ROTATION_SHIFT) &
         MDP_WROT_ROTATION_MASK;
+    bool flip_x = bank->regs[MDP_WROT_CTRL / 4] & MDP_WROT_FLIP_X;
     uint32_t destination_offset =
         bank->regs[MDP_WROT_OFFSET_ADDR / 4] & 0x0fffffff;
     uint32_t output_width = rotation & 1 ? height : width;
@@ -985,7 +1043,8 @@ static bool mt8113_hwtcon_select_image_buffer(MT8113HWTCONState *s,
     }
 
     if (!mt8113_hwtcon_wrot_top(destination, destination_offset, width,
-                                 height, pitch, rotation, &destination_top)) {
+                                 height, pitch, rotation, flip_x,
+                                 &destination_top)) {
         return false;
     }
     destination_end = destination_top +
@@ -1012,6 +1071,7 @@ static bool mt8113_hwtcon_select_image_buffer(MT8113HWTCONState *s,
         s->fb_pitch = pitch;
         s->fb_format = MDP_RDMA_FORMAT_Y8;
         s->fb_rotation = (-rotation) & MDP_WROT_ROTATION_MASK;
+        s->fb_flip_x = flip_x;
         s->cfa_active = false;
         s->image_scanout_active = true;
     }
@@ -1047,7 +1107,10 @@ static void mt8113_hwtcon_mdp_transaction(MT8113HWTCONState *s,
     bool source_scanout;
     bool queued = false;
 
-    if (format != MDP_RDMA_FORMAT_Y8) {
+    if (format != MDP_RDMA_FORMAT_Y8 &&
+        format != MDP_RDMA_FORMAT_RGB565 &&
+        format != MDP_RDMA_FORMAT_RGBA8888 &&
+        format != MDP_RDMA_FORMAT_ARGB8888) {
         s->mdp_writeback_skips++;
     } else if (mt8113_hwtcon_mdp_writeback(s, bank)) {
         s->mdp_writebacks++;
@@ -1086,6 +1149,7 @@ static void mt8113_hwtcon_mdp_transaction(MT8113HWTCONState *s,
         s->fb_pitch = pitch;
         s->fb_format = format;
         s->fb_rotation = 0;
+        s->fb_flip_x = false;
         s->cfa_active = false;
     } else if (source_scanout && format == MDP_RDMA_FORMAT_Y8 &&
                width && height &&
@@ -1313,6 +1377,7 @@ static void mt8113_hwtcon_reset(DeviceState *dev)
     s->fb_pitch = 0;
     s->fb_format = 0;
     s->fb_rotation = 0;
+    s->fb_flip_x = false;
     s->last_update_x = 0;
     s->last_update_y = 0;
     s->last_update_width = 0;
