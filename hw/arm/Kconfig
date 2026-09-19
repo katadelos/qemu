@@ -848,3 +848,18 @@ config IMX7D_ZELDA
     select MAX77796
     select BMA2X2
     select CYTTSP5
+
+config IMX7D_STINGER
+    bool
+    default y
+    depends on TCG && ARM
+    select FSL_IMX7
+    select IMX7_DDRC
+    select IMX_EPDC
+    select MAX77796
+    select LM3697
+    select BMA2X2
+    select CYTTSP5
+    select BCM4343W_SDIO
+    select SD
+    select SSI_M25P80
