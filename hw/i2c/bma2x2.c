@@ -1,9 +1,10 @@
 /*
- * Bosch BMA222E stationary accelerometer for Kindle Oasis 2.
+ * Bosch BMA222E/BMA253 stationary accelerometer for Kindle Oasis.
  *
  * Models the register interface and a face-up, motionless device. There is
  * no motion source or FIFO producer; orientation stays fixed and motion
- * interrupts remain inactive. Acceleration is signed 8-bit, range-scaled.
+ * interrupts remain inactive. Samples are range-scaled and left-aligned in
+ * the register pair for both the 8-bit BMA222E and 12-bit BMA253.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -11,6 +12,7 @@
 #include "qemu/osdep.h"
 #include "hw/i2c/bma2x2.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
@@ -27,6 +29,7 @@ struct BMA2X2State {
     uint8_t regs[0x40];
     uint8_t pointer;
     uint8_t new_data;
+    uint8_t chip_id;
     bool expect_pointer;
     int64_t sample_time_ns;
     qemu_irq irq;
@@ -53,6 +56,7 @@ static void bma2x2_register_reset(BMA2X2State *s)
     };
 
     memcpy(s->regs, defaults, sizeof(s->regs));
+    s->regs[0] = s->chip_id;
     s->new_data = 7;
     s->sample_time_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     bma2x2_update_irq(s);
@@ -127,7 +131,9 @@ static uint8_t bma2x2_recv(I2CSlave *i2c)
         if (axis != 2) {
             return 0;
         }
-        /* +1 g along Z: 64/32/16/8 counts at +/-2/4/8/16 g. */
+        /* +1 g along Z: high byte 64/32/16/8 at +/-2/4/8/16 g.
+         * The low sample bits are zero, including on the 12-bit BMA253.
+         */
         switch (s->regs[BMA_RANGE] & 0x0f) {
         case 0x05:
             return 32;
@@ -195,7 +201,11 @@ static void bma2x2_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
     I2CSlaveClass *sc = I2C_SLAVE_CLASS(oc);
+    static const Property properties[] = {
+        DEFINE_PROP_UINT8("chip-id", BMA2X2State, chip_id, 0xf8),
+    };
 
+    device_class_set_props(dc, properties);
     device_class_set_legacy_reset(dc, bma2x2_reset);
     dc->vmsd = &bma2x2_vmstate;
     sc->send = bma2x2_send;
