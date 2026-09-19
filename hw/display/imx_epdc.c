@@ -94,6 +94,7 @@ static DisplaySurface *imx_epdc_prepare_surface(IMXEPDCState *s,
         surface = qemu_console_surface(s->console);
         memset(surface_data(surface), 0xff,
                (size_t)surface_stride(surface) * height);
+        s->fb_previous_valid = false;
     }
     return surface;
 }
@@ -121,6 +122,8 @@ static void imx_epdc_render_framebuffer(IMXEPDCState *s)
     MemTxResult result;
     unsigned x, y;
     unsigned bpp = s->fb_bpp;
+    unsigned first = s->fb_height, last = 0;
+    uint8_t *previous;
 
     if (!s->console || !imx_epdc_has_framebuffer(s)) {
         return;
@@ -141,7 +144,12 @@ static void imx_epdc_render_framebuffer(IMXEPDCState *s)
         }
     }
     buffer_size = (size_t)s->fb_stride * s->fb_height * bpp;
-    s->fb_buffer = g_realloc(s->fb_buffer, buffer_size);
+    if (s->fb_buffer_size != buffer_size) {
+        s->fb_buffer = g_realloc(s->fb_buffer, buffer_size);
+        s->fb_previous = g_realloc(s->fb_previous, buffer_size);
+        s->fb_buffer_size = buffer_size;
+        s->fb_previous_valid = false;
+    }
     result = dma_memory_read(&address_space_memory, s->fb_addr,
                              s->fb_buffer, buffer_size,
                              MEMTXATTRS_UNSPECIFIED);
@@ -154,6 +162,18 @@ static void imx_epdc_render_framebuffer(IMXEPDCState *s)
 
     surface = imx_epdc_prepare_surface(s, s->fb_width, s->fb_height);
     for (y = 0; y < s->fb_height; y++) {
+        size_t row_offset = (size_t)y * s->fb_stride * bpp;
+
+        /* Both the display backend and the scanout timer poll this memory.
+         * Leave unchanged rows alone: repeatedly writing the shared Cocoa
+         * surface and publishing full frames otherwise stalls the guest. */
+        if (s->fb_previous_valid &&
+            !memcmp(s->fb_buffer + row_offset, s->fb_previous + row_offset,
+                    (size_t)s->fb_width * bpp)) {
+            continue;
+        }
+        first = MIN(first, y);
+        last = y;
         pixels = (uint32_t *)((uint8_t *)surface_data(surface) +
                               (size_t)y * surface_stride(surface));
         for (x = 0; x < s->fb_width; x++) {
@@ -177,7 +197,13 @@ static void imx_epdc_render_framebuffer(IMXEPDCState *s)
             pixels[x] = 0xff000000U | gray * 0x00010101U;
         }
     }
-    dpy_gfx_update_full(s->console);
+    previous = s->fb_previous;
+    s->fb_previous = s->fb_buffer;
+    s->fb_buffer = previous;
+    s->fb_previous_valid = true;
+    if (first < s->fb_height) {
+        dpy_gfx_update(s->console, 0, first, s->fb_width, last - first + 1);
+    }
 }
 
 static void imx_epdc_render_update(IMXEPDCState *s)
@@ -540,6 +566,7 @@ static void imx_epdc_reset(DeviceState *dev)
     *epdc_reg(s, EPDC_VERSION) = EPDC_VERSION_2_1_0;
     s->update_pending = false;
     s->pending_luts = 0;
+    s->fb_previous_valid = false;
     timer_del(s->lut_timer);
     qemu_set_irq(s->irq, 0);
 }
@@ -586,6 +613,10 @@ static void imx_epdc_unrealize(DeviceState *dev)
     timer_free(s->lut_timer);
     g_free(s->fb_buffer);
     s->fb_buffer = NULL;
+    g_free(s->fb_previous);
+    s->fb_previous = NULL;
+    s->fb_buffer_size = 0;
+    s->fb_previous_valid = false;
 }
 
 static const Property imx_epdc_properties[] = {

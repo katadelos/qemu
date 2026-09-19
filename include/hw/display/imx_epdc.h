@@ -30,6 +30,9 @@ struct IMXEPDCState {
     QemuConsole *console;
     IMX6SLPXPState *pxp;
     uint8_t *fb_buffer;
+    uint8_t *fb_previous;
+    size_t fb_buffer_size;
+    bool fb_previous_valid;
     uint64_t fb_addr;
     uint32_t fb_width;
     uint32_t fb_height;
