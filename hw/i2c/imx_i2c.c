@@ -60,6 +60,13 @@ static inline bool imx_i2c_is_master(IMXI2CState *s)
     return s->i2cr & I2CR_MSTA;
 }
 
+static void imx_i2c_update_irq(IMXI2CState *s)
+{
+    qemu_set_irq(s->irq, imx_i2c_is_enabled(s) &&
+                 imx_i2c_interrupt_is_enabled(s) &&
+                 (s->i2sr & I2SR_IIF));
+}
+
 static void imx_i2c_reset(DeviceState *dev)
 {
     IMXI2CState *s = IMX_I2C(dev);
@@ -75,17 +82,15 @@ static void imx_i2c_reset(DeviceState *dev)
     s->i2sr       = I2SR_RESET;
     s->i2dr_read  = I2DR_RESET;
     s->i2dr_write = I2DR_RESET;
+    imx_i2c_update_irq(s);
 }
 
 static inline void imx_i2c_raise_interrupt(IMXI2CState *s)
 {
     if (imx_i2c_is_enabled(s)) {
         s->i2sr |= I2SR_IIF;
-
-        if (imx_i2c_interrupt_is_enabled(s)) {
-            qemu_irq_raise(s->irq);
-        }
     }
+    imx_i2c_update_irq(s);
 }
 
 static uint64_t imx_i2c_read(void *opaque, hwaddr offset,
@@ -211,7 +216,6 @@ static void imx_i2c_write(void *opaque, hwaddr offset,
          */
         if ((s->i2sr & I2SR_IIF) && !(value & I2SR_IIF)) {
             s->i2sr &= ~I2SR_IIF;
-            qemu_irq_lower(s->irq);
         }
 
         /*
@@ -240,8 +244,9 @@ static void imx_i2c_write(void *opaque, hwaddr offset,
                 } else {
                     s->address = s->i2dr_write;
                     s->i2sr &= ~I2SR_RXAK;
-                    imx_i2c_raise_interrupt(s);
                 }
+                /* A NACK still completes the address bus cycle. */
+                imx_i2c_raise_interrupt(s);
             } else { /* This is a normal data write */
                 if (i2c_send(s->bus, s->i2dr_write)) {
                     /* if the target return non zero then end the transfer */
@@ -250,8 +255,8 @@ static void imx_i2c_write(void *opaque, hwaddr offset,
                     i2c_end_transfer(s->bus);
                 } else {
                     s->i2sr &= ~I2SR_RXAK;
-                    imx_i2c_raise_interrupt(s);
                 }
+                imx_i2c_raise_interrupt(s);
             }
         } else {
             qemu_log_mask(LOG_UNIMP, "[%s]%s: slave mode not implemented\n",
@@ -263,6 +268,9 @@ static void imx_i2c_write(void *opaque, hwaddr offset,
                       HWADDR_PRIx "\n", TYPE_IMX_I2C, __func__, offset);
         break;
     }
+
+    /* Masking or resetting the controller must also deassert its output. */
+    imx_i2c_update_irq(s);
 }
 
 static const MemoryRegionOps imx_i2c_ops = {
@@ -273,10 +281,17 @@ static const MemoryRegionOps imx_i2c_ops = {
     .endianness = DEVICE_NATIVE_ENDIAN,
 };
 
+static int imx_i2c_post_load(void *opaque, int version_id)
+{
+    imx_i2c_update_irq(opaque);
+    return 0;
+}
+
 static const VMStateDescription imx_i2c_vmstate = {
     .name = TYPE_IMX_I2C,
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = imx_i2c_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT16(address, IMXI2CState),
         VMSTATE_UINT16(iadr, IMXI2CState),
