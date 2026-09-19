@@ -24,6 +24,7 @@
 #include "hw/misc/imx7_ccm.h"
 #include "hw/misc/imx7_snvs.h"
 #include "hw/misc/imx7_gpr.h"
+#include "hw/misc/imx7_dap.h"
 #include "hw/misc/imx7_src.h"
 #include "hw/watchdog/wdt_imx2.h"
 #include "hw/gpio/imx_gpio.h"
@@ -84,6 +85,7 @@ struct FslIMX7State {
     SDHCIState         usdhc[FSL_IMX7_NUM_USDHCS];
     IMX2WdtState       wdt[FSL_IMX7_NUM_WDTS];
     IMX7GPRState       gpr;
+    IMX7DAPState       dap;
     ChipideaState      usb[FSL_IMX7_NUM_USBS];
     DesignwarePCIEHost pcie;
     OrIRQState         pcie4_msi_irq;

@@ -69,6 +69,7 @@ system_ss.add(when: 'CONFIG_IMX', if_true: files(
   'imx6_src.c',
   'imx6ul_ccm.c',
   'imx7_ccm.c',
+  'imx7_dap.c',
   'imx7_src.c',
   'imx7_gpr.c',
   'imx7_snvs.c',
@@ -160,6 +161,7 @@ system_ss.add(when: 'CONFIG_I2C_ECHO', if_true: files('i2c-echo.c'))
 system_ss.add(when: 'CONFIG_IMX6SL_IOMUXC', if_true: files('imx6sl_iomuxc.c'))
 system_ss.add(when: 'CONFIG_IMX6SL_MMDC', if_true: files('imx6sl_mmdc.c'))
 system_ss.add(when: 'CONFIG_IMX6SLL_REX', if_true: files('imx6sll_ocotp.c'))
+system_ss.add(when: 'CONFIG_IMX7_DDRC', if_true: files('imx7_ddrc.c'))
 
 specific_ss.add(when: 'CONFIG_AVR_POWER', if_true: files('avr_power.c'))
 

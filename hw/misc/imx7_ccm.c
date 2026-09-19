@@ -27,7 +27,7 @@ static void imx7_analog_reset(DeviceState *dev)
     memset(s->pmu, 0, sizeof(s->pmu));
     memset(s->analog, 0, sizeof(s->analog));
 
-    s->analog[ANALOG_PLL_ARM]         = 0x00002042;
+    s->analog[ANALOG_PLL_ARM]         = 0x00002053;
     s->analog[ANALOG_PLL_DDR]         = 0x0060302c;
     s->analog[ANALOG_PLL_DDR_SS]      = 0x00000000;
     s->analog[ANALOG_PLL_DDR_NUM]     = 0x06aaac4d;
@@ -64,10 +64,10 @@ static void imx7_analog_reset(DeviceState *dev)
      */
     s->analog[ANALOG_DIGPROG]  = 0x720000;
     /*
-     * Set revision to be 1.0 (Arbitrary choice, no particular
+     * Set revision to be 1.2 (Arbitrary choice, no particular
      * reason).
      */
-    s->analog[ANALOG_DIGPROG] |= 0x000010;
+    s->analog[ANALOG_DIGPROG] |= 0x000012;
 }
 
 static void imx7_ccm_reset(DeviceState *dev)
@@ -75,6 +75,8 @@ static void imx7_ccm_reset(DeviceState *dev)
     IMX7CCMState *s = IMX7_CCM(dev);
 
     memset(s->ccm, 0, sizeof(s->ccm));
+    /* Boot ROM enables the A7 clock root from the ARM PLL. */
+    s->ccm[0x8000 / 4] = BIT(28) | BIT(24);
 }
 
 #define CCM_INDEX(offset)   (((offset) & ~(hwaddr)0xF) / sizeof(uint32_t))
@@ -86,6 +88,10 @@ enum {
     CCM_BITOP_CLR  = 0x08,
     CCM_BITOP_TOG  = 0x0C,
 };
+
+#define PMU_LDO_ENABLE BIT(0)
+#define PMU_LDO_BO     BIT(16)
+#define PMU_LDO_OK     BIT(17)
 
 static uint64_t imx7_set_clr_tog_read(void *opaque, hwaddr offset,
                                       unsigned size)
@@ -129,6 +135,49 @@ static const struct MemoryRegionOps imx7_set_clr_tog_ops = {
          * device but in practice there is no reason for a guest to access
          * this device unaligned.
          */
+        .min_access_size = 4,
+        .max_access_size = 4,
+        .unaligned = false,
+    },
+};
+
+static bool imx7_pmu_is_ldo(hwaddr offset)
+{
+    /* REG_1P0A, REG_1P0D and REG_1P2, including their SET/CLR/TOG aliases. */
+    return offset < 0x30;
+}
+
+static uint64_t imx7_pmu_read(void *opaque, hwaddr offset, unsigned size)
+{
+    uint32_t value = imx7_set_clr_tog_read(opaque, offset, size);
+
+    if (imx7_pmu_is_ldo(offset)) {
+        /* Regulators settle immediately; analog ramp timing is not modeled. */
+        value &= ~(PMU_LDO_BO | PMU_LDO_OK);
+        if (value & PMU_LDO_ENABLE) {
+            value |= PMU_LDO_OK;
+        }
+    }
+    return value;
+}
+
+static void imx7_pmu_write(void *opaque, hwaddr offset,
+                           uint64_t value, unsigned size)
+{
+    uint32_t *pmu = opaque;
+
+    imx7_set_clr_tog_write(opaque, offset, value, size);
+    if (imx7_pmu_is_ldo(offset)) {
+        /* Brownout and regulator-ready are hardware status, not controls. */
+        pmu[CCM_INDEX(offset)] &= ~(PMU_LDO_BO | PMU_LDO_OK);
+    }
+}
+
+static const MemoryRegionOps imx7_pmu_ops = {
+    .read = imx7_pmu_read,
+    .write = imx7_pmu_write,
+    .endianness = DEVICE_NATIVE_ENDIAN,
+    .impl = {
         .min_access_size = 4,
         .max_access_size = 4,
         .unaligned = false,
@@ -188,7 +237,7 @@ static void imx7_analog_init(Object *obj)
 
     memory_region_init_io(&s->mmio.pmu,
                           obj,
-                          &imx7_set_clr_tog_ops,
+                          &imx7_pmu_ops,
                           s->pmu,
                           TYPE_IMX7_ANALOG ".pmu",
                           sizeof(s->pmu));

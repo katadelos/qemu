@@ -135,6 +135,7 @@ static void fsl_imx7_init(Object *obj)
      * GPR
      */
     object_initialize_child(obj, "gpr", &s->gpr, TYPE_IMX7_GPR);
+    object_initialize_child(obj, "dap", &s->dap, TYPE_IMX7_DAP);
 
     /*
      * PCIE
@@ -184,6 +185,8 @@ static void fsl_imx7_realize(DeviceState *dev, Error **errp)
     for (i = 0; i < smp_cpus; i++) {
         Object *o = OBJECT(&s->cpu[i]);
 
+        object_property_set_int(o, "cntfrq", 8000000, &error_abort);
+
         /* On uniprocessor, the CBAR is set to 0 */
         if (smp_cpus > 1) {
             object_property_set_int(o, "reset-cbar", FSL_IMX7_A7MPCORE_ADDR,
@@ -229,8 +232,9 @@ static void fsl_imx7_realize(DeviceState *dev, Error **errp)
     /*
      * A7MPCORE DAP
      */
-    create_unimplemented_device("a7mpcore-dap", FSL_IMX7_A7MPCORE_DAP_ADDR,
-                                FSL_IMX7_A7MPCORE_DAP_SIZE);
+    sysbus_realize(SYS_BUS_DEVICE(&s->dap), &error_abort);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->dap), 0,
+                   FSL_IMX7_A7MPCORE_DAP_ADDR);
 
     /*
      * GPTs
@@ -470,6 +474,7 @@ static void fsl_imx7_realize(DeviceState *dev, Error **errp)
             FSL_IMX7_USDHC3_IRQ,
         };
 
+        qdev_prop_set_bit(DEVICE(&s->usdhc[i]), "auto-cmd23-block-count", true);
         sysbus_realize(SYS_BUS_DEVICE(&s->usdhc[i]), &error_abort);
 
         sysbus_mmio_map(SYS_BUS_DEVICE(&s->usdhc[i]), 0,
