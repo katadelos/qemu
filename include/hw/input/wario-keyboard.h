@@ -14,6 +14,10 @@ struct WarioKeyboardState {
     SysBusDevice parent_obj;
     MemoryRegion iomem;
     QemuInputHandlerState *input_handler;
+    qemu_irq page_outputs[2];
+    qemu_irq power_output;
+    bool page_buttons;
+    uint8_t page_pressed;
     uint8_t fifo[WARIO_KEYBOARD_FIFO_SIZE * sizeof(uint32_t)];
     uint8_t head;
     uint8_t count;

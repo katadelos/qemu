@@ -2,6 +2,8 @@
 
 #include "qemu/osdep.h"
 #include "hw/input/wario-keyboard.h"
+#include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "qemu/module.h"
 #include "ui/input.h"
@@ -50,6 +52,34 @@ static void wario_keyboard_event(DeviceState *dev, QemuConsole *src,
     uint16_t linux_code;
     uint8_t tail;
 
+    if (s->page_buttons) {
+        int output = -1;
+
+        if (qcode == Q_KEY_CODE_POWER) {
+            qemu_set_irq(s->power_output, key->down);
+            return;
+        }
+
+        switch (qcode) {
+        case Q_KEY_CODE_PGUP:
+        case Q_KEY_CODE_BRACKET_LEFT:
+            output = 0;
+            break;
+        case Q_KEY_CODE_PGDN:
+        case Q_KEY_CODE_BRACKET_RIGHT:
+            output = 1;
+            break;
+        default:
+            break;
+        }
+        if (output >= 0) {
+            s->page_pressed = deposit32(s->page_pressed, output, 1,
+                                         key->down);
+            qemu_set_irq(s->page_outputs[output], !key->down);
+            return;
+        }
+    }
+
     if (qcode >= qemu_input_map_qcode_to_linux_len) {
         return;
     }
@@ -80,6 +110,9 @@ static void wario_keyboard_reset(DeviceState *dev)
 
     s->head = 0;
     s->count = 0;
+    s->page_pressed = 0;
+    qemu_set_irq(s->page_outputs[0], 1);
+    qemu_set_irq(s->page_outputs[1], 1);
 }
 
 static void wario_keyboard_realize(DeviceState *dev, Error **errp)
@@ -88,6 +121,9 @@ static void wario_keyboard_realize(DeviceState *dev, Error **errp)
 
     s->input_handler = qemu_input_handler_register(dev,
                                                    &wario_keyboard_handler);
+    if (s->page_buttons) {
+        qemu_input_handler_activate(s->input_handler);
+    }
 }
 
 static void wario_keyboard_unrealize(DeviceState *dev)
@@ -97,14 +133,25 @@ static void wario_keyboard_unrealize(DeviceState *dev)
     qemu_input_handler_unregister(s->input_handler);
 }
 
+static int wario_keyboard_post_load(void *opaque, int version_id)
+{
+    WarioKeyboardState *s = opaque;
+
+    qemu_set_irq(s->page_outputs[0], !(s->page_pressed & BIT(0)));
+    qemu_set_irq(s->page_outputs[1], !(s->page_pressed & BIT(1)));
+    return 0;
+}
+
 static const VMStateDescription wario_keyboard_vmstate = {
     .name = TYPE_WARIO_KEYBOARD,
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
+    .post_load = wario_keyboard_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_BUFFER(fifo, WarioKeyboardState),
         VMSTATE_UINT8(head, WarioKeyboardState),
         VMSTATE_UINT8(count, WarioKeyboardState),
+        VMSTATE_UINT8(page_pressed, WarioKeyboardState),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -116,7 +163,13 @@ static void wario_keyboard_init(Object *obj)
     memory_region_init_io(&s->iomem, obj, &wario_keyboard_ops, s,
                           TYPE_WARIO_KEYBOARD, 0x1000);
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
+    qdev_init_gpio_out_named(DEVICE(obj), s->page_outputs, "page-button", 2);
+    qdev_init_gpio_out_named(DEVICE(obj), &s->power_output, "power-button", 1);
 }
+
+static const Property wario_keyboard_properties[] = {
+    DEFINE_PROP_BOOL("page-buttons", WarioKeyboardState, page_buttons, false),
+};
 
 static void wario_keyboard_class_init(ObjectClass *oc, const void *data)
 {
@@ -126,6 +179,7 @@ static void wario_keyboard_class_init(ObjectClass *oc, const void *data)
     dc->unrealize = wario_keyboard_unrealize;
     device_class_set_legacy_reset(dc, wario_keyboard_reset);
     dc->vmsd = &wario_keyboard_vmstate;
+    device_class_set_props(dc, wario_keyboard_properties);
 }
 
 static const TypeInfo wario_keyboard_info = {

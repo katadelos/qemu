@@ -93,31 +93,39 @@ static void max77696_update_irq(MAX77696State *s)
     qemu_set_irq(s->irq[0], root_pending ? 0 : 1);
 }
 
-static void max77696_input_event(DeviceState *dev, QemuConsole *src,
-                                 InputEvent *evt)
+static void max77696_power_button(void *opaque, int n, int level)
 {
-    MAX77696State *s = MAX77696(dev);
-    InputKeyEvent *key = evt->u.key.data;
-    int qcode = qemu_input_key_value_to_qcode(key->key);
+    MAX77696State *s = opaque;
+    bool down = level != 0;
 
-    if (qcode != Q_KEY_CODE_POWER || s->power_down == key->down) {
+    if (s->power_down == down) {
         return;
     }
 
-    s->power_down = key->down;
-    if (key->down) {
+    s->power_down = down;
+    if (down) {
         s->regs[GLBLSTAT] |= GLBLSTAT_EN0_S;
         s->regs[GLBLINT] |= GLBLINT_EN0_RISING;
     } else {
         s->regs[GLBLSTAT] &= ~GLBLSTAT_EN0_S;
         s->regs[GLBLINT] |= GLBLINT_EN0_FALLING;
     }
-    trace_max77696_power(key->down, s->regs[GLBLSTAT],
+    trace_max77696_power(down, s->regs[GLBLSTAT],
                          s->regs[GLBLINT], s->regs[GLBLINTM]);
     max77696_update_irq(s);
 
-    if (key->down) {
+    if (down) {
         qemu_system_wakeup_request(QEMU_WAKEUP_REASON_OTHER, NULL);
+    }
+}
+
+static void max77696_input_event(DeviceState *dev, QemuConsole *src,
+                                 InputEvent *evt)
+{
+    InputKeyEvent *key = evt->u.key.data;
+
+    if (qemu_input_key_value_to_qcode(key->key) == Q_KEY_CODE_POWER) {
+        max77696_power_button(dev, 0, key->down);
     }
 }
 
@@ -306,6 +314,7 @@ static void max77696_realize(DeviceState *dev, Error **errp)
 
     if (max77696_is_main(s)) {
         /* The physical PMIC IRQ pin is active-low. */
+        qdev_init_gpio_in_named(dev, max77696_power_button, "power-button", 1);
         s->regs[GLBLINTM] = 0xff;
         s->regs[INTTOP1M] = 0xff;
         s->power_down = false;
