@@ -329,6 +329,7 @@ static void handleAnyDeviceErrors(Error * err)
 - (void) handleMonitorInput:(NSEvent *)event;
 - (bool) handleEvent:(NSEvent *)event;
 - (bool) handleEventLocked:(NSEvent *)event;
+- (void) queueMouseEvent:(NSEvent *)event;
 - (void) notifyMouseModeChange;
 - (BOOL) isMouseGrabbed;
 - (QEMUScreen) gscreen;
@@ -1092,9 +1093,8 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
 
     with_bql(^{
         qemu_input_queue_btn(dcl.con, button, down);
+        [self queueMouseEvent:event];
     });
-
-    [self handleMouseEvent:event];
 }
 
 - (void) handleMouseEvent:(NSEvent *)event
@@ -1104,21 +1104,28 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
     }
 
     with_bql(^{
-        if (isAbsoluteEnabled) {
-            CGFloat dx = (CGFloat)screen.width / [self frame].size.width;
-            CGFloat dy = (CGFloat)screen.height / [self frame].size.height;
-            NSPoint p = [event locationInWindow];
-
-            /* Note that the origin for Cocoa mouse coords is bottom left, not top left. */
-            qemu_input_queue_abs(dcl.con, INPUT_AXIS_X, p.x * dx, 0, screen.width);
-            qemu_input_queue_abs(dcl.con, INPUT_AXIS_Y, screen.height - p.y * dy, 0, screen.height);
-        } else {
-            qemu_input_queue_rel(dcl.con, INPUT_AXIS_X, [event deltaX]);
-            qemu_input_queue_rel(dcl.con, INPUT_AXIS_Y, [event deltaY]);
-        }
-
-        qemu_input_event_sync();
+        [self queueMouseEvent:event];
     });
+}
+
+/* Keep each button, position and sync together while the guest is excluded.
+ * A touchscreen may drain pending reports from its I2C completion callback.
+ */
+- (void) queueMouseEvent:(NSEvent *)event
+{
+    if (isAbsoluteEnabled) {
+        CGFloat dx = (CGFloat)screen.width / [self frame].size.width;
+        CGFloat dy = (CGFloat)screen.height / [self frame].size.height;
+        NSPoint p = [event locationInWindow];
+
+        /* Cocoa mouse coordinates have their origin at the bottom left. */
+        qemu_input_queue_abs(dcl.con, INPUT_AXIS_X, p.x * dx, 0, screen.width);
+        qemu_input_queue_abs(dcl.con, INPUT_AXIS_Y, screen.height - p.y * dy, 0, screen.height);
+    } else {
+        qemu_input_queue_rel(dcl.con, INPUT_AXIS_X, [event deltaX]);
+        qemu_input_queue_rel(dcl.con, INPUT_AXIS_Y, [event deltaY]);
+    }
+    qemu_input_event_sync();
 }
 
 - (void) mouseExited:(NSEvent *)event
@@ -1256,6 +1263,7 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
         qemu_input_queue_btn(dcl.con, INPUT_BUTTON_LEFT, false);
         qemu_input_queue_btn(dcl.con, INPUT_BUTTON_RIGHT, false);
         qemu_input_queue_btn(dcl.con, INPUT_BUTTON_MIDDLE, false);
+        qemu_input_event_sync();
     });
 }
 @end
