@@ -28,7 +28,7 @@ struct CYTTSP5State {
     unsigned tx_len, rx_len, rx_pos;
     int input_x, input_y;
     uint16_t width, height;
-    bool invert_x, invert_y;
+    bool invert_x, invert_y, swap_axes;
     bool reading, bootloader, reset_level, pressed, reported;
     bool input_dirty;
     bool irq_level;
@@ -321,9 +321,11 @@ static void cyttsp5_input_sync(DeviceState *dev)
     if (!s->pressed && !previous_pressed) {
         return;
     }
-    touch.x = qemu_input_scale_axis(s->input_x, INPUT_EVENT_ABS_MIN,
+    touch.x = qemu_input_scale_axis(s->swap_axes ? s->input_y : s->input_x,
+                                   INPUT_EVENT_ABS_MIN,
                                    INPUT_EVENT_ABS_MAX, 0, s->width - 1);
-    touch.y = qemu_input_scale_axis(s->input_y, INPUT_EVENT_ABS_MIN,
+    touch.y = qemu_input_scale_axis(s->swap_axes ? s->input_x : s->input_y,
+                                   INPUT_EVENT_ABS_MIN,
                                    INPUT_EVENT_ABS_MAX, 0, s->height - 1);
     touch.event = s->pressed ? (previous_pressed ? 2 : 1) : 3;
 
@@ -483,6 +485,7 @@ static const Property cyttsp5_properties[] = {
     DEFINE_PROP_UINT16("height", CYTTSP5State, height, 1920),
     DEFINE_PROP_BOOL("invert-x", CYTTSP5State, invert_x, false),
     DEFINE_PROP_BOOL("invert-y", CYTTSP5State, invert_y, true),
+    DEFINE_PROP_BOOL("swap-axes", CYTTSP5State, swap_axes, false),
 };
 static void cyttsp5_class_init(ObjectClass *oc, const void *data)
 {
