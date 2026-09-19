@@ -123,3 +123,5 @@ arm_common_ss.add(files('boot.c'))
 
 hw_arch += {'arm': arm_ss}
 hw_common_arch += {'arm': arm_common_ss}
+
+arm_common_ss.add(when: 'CONFIG_IMX7D_ZELDA', if_true: files('imx7d-zelda.c'))

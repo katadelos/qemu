@@ -812,3 +812,16 @@ config ARMSSE
     select UNIMP
     select SSE_COUNTER
     select SSE_TIMER
+
+config IMX7D_ZELDA
+    bool
+    default y
+    depends on TCG && ARM
+    select FSL_IMX7
+    select IMX7_DDRC
+    select IMX6SL_WARIO
+    select SD
+    select SSI_M25P80
+    select MAX77796
+    select BMA2X2
+    select CYTTSP5
