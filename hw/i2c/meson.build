@@ -27,6 +27,7 @@ i2c_ss.add(when: 'CONFIG_BD71827', if_true: files('bd71827.c'))
 i2c_ss.add(when: 'CONFIG_FP9929', if_true: files('fp9929.c'))
 i2c_ss.add(when: 'CONFIG_GOODIX_GT9XX', if_true: files('goodix_gt9xx.c'))
 i2c_ss.add(when: 'CONFIG_LM3695', if_true: files('lm3695.c'))
+i2c_ss.add(when: 'CONFIG_LM3697', if_true: files('lm3697.c'))
 i2c_ss.add(when: 'CONFIG_MAX14656', if_true: files('max14656.c'))
 i2c_ss.add(when: 'CONFIG_MT8113_BELLATRIX4', if_true: files(
   'bd71828.c',

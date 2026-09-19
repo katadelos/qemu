@@ -94,6 +94,10 @@ config LM3695
     bool
     select I2C
 
+config LM3697
+    bool
+    select I2C
+
 config MAX14656
     bool
     select I2C
