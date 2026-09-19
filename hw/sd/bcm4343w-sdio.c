@@ -112,7 +112,7 @@ static void bcm_event(BCM4343WState *s, uint32_t event, uint32_t status,
 {
     uint8_t packet[2048] = { 0x20, 0, 0, 0 };
     uint8_t *eth = packet + 4, *hdr = eth + 14, *msg = hdr + 10;
-    if (len > sizeof(packet) - 76) {
+    if (len > sizeof(packet) - 78) {
         return;
     }
     memcpy(eth, s->conf.macaddr.a, 6);
@@ -136,7 +136,13 @@ static void bcm_event(BCM4343WState *s, uint32_t event, uint32_t status,
         memcpy(msg + 48, data, len);
     }
     trace_bcm4343w_event(event, status, len);
-    bcm_enqueue(s, 1, packet, 76 + len);
+    /*
+     * Firmware event Ethernet frames carry a two-byte trailer.  DHD removes
+     * ETHER_TYPE_LEN from the received length before validating bcm_event_t
+     * and its data; omitting this padding makes newer drivers discard every
+     * event, including completed scans and associations.
+     */
+    bcm_enqueue(s, 1, packet, 78 + len);
 }
 
 /* wl_bss_info version 109; byte offsets preserve the ARM ABI's alignment. */
