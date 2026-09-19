@@ -6,6 +6,7 @@
 #include "migration/vmstate.h"
 #include "qemu/bcd.h"
 #include "qemu/module.h"
+#include "qemu/timer.h"
 #include "system/rtc.h"
 #include "system/runstate.h"
 
@@ -30,6 +31,11 @@
 #define BD71827_REG_VM_SA_VBAT_U    0x6d
 #define BD71827_REG_VM_SA_VBAT_L    0x6e
 #define BD71827_REG_CC_CCNTD_3      0x79
+#define BD71827_REG_INT_EN_01       0x8b
+#define BD71827_REG_INT_EN_03       0x8d
+#define BD71827_REG_INT_STAT_01     0x98
+#define BD71827_REG_INT_STAT_03     0x9a
+#define BD71827_REG_INT_STAT_12     0xa3
 #define BD71827_REG_PWRCTRL3        0xa9
 #define BD71827_REG_FULL_CCNTD_3    0xe8
 #define BD71827_REG_VM_SA_VSYS_U    0xc2
@@ -54,7 +60,49 @@ struct BD71827State {
     uint8_t len;
     uint8_t magic_step;
     int64_t rtc_offset;
+    bool power_pressed;
+    bool power_release_pending;
+    QEMUTimer *power_release_timer;
 };
+
+static void bd71827_update_irq(BD71827State *s)
+{
+    bool pending = false;
+
+    for (unsigned i = 0; i < 12; i++) {
+        pending |= (s->regs[BD71827_REG_INT_STAT_01 + i] &
+                    s->regs[BD71827_REG_INT_EN_01 + i]) != 0;
+    }
+    qemu_set_irq(s->irq, !pending);
+}
+
+static void bd71827_power_release(void *opaque)
+{
+    BD71827State *s = opaque;
+
+    s->power_release_pending = false;
+    s->regs[BD71827_REG_INT_STAT_03] |= BIT(4); /* POWERON_SHORT */
+    bd71827_update_irq(s);
+}
+
+static void bd71827_power_button(void *opaque, int n, int level)
+{
+    BD71827State *s = opaque;
+
+    if (s->power_pressed == !!level) {
+        return;
+    }
+    s->power_pressed = !!level;
+    if (level) {
+        s->regs[BD71827_REG_INT_STAT_03] |= BIT(5); /* POWERON_PRESS */
+    } else if (s->regs[BD71827_REG_INT_STAT_03] & BIT(5)) {
+        /* Keep a quick release behind its unacknowledged press report. */
+        s->power_release_pending = true;
+    } else {
+        bd71827_power_release(s);
+    }
+    bd71827_update_irq(s);
+}
 
 static void bd71827_store_be16(BD71827State *s, unsigned reg,
                                uint16_t value)
@@ -123,8 +171,21 @@ static int bd71827_send(I2CSlave *i2c, uint8_t data)
         } else {
             s->magic_step = 0;
         }
+    } else if (s->pointer >= BD71827_REG_INT_STAT_01 &&
+               s->pointer <= BD71827_REG_INT_STAT_12) {
+        s->regs[s->pointer] &= ~data; /* Latched events are write-one-clear. */
+        if (s->pointer == BD71827_REG_INT_STAT_03 && (data & BIT(5)) &&
+            s->power_release_pending) {
+            timer_mod(s->power_release_timer,
+                      qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 10);
+        }
+        bd71827_update_irq(s);
     } else {
         s->regs[s->pointer] = data;
+        if (s->pointer >= BD71827_REG_INT_EN_01 &&
+            s->pointer < BD71827_REG_INT_EN_01 + 12) {
+            bd71827_update_irq(s);
+        }
         if (s->pointer >= BD71827_REG_SEC &&
             s->pointer <= BD71827_REG_YEAR) {
             bd71827_rtc_commit(s);
@@ -167,6 +228,9 @@ static void bd71827_reset(DeviceState *dev)
     s->len = 0;
     s->magic_step = 0;
     s->rtc_offset = 0;
+    s->power_pressed = false;
+    s->power_release_pending = false;
+    timer_del(s->power_release_timer);
 
     /* A healthy, idle battery and power tree with no external charger. */
     s->regs[BD71827_REG_DEVICE] = 0x27;
@@ -204,8 +268,8 @@ static void bd71827_reset(DeviceState *dev)
 
 static const VMStateDescription bd71827_vmstate = {
     .name = TYPE_BD71827,
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
     .fields = (const VMStateField[]) {
         VMSTATE_I2C_SLAVE(parent_obj, BD71827State),
         VMSTATE_UINT8_ARRAY(regs, BD71827State, 256),
@@ -213,6 +277,9 @@ static const VMStateDescription bd71827_vmstate = {
         VMSTATE_UINT8(len, BD71827State),
         VMSTATE_UINT8(magic_step, BD71827State),
         VMSTATE_INT64(rtc_offset, BD71827State),
+        VMSTATE_BOOL(power_pressed, BD71827State),
+        VMSTATE_BOOL(power_release_pending, BD71827State),
+        VMSTATE_TIMER_PTR(power_release_timer, BD71827State),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -234,6 +301,14 @@ static void bd71827_init(Object *obj)
     BD71827State *s = BD71827(obj);
 
     qdev_init_gpio_out_named(DEVICE(obj), &s->irq, "irq", 1);
+    qdev_init_gpio_in_named(DEVICE(obj), bd71827_power_button, "power-button", 1);
+    s->power_release_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
+                                         bd71827_power_release, s);
+}
+
+static void bd71827_finalize(Object *obj)
+{
+    timer_free(BD71827(obj)->power_release_timer);
 }
 
 static const TypeInfo bd71827_info = {
@@ -241,6 +316,7 @@ static const TypeInfo bd71827_info = {
     .parent = TYPE_I2C_SLAVE,
     .instance_size = sizeof(BD71827State),
     .instance_init = bd71827_init,
+    .instance_finalize = bd71827_finalize,
     .class_init = bd71827_class_init,
 };
 
