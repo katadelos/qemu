@@ -30,6 +30,8 @@
 #define BCM_SHARED 0x0007e000u
 #define BCM_FRAME_MAX 16384
 #define BCM_QUEUE_MAX 128
+#define BCM_WLFC_FIFO_CREDITS 8
+#define BCM_WLFC_FIFO_COUNT 5
 #define BCM_FRAME_IND 0x40
 #define BCM_HOST_INT 0x80
 #define BCM_SSID "Kindle-QEMU"
@@ -51,6 +53,7 @@ struct BCM4343WState {
     NICState *nic;
     qemu_irq irq, oob_irq;
     bool powered, selected, firmware_running, associated, up, software_oob;
+    bool wlfc;
     uint8_t cccr[0x300];
     uint8_t f1[0x100];
     uint8_t cis[0x300];
@@ -208,6 +211,14 @@ static void bcm_join_done(void *opaque)
         return;
     }
     s->associated = true;
+    if (s->wlfc) {
+        uint8_t credits[BCM_WLFC_FIFO_COUNT + 1] = { 0 };
+
+        /* Establish the firmware's five transmit FIFOs before link-up. */
+        memset(credits, BCM_WLFC_FIFO_CREDITS, BCM_WLFC_FIFO_COUNT);
+        bcm_event(s, 74, 0, 0, credits, sizeof(credits));
+        bcm_event(s, 127, 0, 0, NULL, 0); /* BCMC_CREDIT_SUPPORT */
+    }
     bcm_event(s, 3, 0, 0, NULL, 0); /* AUTH */
     bcm_event(s, 7, 0, 0, NULL, 0); /* ASSOC */
     bcm_event(s, 16, 0, 1, NULL, 0); /* LINK */
@@ -281,8 +292,22 @@ static int bcm_iovar(BCM4343WState *s, const char *name, bool set,
                 return -2;
             }
             memcpy(s->conf.macaddr.a, in, 6);
+        } else if (!strcmp(name, "tlv")) {
+            if (inlen < 4) {
+                return -2;
+            }
+            s->wlfc = (ldl_le_p(in) & 8) != 0;
+        } else if (!strcmp(name, "proptxstatus")) {
+            if (inlen < 4) {
+                return -2;
+            }
+            s->wlfc = ldl_le_p(in) != 0;
+        } else if (!strcmp(name, "wlfc_mode")) {
+            /* Firmware queues packet IDs, without sequence reuse. */
+            if (inlen < 4 || ldl_le_p(in) != 4) {
+                return -23;
+            }
         } else if (!strcmp(name, "bus:rxglom") ||
-                   !strcmp(name, "proptxstatus") ||
                    !strcmp(name, "ampdu_hostreorder") ||
                    !strcmp(name, "hostreorder")) {
             /* These optional framing modes are not advertised or supported. */
@@ -304,8 +329,15 @@ static int bcm_iovar(BCM4343WState *s, const char *name, bool set,
         memcpy(out, version, sizeof(version));
         *outlen = sizeof(version);
     } else if (!strcmp(name, "cap")) {
-        memcpy(out, "sta escan", 10);
-        *outlen = 10;
+        const char capabilities[] = "sta escan proptxstatus";
+        memcpy(out, capabilities, sizeof(capabilities));
+        *outlen = sizeof(capabilities);
+    } else if (!strcmp(name, "wlfc_mode")) {
+        stl_le_p(out, 4); /* WLFC AFQ capability bit */
+        *outlen = 4;
+    } else if (!strcmp(name, "proptxstatus")) {
+        stl_le_p(out, s->wlfc);
+        *outlen = 4;
     } else if (!strcmp(name, "country")) {
         memset(out, 0, 12);
         memcpy(out, "US", 2);
@@ -348,7 +380,7 @@ static int bcm_iovar(BCM4343WState *s, const char *name, bool set,
                !strcmp(name, "mpc") || !strcmp(name, "wsec") ||
                !strcmp(name, "wpa_auth") || !strcmp(name, "auth") ||
                !strcmp(name, "p2p") || !strcmp(name, "arpoe") ||
-               !strcmp(name, "proptxstatus") || !strcmp(name, "bus:rxglom")) {
+               !strcmp(name, "bus:rxglom")) {
         stl_le_p(out, 0);
         *outlen = 4;
     } else {
@@ -507,6 +539,46 @@ static void bcm_control(BCM4343WState *s, const uint8_t *in, unsigned len)
     bcm_enqueue(s, 0, reply, 16 + outlen);
 }
 
+static void bcm_txstatus(BCM4343WState *s, const uint8_t *tlvs, unsigned len)
+{
+    while (len) {
+        unsigned type = *tlvs++, size;
+        uint32_t tag;
+        unsigned fifo;
+        uint8_t reply[20] = { 0x20, 0, 0, 4, 4, 4 };
+
+        len--;
+        if (type == 255) { /* WLFC_CTL_TYPE_FILLER */
+            continue;
+        }
+        if (!len) {
+            return;
+        }
+        size = *tlvs++;
+        len--;
+        if (size > len) {
+            return;
+        }
+        if (type == 5 && size >= 4) { /* WLFC_CTL_TYPE_PKTTAG */
+            tag = ldl_le_p(tlvs);
+            fifo = (tag >> 24) & 7;
+            if (!(tag & BIT(27)) || fifo >= BCM_WLFC_FIFO_COUNT) {
+                return;
+            }
+            /* Echo the packet ID and generation with successful TX status. */
+            stl_le_p(reply + 6, tag & ~0x78000000u);
+            reply[10] = 11; /* WLFC_CTL_TYPE_FIFO_CREDITBACK */
+            reply[11] = 6;
+            reply[12 + fifo] = 1;
+            reply[18] = reply[19] = 255;
+            bcm_enqueue(s, 2, reply, sizeof(reply));
+            return;
+        }
+        tlvs += size;
+        len -= size;
+    }
+}
+
 static void bcm_tx_frame(BCM4343WState *s, const uint8_t *frame, unsigned len)
 {
     unsigned size, offset, channel;
@@ -530,6 +602,9 @@ static void bcm_tx_frame(BCM4343WState *s, const uint8_t *frame, unsigned len)
             s->tx_packets++;
             qemu_send_packet(qemu_get_queue(s->nic), frame + eth_offset,
                              size - eth_offset);
+        }
+        if (s->wlfc && eth_offset <= size) {
+            bcm_txstatus(s, frame + offset + 4, eth_offset - offset - 4);
         }
         if (g_queue_is_empty(&s->rx)) {
             /* Header-only SDPCM frames update credits without an Ethernet RX. */
@@ -898,7 +973,7 @@ static void bcm_reset(DeviceState *dev)
     s->rx_seq = s->tx_seq = 0;
     s->rx_packets = s->tx_packets = s->power_mode = 0;
     s->selected = s->firmware_running = s->associated = s->up = false;
-    s->software_oob = false;
+    s->software_oob = s->wlfc = false;
     s->cccr[0] = 0x32;
     s->cccr[1] = 3;
     s->cccr[8] = 0x1e;
@@ -944,7 +1019,13 @@ static void bcm_power(void *opaque, int line, int level)
 static bool bcm_can_receive(NetClientState *nc)
 {
     BCM4343WState *s = qemu_get_nic_opaque(nc);
-    return s->powered && s->associated && s->rx.length < BCM_QUEUE_MAX - 8;
+    unsigned reserve = 8;
+
+    /* Every outstanding transmit needs a completion, even under RX load. */
+    if (s->wlfc) {
+        reserve += BCM_WLFC_FIFO_COUNT * BCM_WLFC_FIFO_CREDITS;
+    }
+    return s->powered && s->associated && s->rx.length < BCM_QUEUE_MAX - reserve;
 }
 
 static ssize_t bcm_receive(NetClientState *nc, const uint8_t *buf, size_t size)
