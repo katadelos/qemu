@@ -249,6 +249,22 @@ config IMX6SLL_REX
     select MAX14656
     select IMX6SLL_OCOTP
 
+config IMX6SLL_JAEGER
+    bool
+    default y
+    depends on TCG && ARM
+    select FSL_IMX6
+    select IMX6SL_MMDC
+    select IMX6SL_IOMUXC
+    select IMX6SLL_OCOTP
+    select BD71827
+    select FP9929
+    select LM3695
+    select CYTTSP5
+    select WARIO_KEYBOARD
+    select BCM4343W_SDIO
+    select SD
+
 config IMX6SLL_FORMA
     bool
     default y

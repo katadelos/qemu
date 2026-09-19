@@ -125,3 +125,5 @@ hw_arch += {'arm': arm_ss}
 hw_common_arch += {'arm': arm_common_ss}
 
 arm_common_ss.add(when: 'CONFIG_IMX7D_ZELDA', if_true: files('imx7d-zelda.c'))
+
+arm_common_ss.add(when: 'CONFIG_IMX6SLL_JAEGER', if_true: files('imx6sll-jaeger.c'))
