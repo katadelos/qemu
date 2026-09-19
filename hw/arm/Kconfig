@@ -230,6 +230,7 @@ config IMX6SLL_FORMA
     depends on TCG && ARM
     select FSL_IMX6
     select IMX6SL_WARIO
+    select CYTTSP5
     select SD
 
 config MT8115_PA6_CS8

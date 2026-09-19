@@ -34,6 +34,10 @@ config MAX77796
     bool
     select I2C
 
+config CYTTSP5
+    bool
+    select I2C
+
 config BMA2X2
     bool
     select I2C

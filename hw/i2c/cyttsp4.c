@@ -56,6 +56,7 @@ struct CYTTSP4State {
     bool input_pressed;
     bool report_pressed;
     bool invert_x;
+    bool invert_y;
     uint16_t x_resolution;
     uint16_t y_resolution;
 };
@@ -123,6 +124,9 @@ static void cyttsp4_input_sync(DeviceState *dev)
                               s->y_resolution - 1);
     if (s->invert_x) {
         x = s->x_resolution - 1 - x;
+    }
+    if (s->invert_y) {
+        y = s->y_resolution - 1 - y;
     }
 
     if (s->input_pressed == s->report_pressed &&
@@ -517,6 +521,7 @@ static void cyttsp4_init(Object *obj)
 
 static const Property cyttsp4_properties[] = {
     DEFINE_PROP_BOOL("invert-x", CYTTSP4State, invert_x, false),
+    DEFINE_PROP_BOOL("invert-y", CYTTSP4State, invert_y, false),
     DEFINE_PROP_UINT16("x-resolution", CYTTSP4State, x_resolution, 758),
     DEFINE_PROP_UINT16("y-resolution", CYTTSP4State, y_resolution, 1024),
 };
