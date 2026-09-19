@@ -105,6 +105,7 @@ static CGInterpolationQuality zoom_interpolation = kCGInterpolationNone;
 static NSTextField *pauseLabel;
 
 static bool allow_events;
+static id vm_activity;
 
 static NSInteger cbchangecount = -1;
 static QemuClipboardInfo *cbinfo;
@@ -2107,6 +2108,22 @@ static void cocoa_cursor_define(DisplayChangeListener *dcl, QEMUCursor *cursor)
     });
 }
 
+static void cocoa_vm_change_state(void *opaque, bool running, RunState state)
+{
+    dispatch_async(dispatch_get_main_queue(), ^{
+        /* A running guest must keep making progress when its window is hidden. */
+        if (running && !vm_activity) {
+            vm_activity = [[[NSProcessInfo processInfo]
+                beginActivityWithOptions:NSActivityUserInitiatedAllowingIdleSystemSleep
+                reason:@"Running a virtual machine"] retain];
+        } else if (!running && vm_activity) {
+            [[NSProcessInfo processInfo] endActivity:vm_activity];
+            [vm_activity release];
+            vm_activity = nil;
+        }
+    });
+}
+
 static void cocoa_display_init(DisplayState *ds, DisplayOptions *opts)
 {
     NSAutoreleasePool * pool = [[NSAutoreleasePool alloc] init];
@@ -2168,6 +2185,8 @@ static void cocoa_display_init(DisplayState *ds, DisplayOptions *opts)
     // register vga output callbacks
     register_displaychangelistener(&dcl);
     qemu_add_mouse_mode_change_notifier(&mouse_mode_change_notifier);
+    qemu_add_vm_change_state_handler(cocoa_vm_change_state, NULL);
+    cocoa_vm_change_state(NULL, runstate_is_running(), runstate_get());
     [cocoaView notifyMouseModeChange];
     [cocoaView updateUIInfo];
 
