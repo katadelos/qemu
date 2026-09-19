@@ -103,6 +103,7 @@ void emmc_boot_partition_read(DeviceState *dev, unsigned int partition,
 DECLARE_INSTANCE_CHECKER(SDState, AR6003_SDIO, TYPE_AR6003_SDIO)
 
 /* Broadcom BCM43430 Wi-Fi function used by the Lab126 Rex board. */
+#define TYPE_BCM4343W_SDIO "bcm4343w-sdio"
 #define TYPE_BCM43430_SDIO "bcm43430-sdio"
 DECLARE_INSTANCE_CHECKER(SDState, BCM43430_SDIO, TYPE_BCM43430_SDIO)
 

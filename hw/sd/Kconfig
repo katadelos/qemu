@@ -27,3 +27,7 @@ config SDHCI_PCI
 config CADENCE_SDHCI
     bool
     select SDHCI
+
+config BCM4343W_SDIO
+    bool
+    select SD
