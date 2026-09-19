@@ -25,7 +25,7 @@ system_ss.add(when: 'CONFIG_BOCHS_DISPLAY', if_true: files('bochs-display.c'))
 
 system_ss.add(when: 'CONFIG_EXYNOS4', if_true: files('exynos4210_fimd.c'))
 system_ss.add(when: 'CONFIG_FRAMEBUFFER', if_true: files('framebuffer.c'))
-system_ss.add(when: 'CONFIG_FSL_IMX6', if_true: files('imx_epdc.c'))
+system_ss.add(when: 'CONFIG_IMX_EPDC', if_true: files('imx_epdc.c'))
 system_ss.add(when: 'CONFIG_FSL_IMX50', if_true: files('imx50_epdc.c'))
 system_ss.add(when: 'CONFIG_MT8113', if_true: files('mt8113_hwtcon.c'))
 
