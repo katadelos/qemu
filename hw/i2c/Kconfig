@@ -77,3 +77,23 @@ config PMBUS
 config BCM2835_I2C
     bool
     select I2C
+
+config BD71827
+    bool
+    select I2C
+
+config FP9929
+    bool
+    select I2C
+
+config GOODIX_GT9XX
+    bool
+    select I2C
+
+config LM3695
+    bool
+    select I2C
+
+config MAX14656
+    bool
+    select I2C
