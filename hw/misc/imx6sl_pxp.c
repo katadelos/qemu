@@ -32,6 +32,7 @@
 #define PXP_LUT_DATA      0x260
 #define PXP_HIST_CTRL     0x290
 #define PXP_CTRL2         0x310
+#define PXP_IRQ_MASK      0x390
 #define PXP_IRQ           0x3a0
 #define PXP_IRQ_SET       0x3a4
 #define PXP_IRQ_CLR       0x3a8
@@ -47,6 +48,8 @@
 #define PXP_WFB_STORE_SHIFT0 0x13b0
 #define PXP_WFB_STORE_ADDR0  0x1410
 #define PXP_WFB_STORE_FILL0  0x1430
+#define PXP_HIST_B_CTRL      0x2a80
+#define PXP_HIST_B_TOTAL     0x2ab0
 
 #define CTRL_SFTRST       BIT(31)
 #define CTRL_CLKGATE      BIT(30)
@@ -61,9 +64,13 @@
 #define LUT_BYPASS        BIT(31)
 #define CTRL2_ENABLE      BIT(0)
 #define CTRL2_WFE_B       BIT(19)
+#define CTRL_WFE_A        BIT(18)
 #define WFB_FILL_ENABLE   BIT(11)
 #define WFB_STORE_ENABLE  BIT(9)
 #define IRQ_WFB_CH0       BIT(10)
+#define IRQ_WFA_CH0       BIT(8)
+#define IRQ_WFA_CH1       BIT(9)
+#define IRQ_WFA_STORE     BIT(14)
 
 #define PXP_MAX_DMA_BYTES (32 * MiB)
 
@@ -75,11 +82,22 @@ static inline uint32_t *pxp_reg(IMX6SLPXPState *s, hwaddr offset)
 bool imx6sl_pxp_get_wfe_a_fetch(IMX6SLPXPState *s,
                                 IMX6SLPXPFetch *fetch)
 {
-    uint32_t size = *pxp_reg(s, PXP_WFA_FETCH1_SIZE);
-    uint32_t cord = *pxp_reg(s, PXP_WFA_FETCH1_CORD);
+    uint32_t size, cord;
 
-    fetch->addr = *pxp_reg(s, PXP_WFA_FETCH1_ADDR);
-    fetch->pitch = *pxp_reg(s, PXP_WFA_FETCH1_PITCH) & 0xffff;
+    /* The DMA IRQ handler resets the programming registers before EPDC
+     * consumes the completed waveform-engine output. */
+    if (s->last_wfe_a_fetch[0]) {
+        fetch->addr = s->last_wfe_a_fetch[0];
+        fetch->pitch = s->last_wfe_a_fetch[1] & 0xffff;
+        size = s->last_wfe_a_fetch[2];
+        cord = s->last_wfe_a_fetch[3];
+    } else {
+        fetch->addr = *pxp_reg(s, PXP_WFA_FETCH1_ADDR);
+        fetch->pitch = *pxp_reg(s, PXP_WFA_FETCH1_PITCH) & 0xffff;
+        size = *pxp_reg(s, PXP_WFA_FETCH1_SIZE);
+        cord = *pxp_reg(s, PXP_WFA_FETCH1_CORD);
+    }
+
     fetch->left = cord & 0x3fff;
     fetch->top = (cord >> 16) & 0x3fff;
     fetch->width = (size & 0x3fff) + 1;
@@ -149,7 +167,51 @@ static void imx6sl_pxp_update_irq(IMX6SLPXPState *s)
      * can clear the legacy IRQ_ENABLE bit after arming the transaction.  Its
      * normal completion output remains level-sensitive to STAT.IRQ.
      */
-    qemu_set_irq(s->irq, !!(*pxp_reg(s, PXP_STAT) & STAT_IRQ));
+    qemu_set_irq(s->irq, !!((*pxp_reg(s, PXP_STAT) & STAT_IRQ) |
+                           (*pxp_reg(s, PXP_IRQ) &
+                            *pxp_reg(s, PXP_IRQ_MASK))));
+}
+
+static void pxp_wfe_a_complete(IMX6SLPXPState *s)
+{
+    IMX6SLPXPFetch fetch;
+    g_autofree uint8_t *row = NULL;
+    bool monochrome = true;
+    unsigned x, y;
+
+    s->last_wfe_a_fetch[0] = *pxp_reg(s, PXP_WFA_FETCH1_ADDR);
+    s->last_wfe_a_fetch[1] = *pxp_reg(s, PXP_WFA_FETCH1_PITCH);
+    s->last_wfe_a_fetch[2] = *pxp_reg(s, PXP_WFA_FETCH1_SIZE);
+    s->last_wfe_a_fetch[3] = *pxp_reg(s, PXP_WFA_FETCH1_CORD);
+
+    /* WFE_A consumes one Y4 sample in each byte's high nibble.  EPDC
+     * displays this completed fetch directly; electrical waveform state
+     * and overlapping physical panel updates are not simulated. */
+    if ((*pxp_reg(s, PXP_HIST_B_CTRL) & BIT(0)) &&
+        imx6sl_pxp_get_wfe_a_fetch(s, &fetch) &&
+        (uint64_t)fetch.pitch * fetch.height <= PXP_MAX_DMA_BYTES) {
+        row = g_malloc(fetch.width);
+        for (y = 0; y < fetch.height; y++) {
+            uint64_t addr = fetch.addr +
+                            (uint64_t)(fetch.top + y) * fetch.pitch + fetch.left;
+
+            if (dma_memory_read(&address_space_memory, addr, row, fetch.width,
+                                MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
+                *pxp_reg(s, PXP_STAT) |= STAT_AXI_READ;
+                break;
+            }
+            for (x = 0; x < fetch.width; x++) {
+                unsigned gray = row[x] >> 4;
+
+                monochrome &= gray == 0 || gray == 15;
+            }
+        }
+        *pxp_reg(s, PXP_HIST_B_TOTAL) = fetch.width * y;
+        *pxp_reg(s, PXP_HIST_B_CTRL) =
+            (*pxp_reg(s, PXP_HIST_B_CTRL) & ~0x1f00U) |
+            (monochrome ? BIT(8) : BIT(11));
+    }
+    *pxp_reg(s, PXP_IRQ) |= IRQ_WFA_STORE | IRQ_WFA_CH0 | IRQ_WFA_CH1;
 }
 
 static unsigned pxp_bytes_per_pixel(unsigned format)
@@ -366,16 +428,21 @@ static void imx6sl_pxp_complete(void *opaque)
     if (!s->running) {
         return;
     }
-    pxp_do_dma(s);
+    if (*pxp_reg(s, s->control_offset) & CTRL_WFE_A) {
+        pxp_wfe_a_complete(s);
+    } else {
+        pxp_do_dma(s);
+        *pxp_reg(s, PXP_STAT) |= STAT_IRQ;
+    }
     s->running = false;
-    *pxp_reg(s, PXP_CTRL) &= ~CTRL_ENABLE;
-    *pxp_reg(s, PXP_STAT) |= STAT_IRQ;
+    *pxp_reg(s, s->control_offset) &= ~CTRL_ENABLE;
     imx6sl_pxp_update_irq(s);
 }
 
-static void imx6sl_pxp_start(IMX6SLPXPState *s)
+static void imx6sl_pxp_start(IMX6SLPXPState *s, hwaddr control_offset)
 {
     s->running = true;
+    s->control_offset = control_offset;
     /*
      * Finish after the enabling MMIO transaction returns.  A zero-delay
      * virtual timer preserves the hardware's asynchronous IRQ edge without
@@ -390,7 +457,8 @@ static bool pxp_alias_base(hwaddr offset, hwaddr *base, unsigned *op)
     hwaddr candidate = offset & ~0xfULL;
 
     if ((candidate == PXP_CTRL || candidate == PXP_STAT ||
-         candidate == PXP_OUT_CTRL || candidate == PXP_PS_CTRL) &&
+         candidate == PXP_OUT_CTRL || candidate == PXP_PS_CTRL ||
+         candidate == PXP_IRQ_MASK) &&
         (offset & 0xf) <= 0xc && !(offset & 3)) {
         *base = candidate;
         *op = (offset & 0xf) >> 2;
@@ -430,15 +498,21 @@ static void imx6sl_pxp_write(void *opaque, hwaddr offset, uint64_t value,
         } else {
             *irq ^= val;
         }
+        imx6sl_pxp_update_irq(s);
         return;
     }
 
     if (offset == PXP_CTRL2) {
         *pxp_reg(s, offset) = val;
-        if ((val & (CTRL2_ENABLE | CTRL2_WFE_B)) ==
+        if ((val & (CTRL2_ENABLE | CTRL_WFE_A)) ==
+            (CTRL2_ENABLE | CTRL_WFE_A)) {
+            imx6sl_pxp_start(s, PXP_CTRL2);
+        } else if ((val & (CTRL2_ENABLE | CTRL2_WFE_B)) ==
             (CTRL2_ENABLE | CTRL2_WFE_B)) {
             pxp_wfe_b_fill(s);
             *pxp_reg(s, PXP_IRQ) |= IRQ_WFB_CH0;
+            *pxp_reg(s, PXP_CTRL2) &= ~CTRL2_ENABLE;
+            imx6sl_pxp_update_irq(s);
         }
         return;
     }
@@ -482,13 +556,13 @@ static void imx6sl_pxp_write(void *opaque, hwaddr offset, uint64_t value,
     *pxp_reg(s, base) = old;
     if (base == PXP_CTRL) {
         if ((old & CTRL_ENABLE) && !s->running && !(old & CTRL_CLKGATE)) {
-            imx6sl_pxp_start(s);
+            imx6sl_pxp_start(s, PXP_CTRL);
         } else if (!(old & CTRL_ENABLE) && s->running) {
             timer_del(&s->completion_timer);
             s->running = false;
         }
     }
-    if (base == PXP_CTRL || base == PXP_STAT) {
+    if (base == PXP_CTRL || base == PXP_STAT || base == PXP_IRQ_MASK) {
         imx6sl_pxp_update_irq(s);
     }
 }
@@ -511,6 +585,8 @@ static void imx6sl_pxp_reset(DeviceState *dev)
     s->regs[PXP_VERSION >> 2] = 0x02000000;
     s->lut_addr = 0;
     s->running = false;
+    s->control_offset = PXP_CTRL;
+    memset(s->last_wfe_a_fetch, 0, sizeof(s->last_wfe_a_fetch));
     s->last_source_addr = 0;
     s->last_source_pitch = 0;
     s->last_source_bpp = 0;
@@ -519,14 +595,16 @@ static void imx6sl_pxp_reset(DeviceState *dev)
 
 static const VMStateDescription vmstate_imx6sl_pxp = {
     .name = TYPE_IMX6SL_PXP,
-    .version_id = 2,
-    .minimum_version_id = 2,
+    .version_id = 3,
+    .minimum_version_id = 3,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IMX6SLPXPState,
                              IMX6SL_PXP_SIZE / sizeof(uint32_t)),
         VMSTATE_UINT8_ARRAY(lut, IMX6SLPXPState, 256),
         VMSTATE_UINT16(lut_addr, IMX6SLPXPState),
         VMSTATE_BOOL(running, IMX6SLPXPState),
+        VMSTATE_UINT16(control_offset, IMX6SLPXPState),
+        VMSTATE_UINT32_ARRAY(last_wfe_a_fetch, IMX6SLPXPState, 4),
         VMSTATE_UINT32(last_source_addr, IMX6SLPXPState),
         VMSTATE_UINT32(last_source_pitch, IMX6SLPXPState),
         VMSTATE_UINT8(last_source_bpp, IMX6SLPXPState),
