@@ -55,6 +55,7 @@
 #define GPT_CR_CLKSRC_MASK  (0x7)
 
 #define GPT_CR_FRR    (1 << 9)  /* Freerun or Restart */
+#define GPT_CR_24MEN  (1 << 10) /* Enable 24 MHz oscillator input */
 #define GPT_CR_SWR    (1 << 15) /* Software Reset */
 #define GPT_CR_IM1    (3 << 16) /* Input capture channel 1 mode (2 bits) */
 #define GPT_CR_IM2    (3 << 18) /* Input capture channel 2 mode (2 bits) */
@@ -117,6 +118,7 @@ struct IMXGPTState {
     qemu_irq irq;
 
     const IMXClk *clocks;
+    bool has_prescaler24m;
 };
 
 #endif /* IMX_GPT_H */

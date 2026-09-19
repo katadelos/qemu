@@ -152,9 +152,14 @@ static const IMXClk imx8mp_gpt_clocks[] = {
 static void imx_gpt_set_freq(IMXGPTState *s)
 {
     uint32_t clksrc = extract32(s->cr, GPT_CR_CLKSRC_SHIFT, 3);
+    uint32_t divider = 1 + extract32(s->pr, 0, 12);
 
+    /* i.MX7 divides the oscillator input before the common prescaler. */
+    if (s->has_prescaler24m && clksrc == 5) {
+        divider *= 1 + extract32(s->pr, 12, 4);
+    }
     s->freq = imx_ccm_get_clock_frequency(s->ccm,
-                                          s->clocks[clksrc]) / (1 + s->pr);
+                                          s->clocks[clksrc]) / divider;
 
     trace_imx_gpt_set_freq(clksrc, s->freq);
 
@@ -222,29 +227,24 @@ static void imx_gpt_compute_next_timeout(IMXGPTState *s, bool event)
 
     /* now, find the next timeout related to count */
 
-    if (s->ir & GPT_IR_OF1IE) {
-        timeout = imx_gpt_find_limit(count, s->ocr1, timeout);
-    }
-    if (s->ir & GPT_IR_OF2IE) {
-        timeout = imx_gpt_find_limit(count, s->ocr2, timeout);
-    }
-    if (s->ir & GPT_IR_OF3IE) {
-        timeout = imx_gpt_find_limit(count, s->ocr3, timeout);
-    }
+    /* Compare status latches even while its interrupt is masked. */
+    timeout = imx_gpt_find_limit(count, s->ocr1, timeout);
+    timeout = imx_gpt_find_limit(count, s->ocr2, timeout);
+    timeout = imx_gpt_find_limit(count, s->ocr3, timeout);
 
     /* find the next set of interrupts to raise for next timer event */
 
     s->next_int = 0;
-    if ((s->ir & GPT_IR_OF1IE) && (timeout == s->ocr1)) {
+    if (timeout == s->ocr1) {
         s->next_int |= GPT_SR_OF1;
     }
-    if ((s->ir & GPT_IR_OF2IE) && (timeout == s->ocr2)) {
+    if (timeout == s->ocr2) {
         s->next_int |= GPT_SR_OF2;
     }
-    if ((s->ir & GPT_IR_OF3IE) && (timeout == s->ocr3)) {
+    if (timeout == s->ocr3) {
         s->next_int |= GPT_SR_OF3;
     }
-    if ((s->ir & GPT_IR_ROVIE) && (timeout == GPT_TIMER_MAX)) {
+    if (timeout == GPT_TIMER_MAX) {
         s->next_int |= GPT_SR_ROV;
     }
 
@@ -404,7 +404,7 @@ static void imx_gpt_write(void *opaque, hwaddr offset, uint64_t value,
     switch (offset >> 2) {
     case 0:
         oldreg = s->cr;
-        s->cr = value & ~0x7c14;
+        s->cr = value & ~(s->has_prescaler24m ? 0x7814 : 0x7c14);
         if (s->cr & GPT_CR_SWR) { /* force reset */
             /* handle the reset */
             imx_gpt_soft_reset(DEVICE(s));
@@ -431,7 +431,7 @@ static void imx_gpt_write(void *opaque, hwaddr offset, uint64_t value,
         break;
 
     case 1: /* Prescaler */
-        s->pr = value & 0xfff;
+        s->pr = value & (s->has_prescaler24m ? 0xffff : 0xfff);
         ptimer_transaction_begin(s->timer);
         imx_gpt_set_freq(s);
         ptimer_transaction_commit(s->timer);
@@ -583,6 +583,7 @@ static void imx7_gpt_init(Object *obj)
     IMXGPTState *s = IMX_GPT(obj);
 
     s->clocks = imx7_gpt_clocks;
+    s->has_prescaler24m = true;
 }
 
 static void imx8mp_gpt_init(Object *obj)
