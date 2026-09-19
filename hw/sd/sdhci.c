@@ -368,10 +368,17 @@ static void sdhci_send_command(SDHCIState *s)
         (s->mix_ctrl & BIT(7)) &&
         (request.cmd == 18 || request.cmd == 25)) {
         /*
-         * USDHC MIX_CTRL.AC23EN uses DS_ADDR as the CMD23 argument.
-         * The card must receive it before an ADMA bounded transfer.
+         * Older USDHC revisions (including i.MX7D) take the ADMA
+         * Auto CMD23 argument from BLK_ATT, not DS_ADDR.  Firmware
+         * therefore need not program DS_ADDR for a bounded ADMA read.
+         * Later revisions support the full 32-bit argument in DS_ADDR.
          */
         SDRequest count = { .cmd = 23, .arg = s->sdmasysad };
+        if (s->auto_cmd23_block_count &&
+            SDHC_DMA_TYPE(s->hostctl1) != SDHC_CTRL_SDMA) {
+            count.arg = s->blkcnt;
+        }
+        trace_sdhci_send_command(count.cmd, count.arg);
         sdbus_do_command(&s->sdbus, &count, response, sizeof(response));
     }
 
@@ -444,27 +451,28 @@ static void sdhci_send_command(SDHCIState *s)
         (s->cmdreg & SDHC_CMD_DATA_PRESENT)) {
         s->data_count = 0;
         if (object_dynamic_cast(OBJECT(s), TYPE_IMX_USDHC)) {
-            if (s->defer_data_transfer) {
+            bool adma = (s->trnmod & SDHC_TRNS_DMA) &&
+                        SDHC_DMA_TYPE(s->hostctl1) != SDHC_CTRL_SDMA;
+
+            if (!s->defer_data_transfer) {
+                /* Lab126 U-Boot observes transfer-active before it
+                 * acknowledges command completion. */
+                s->prnsts |= SDHC_DATA_INHIBIT | SDHC_DAT_LINE_ACTIVE;
+                s->prnsts |= (s->trnmod & SDHC_TRNS_READ) ?
+                            SDHC_DOING_READ : SDHC_DOING_WRITE;
+            }
+            if (s->defer_data_transfer || adma) {
                 /*
                  * Keep the data phase pending until the guest acknowledges
-                 * command completion and programs the DMA address.
+                 * command completion and programs the DMA address.  ADMA
+                 * also needs this ordering with the early transfer-active
+                 * indication: the storage BIOS polls command completion
+                 * before handing data completion to its IRQ handler.
                  */
                 timer_mod(s->transfer_timer,
                           qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
                           3600LL * 1000 * 1000 * 1000);
             } else {
-                /*
-                 * Lab126 U-Boot waits for the i.MX transfer-active state
-                 * before it acknowledges command completion.  Running the
-                 * complete DMA synchronously makes that state unobservable,
-                 * so expose it now and perform the transfer asynchronously.
-                 */
-                s->prnsts |= SDHC_DATA_INHIBIT | SDHC_DAT_LINE_ACTIVE;
-                if (s->trnmod & SDHC_TRNS_READ) {
-                    s->prnsts |= SDHC_DOING_READ;
-                } else {
-                    s->prnsts |= SDHC_DOING_WRITE;
-                }
                 timer_mod(s->transfer_timer,
                           qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
                           SDHC_TRANSFER_DELAY);
@@ -1426,7 +1434,19 @@ sdhci_write(void *opaque, hwaddr offset, uint64_t val, unsigned size)
         /* Preserve command-complete -> transfer-complete ordering when a
          * guest acknowledges the command interrupt before i.MX DMA runs. */
         if (timer_pending(s->transfer_timer)) {
-            sdhci_resume_pending_transfer(s);
+            if (object_dynamic_cast(OBJECT(s), TYPE_IMX_USDHC) &&
+                (s->trnmod & SDHC_TRNS_DMA) &&
+                SDHC_DMA_TYPE(s->hostctl1) != SDHC_CTRL_SDMA) {
+                if ((value & SDHC_NIS_CMDCMP) &&
+                    !(s->norintsts & SDHC_NIS_CMDCMP)) {
+                    /* Finish after the acknowledgement returns, so the
+                     * guest can enter its data-completion wait state. */
+                    timer_mod(s->transfer_timer,
+                              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 10000);
+                }
+            } else {
+                sdhci_resume_pending_transfer(s);
+            }
         }
         break;
     case SDHC_NORINTSTSEN:
@@ -1691,6 +1711,8 @@ static const Property sdhci_sysbus_properties[] = {
                      false),
     DEFINE_PROP_BOOL("defer-data-transfer", SDHCIState, defer_data_transfer,
                      true),
+    DEFINE_PROP_BOOL("auto-cmd23-block-count", SDHCIState,
+                     auto_cmd23_block_count, false),
     DEFINE_PROP_BOOL("timeout-command-complete", SDHCIState,
                      timeout_command_complete, false),
     DEFINE_PROP_LINK("dma", SDHCIState,
