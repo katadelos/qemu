@@ -4972,6 +4972,13 @@ static const Property emmc_properties[] = {
 static void sdmmc_common_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+
+    dc->bus_type = TYPE_SD_BUS;
+}
+
+static void sd_memory_common_class_init(ObjectClass *klass, const void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
     SDCardClass *sc = SDMMC_COMMON_CLASS(klass);
 
     device_class_set_props(dc, sdmmc_common_properties);
@@ -5105,15 +5112,22 @@ static const TypeInfo sd_types[] = {
         .name           = TYPE_SDMMC_COMMON,
         .parent         = TYPE_DEVICE,
         .abstract       = true,
-        .instance_size  = sizeof(SDState),
+        .instance_size  = sizeof(DeviceState),
         .class_size     = sizeof(SDCardClass),
         .class_init     = sdmmc_common_class_init,
+    },
+    {
+        .name           = TYPE_SD_MEMORY_COMMON,
+        .parent         = TYPE_SDMMC_COMMON,
+        .abstract       = true,
+        .instance_size  = sizeof(SDState),
+        .class_init     = sd_memory_common_class_init,
         .instance_init  = sd_instance_init,
         .instance_finalize = sd_instance_finalize,
     },
     {
         .name           = TYPE_SD_CARD,
-        .parent         = TYPE_SDMMC_COMMON,
+        .parent         = TYPE_SD_MEMORY_COMMON,
         .class_init     = sd_class_init,
     },
     {
@@ -5123,18 +5137,18 @@ static const TypeInfo sd_types[] = {
     },
     {
         .name           = TYPE_EMMC,
-        .parent         = TYPE_SDMMC_COMMON,
+        .parent         = TYPE_SD_MEMORY_COMMON,
         .class_init     = emmc_class_init,
     },
     {
         .name           = TYPE_AR6003_SDIO,
-        .parent         = TYPE_SDMMC_COMMON,
+        .parent         = TYPE_SD_MEMORY_COMMON,
         .instance_init  = ar6003_sdio_instance_init,
         .class_init     = ar6003_sdio_class_init,
     },
     {
         .name           = TYPE_BCM43430_SDIO,
-        .parent         = TYPE_SDMMC_COMMON,
+        .parent         = TYPE_SD_MEMORY_COMMON,
         .instance_init  = bcm43430_sdio_instance_init,
         .class_init     = bcm43430_sdio_class_init,
     },

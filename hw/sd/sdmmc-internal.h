@@ -14,6 +14,9 @@
 #define TYPE_SDMMC_COMMON "sdmmc-common"
 DECLARE_OBJ_CHECKERS(SDState, SDCardClass, SDMMC_COMMON, TYPE_SDMMC_COMMON)
 
+/* Shared storage implementation; SDIO devices only need the bus interface. */
+#define TYPE_SD_MEMORY_COMMON "sd-memory-common"
+
 /*
  * EXT_CSD Modes segment
  *
