@@ -1,5 +1,5 @@
 system_ss.add(files('hid.c'))
-system_ss.add(when: 'CONFIG_IMX6SL_WARIO', if_true: files('wario-keyboard.c'))
+system_ss.add(when: 'CONFIG_WARIO_KEYBOARD', if_true: files('wario-keyboard.c'))
 system_ss.add(when: 'CONFIG_IMX6SLL_FORMA', if_true: files('forma-buttons.c'))
 system_ss.add(when: 'CONFIG_IMX50_YOSHI', if_true: files('tequila-keyboard.c'))
 system_ss.add(when: 'CONFIG_ADB', if_true: files('adb.c', 'adb-mouse.c', 'adb-kbd.c'))

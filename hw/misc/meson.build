@@ -157,10 +157,8 @@ system_ss.add(when: 'CONFIG_NRF51_SOC', if_true: files('nrf51_rng.c'))
 system_ss.add(when: 'CONFIG_GRLIB', if_true: files('grlib_ahb_apb_pnp.c'))
 
 system_ss.add(when: 'CONFIG_I2C_ECHO', if_true: files('i2c-echo.c'))
-system_ss.add(when: 'CONFIG_IMX6SL_WARIO', if_true: files(
-  'imx6sl_iomuxc.c',
-  'imx6sl_mmdc.c',
-))
+system_ss.add(when: 'CONFIG_IMX6SL_IOMUXC', if_true: files('imx6sl_iomuxc.c'))
+system_ss.add(when: 'CONFIG_IMX6SL_MMDC', if_true: files('imx6sl_mmdc.c'))
 system_ss.add(when: 'CONFIG_IMX6SLL_REX', if_true: files('imx6sll_ocotp.c'))
 
 specific_ss.add(when: 'CONFIG_AVR_POWER', if_true: files('avr_power.c'))

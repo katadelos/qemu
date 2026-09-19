@@ -34,6 +34,18 @@ config MAX77796
     bool
     select I2C
 
+config MAX77696
+    bool
+    select I2C
+
+config DRV2667
+    bool
+    select I2C
+
+config CYTTSP4
+    bool
+    select I2C
+
 config CYTTSP5
     bool
     select I2C

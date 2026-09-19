@@ -10,7 +10,6 @@
 #include "hw/arm/fsl-imx6.h"
 #include "hw/arm/machines-qom.h"
 #include "hw/core/boards.h"
-#include "hw/core/loader.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/display/imx_epdc.h"
 #include "hw/i2c/drv2667.h"
@@ -24,18 +23,16 @@
 #include "hw/misc/imx6sl_pxp.h"
 #include "hw/misc/max44009.h"
 #include "hw/sd/sd.h"
-#include "hw/ssi/ssi.h"
 #include "qemu/error-report.h"
 #include "qemu/units.h"
 #include "system/block-backend.h"
 #include "system/reset.h"
 #include "system/system.h"
 #include "system/qtest.h"
+#include "imx6sl-kindle.h"
 
 #define WARIO_RAM_BASE       0x80000000
 #define WARIO_RAM_MAX        (2 * GiB)
-#define WARIO_UBOOT_ADDR     0x00980000
-#define WARIO_UBOOT_MAX      0x00080000
 #define WARIO_IRAM_STACK     0x00920000
 #define WARIO_MACHINE_ID     4091
 #define WARIO_EPDC_ADDR      0x020f4000
@@ -56,40 +53,16 @@
 #define WARIO_PXP_ADDR       0x020f0000
 /* Linux IRQ 130 minus the GIC SPI base (32). */
 #define WARIO_PXP_GIC_IRQ    98
-#define WARIO_IVT_OFFSET     0x400
-#define WARIO_IVT_ENTRY_OFF  0x04
-#define WARIO_IVT_SELF_OFF   0x14
-#define WARIO_IDME_BASE      0x5e000
-
-#define WARIO_ATAG_SERIAL16   0x5441000a
-#define WARIO_ATAG_REVISION16 0x5441000b
-#define WARIO_ATAG_MACADDR    0x5441000d
-#define WARIO_ATAG_BOOTMODE   0x5441000f
-#define WARIO_ATAG_ID16_SIZE  16
-#define WARIO_ATAG_MAC_SIZE   32
-#define WARIO_ATAG_BOOT_SIZE  32
 
 #define TYPE_WARIO_MACHINE MACHINE_TYPE_NAME("imx6sl-wario")
 OBJECT_DECLARE_SIMPLE_TYPE(WarioMachineState, WARIO_MACHINE)
 
 typedef struct WarioMachineState {
     MachineState parent_obj;
-    char *idme_serial;
-    char *idme_mac;
-    char *idme_mfg;
-    char *idme_pcbsn;
-    char *idme_bootmode;
-    char *idme_postmode;
+    KindleIMX6SLIdme idme;
     bool idme_boot_partitions;
     bool kobo_rgb565;
 } WarioMachineState;
-
-typedef struct WarioIdmeField {
-    const char *name;
-    char *value;
-    uint32_t offset;
-    size_t size;
-} WarioIdmeField;
 
 static struct arm_boot_info wario_boot_info;
 
@@ -99,79 +72,25 @@ static bool wario_is_bourbon(const WarioMachineState *wms)
      * Lab126 board IDs occupy the first three bytes of the PCB serial.
      * 051 is production Bourbon and 062 is the pre-EVT2 Bourbon spin.
      */
-    return g_str_has_prefix(wms->idme_pcbsn, "051") ||
-           g_str_has_prefix(wms->idme_pcbsn, "062");
+    return g_str_has_prefix(wms->idme.pcbsn, "051") ||
+           g_str_has_prefix(wms->idme.pcbsn, "062");
 }
 
 static bool wario_is_pinot(const WarioMachineState *wms)
 {
     /* 027/02e are Wi-Fi Pinot boards; 02a/02f are WAN variants. */
-    return g_str_has_prefix(wms->idme_pcbsn, "027") ||
-           g_ascii_strncasecmp(wms->idme_pcbsn, "02a", 3) == 0 ||
-           g_ascii_strncasecmp(wms->idme_pcbsn, "02e", 3) == 0 ||
-           g_ascii_strncasecmp(wms->idme_pcbsn, "02f", 3) == 0;
+    return g_str_has_prefix(wms->idme.pcbsn, "027") ||
+           g_ascii_strncasecmp(wms->idme.pcbsn, "02a", 3) == 0 ||
+           g_ascii_strncasecmp(wms->idme.pcbsn, "02e", 3) == 0 ||
+           g_ascii_strncasecmp(wms->idme.pcbsn, "02f", 3) == 0;
 }
 
 static bool wario_is_muscat(const WarioMachineState *wms)
 {
     /* 067/13G are Wi-Fi Muscat boards; 068 is the WAN variant. */
-    return g_str_has_prefix(wms->idme_pcbsn, "067") ||
-           g_str_has_prefix(wms->idme_pcbsn, "068") ||
-           g_ascii_strncasecmp(wms->idme_pcbsn, "13g", 3) == 0;
-}
-
-static uint8_t *wario_append_string_atag(uint8_t *p, uint32_t tag,
-                                         const char *value,
-                                         size_t payload_size)
-{
-    stl_le_p(p, (payload_size + 8) / 4);
-    stl_le_p(p + 4, tag);
-    memset(p + 8, 0, payload_size);
-    memcpy(p + 8, value, MIN(strlen(value), payload_size));
-    return p + 8 + payload_size;
-}
-
-static int wario_write_extra_atags(const struct arm_boot_info *info,
-                                   void *opaque, void *buffer,
-                                   size_t max_size)
-{
-    WarioMachineState *wms = opaque;
-    uint8_t *start = buffer;
-    uint8_t *p = start;
-    const size_t required =
-        2 * (8 + WARIO_ATAG_ID16_SIZE) +
-        (8 + WARIO_ATAG_MAC_SIZE) + (8 + WARIO_ATAG_BOOT_SIZE);
-
-    (void)info;
-
-    if (max_size < required) {
-        return -1;
-    }
-
-    p = wario_append_string_atag(p, WARIO_ATAG_SERIAL16,
-                                 wms->idme_serial, WARIO_ATAG_ID16_SIZE);
-    p = wario_append_string_atag(p, WARIO_ATAG_REVISION16,
-                                 wms->idme_pcbsn, WARIO_ATAG_ID16_SIZE);
-
-    stl_le_p(p, (WARIO_ATAG_MAC_SIZE + 8) / 4);
-    stl_le_p(p + 4, WARIO_ATAG_MACADDR);
-    memset(p + 8, 0, WARIO_ATAG_MAC_SIZE);
-    memcpy(p + 8, wms->idme_mac,
-           MIN(strlen(wms->idme_mac), (size_t)12));
-    memcpy(p + 20, wms->idme_mfg,
-           MIN(strlen(wms->idme_mfg), (size_t)20));
-    p += 8 + WARIO_ATAG_MAC_SIZE;
-
-    stl_le_p(p, (WARIO_ATAG_BOOT_SIZE + 8) / 4);
-    stl_le_p(p + 4, WARIO_ATAG_BOOTMODE);
-    memset(p + 8, 0, WARIO_ATAG_BOOT_SIZE);
-    memcpy(p + 8, wms->idme_bootmode,
-           MIN(strlen(wms->idme_bootmode), (size_t)16));
-    memcpy(p + 24, wms->idme_postmode,
-           MIN(strlen(wms->idme_postmode), (size_t)16));
-    p += 8 + WARIO_ATAG_BOOT_SIZE;
-
-    return (int)(p - start);
+    return g_str_has_prefix(wms->idme.pcbsn, "067") ||
+           g_str_has_prefix(wms->idme.pcbsn, "068") ||
+           g_ascii_strncasecmp(wms->idme.pcbsn, "13g", 3) == 0;
 }
 
 static void wario_firmware_reset(void *opaque)
@@ -183,34 +102,6 @@ static void wario_firmware_reset(void *opaque)
         cpu->env.regs[13] = WARIO_IRAM_STACK;
     }
     cpu_set_pc(CPU(cpu), wario_boot_info.entry);
-}
-
-static void wario_populate_idme(DeviceState *card, WarioMachineState *wms)
-{
-    WarioIdmeField fields[] = {
-        { "serial", wms->idme_serial, 0x0000, 16 },
-        { "mac", wms->idme_mac, 0x0030, 12 },
-        { "mfg", wms->idme_mfg, 0x0040, 20 },
-        { "pcbsn", wms->idme_pcbsn, 0x0060, 16 },
-        { "bootmode", wms->idme_bootmode, 0x1000, 16 },
-        { "postmode", wms->idme_postmode, 0x1010, 16 },
-    };
-    size_t i;
-
-    for (i = 0; i < ARRAY_SIZE(fields); i++) {
-        WarioIdmeField *field = &fields[i];
-        g_autofree uint8_t *contents = g_malloc0(field->size);
-        size_t len = strlen(field->value);
-
-        if (!g_str_is_ascii(field->value) || len > field->size) {
-            error_report("IDME %s must contain at most %zu ASCII bytes",
-                         field->name, field->size);
-            exit(EXIT_FAILURE);
-        }
-        memcpy(contents, field->value, len);
-        emmc_boot_partition_write(card, 1, WARIO_IDME_BASE + field->offset,
-                                  contents, field->size, &error_fatal);
-    }
 }
 
 static void wario_attach_card(FslIMX6State *s, WarioMachineState *wms,
@@ -232,72 +123,9 @@ static void wario_attach_card(FslIMX6State *s, WarioMachineState *wms,
     qdev_prop_set_drive_err(card, "drive", blk, &error_fatal);
     qdev_realize(card, bus, &error_fatal);
     if (emmc && wms->idme_boot_partitions) {
-        wario_populate_idme(card, wms);
+        kindle_imx6sl_populate_idme(card, &wms->idme);
     }
     object_unref(OBJECT(card));
-}
-
-static void wario_panel_flash_program(SSIBus *bus, qemu_irq cs,
-                                      uint32_t address,
-                                      const uint8_t *data, size_t length)
-{
-    size_t i;
-
-    qemu_set_irq(cs, 1);
-    qemu_set_irq(cs, 0);
-    ssi_transfer(bus, 0x06); /* write enable */
-    qemu_set_irq(cs, 1);
-    qemu_set_irq(cs, 0);
-    ssi_transfer(bus, 0x02); /* page program */
-    ssi_transfer(bus, address >> 16);
-    ssi_transfer(bus, address >> 8);
-    ssi_transfer(bus, address);
-    for (i = 0; i < length; i++) {
-        ssi_transfer(bus, data[i]);
-    }
-    qemu_set_irq(cs, 1);
-}
-
-static void wario_attach_panel_flash(FslIMX6State *s,
-                                     const WarioMachineState *wms)
-{
-    SSIBus *bus;
-    DeviceState *flash;
-    DriveInfo *di = drive_get(IF_MTD, 0, 0);
-    qemu_irq cs;
-
-    /*
-     * A 4-Mbit panel NOR is physically populated on Icewine and must be
-     * present even when no content backing file was supplied.  An unbacked
-     * QEMU flash has erased (0xff) contents but still reports its JEDEC
-     * ID, allowing the stock driver to distinguish an empty flash from a
-     * missing SPI slave.  Panel waveform contents are supplied separately by
-     * the hidden eMMC waveform store.
-     */
-    bus = (SSIBus *)qdev_get_child_bus(DEVICE(&s->spi[0]), "spi");
-    /* AC-format panels use the 512 KiB address layout ending at 0x80000. */
-    flash = qdev_new("mx25l4005a");
-    if (di) {
-        qdev_prop_set_drive_err(flash, "drive", blk_by_legacy_dinfo(di),
-                                &error_fatal);
-    }
-    qdev_realize_and_unref(flash, BUS(bus), &error_fatal);
-    cs = qdev_get_gpio_in_named(flash, SSI_GPIO_CS, 0);
-    if (!di) {
-        static const uint8_t ac_format = 0x4b;
-
-        /* Select the AC layout while keeping the synthetic waveform blank. */
-        wario_panel_flash_program(bus, cs, 0x899, &ac_format, 1);
-        if (wario_is_muscat(wms)) {
-            /* Encoded "ED4", a production ED060TC1-3CE panel barcode. */
-            static const uint8_t muscat_bcd[] = { 0xe9, 0xe8, 0x04 };
-
-            wario_panel_flash_program(bus, cs, 0x70050,
-                                      muscat_bcd, sizeof(muscat_bcd));
-        }
-    }
-    qdev_connect_gpio_out(DEVICE(&s->gpio[3]), 11,
-                          cs);
 }
 
 static void wario_attach_wifi(FslIMX6State *s)
@@ -317,55 +145,6 @@ static void wario_attach_wifi(FslIMX6State *s)
     object_unref(OBJECT(wifi));
 }
 
-static void wario_load_firmware(MachineState *machine)
-{
-    g_autofree uint8_t *image = NULL;
-    gsize image_size;
-    hwaddr addr = WARIO_UBOOT_ADDR;
-    hwaddr max_size = WARIO_UBOOT_MAX;
-    uint32_t entry;
-    uint32_t self;
-    ssize_t size;
-
-    if (!machine->firmware) {
-        return;
-    }
-
-    /*
-     * The i.MX boot ROM consumes an IVT at offset 0x400 and jumps to its
-     * entry pointer.  -bios supplies the post-ROM image, so reproduce that
-     * last boot-ROM action instead of starting at the ARM reset vector.
-     * Stock U-Boot runs from OCRAM, while current barebox images are loaded
-     * directly into SDRAM; the IVT self pointer identifies either layout.
-     */
-    if (!g_file_get_contents(machine->firmware, (char **)&image,
-                             &image_size, NULL) ||
-        image_size < WARIO_IVT_OFFSET + WARIO_IVT_ENTRY_OFF + sizeof(entry)) {
-        error_report("Wario firmware has no readable IVT");
-        exit(EXIT_FAILURE);
-    }
-    entry = ldl_le_p(image + WARIO_IVT_OFFSET + WARIO_IVT_ENTRY_OFF);
-    self = ldl_le_p(image + WARIO_IVT_OFFSET + WARIO_IVT_SELF_OFF);
-    if (self >= WARIO_RAM_BASE + WARIO_IVT_OFFSET &&
-        self < WARIO_RAM_BASE + machine->ram_size) {
-        addr = self - WARIO_IVT_OFFSET;
-        max_size = WARIO_RAM_BASE + machine->ram_size - addr;
-    }
-    if (entry < addr || entry >= addr + image_size) {
-        error_report("Wario firmware IVT entry 0x%08x is outside image", entry);
-        exit(EXIT_FAILURE);
-    }
-
-    size = load_image_targphys(machine->firmware, addr, max_size, NULL);
-    if (size < 0) {
-        error_report("Unable to load Wario firmware '%s'",
-                     machine->firmware);
-        exit(EXIT_FAILURE);
-    }
-
-    wario_boot_info.entry = entry;
-}
-
 static void wario_init(MachineState *machine)
 {
     WarioMachineState *wms = WARIO_MACHINE(machine);
@@ -380,6 +159,7 @@ static void wario_init(MachineState *machine)
     bool bourbon = wario_is_bourbon(wms);
     bool pinot = wario_is_pinot(wms);
     bool muscat = wario_is_muscat(wms);
+    static const uint8_t muscat_barcode[] = { 0xe9, 0xe8, 0x04 };
 
     if (machine->ram_size > WARIO_RAM_MAX) {
         error_report("RAM size " RAM_ADDR_FMT " exceeds i.MX6SL maximum",
@@ -391,8 +171,8 @@ static void wario_init(MachineState *machine)
         .loader_start = WARIO_RAM_BASE,
         .board_id = WARIO_MACHINE_ID,
         .ram_size = machine->ram_size,
-        .write_extra_atags = wario_write_extra_atags,
-        .write_extra_atags_opaque = wms,
+        .write_extra_atags = kindle_imx6sl_write_extra_atags,
+        .write_extra_atags_opaque = &wms->idme,
     };
 
     s = FSL_IMX6(object_new(TYPE_FSL_IMX6));
@@ -406,8 +186,8 @@ static void wario_init(MachineState *machine)
                              &error_fatal);
 
     /* Icewine's Hall output is high while the cover is open. */
-    if (g_str_has_prefix(wms->idme_pcbsn, "047") ||
-        g_str_has_prefix(wms->idme_pcbsn, "048")) {
+    if (g_str_has_prefix(wms->idme.pcbsn, "047") ||
+        g_str_has_prefix(wms->idme.pcbsn, "048")) {
         object_property_set_uint(OBJECT(&s->gpio[3]), "reset-psr",
                                  BIT(7), &error_fatal);
     }
@@ -419,7 +199,8 @@ static void wario_init(MachineState *machine)
     /* USDHC2 is eMMC; USDHC3's Wi-Fi SDIO function is modeled separately. */
     wario_attach_card(s, wms, 1, 1, true);
     wario_attach_wifi(s);
-    wario_attach_panel_flash(s, wms);
+    /* ED4 identifies Muscat's ED060TC1-3CE panel. */
+    kindle_imx6sl_attach_panel_flash(s, muscat ? muscat_barcode : NULL);
 
     i2c = s->i2c[0].bus;
     i2c_slave_create_simple(i2c, TYPE_MAX77696, 0x34);
@@ -530,7 +311,7 @@ static void wario_init(MachineState *machine)
     sysbus_mmio_map(SYS_BUS_DEVICE(keyboard), 0, 0x020fc000);
     create_unimplemented_device("imx6sl.dcp-reserved", 0x020fd000, 0x3000);
 
-    wario_load_firmware(machine);
+    wario_boot_info.entry = kindle_imx6sl_load_firmware(machine);
     if (machine->firmware) {
         qemu_register_reset(wario_firmware_reset, &s->cpu[0]);
     } else if (!qtest_enabled()) {
@@ -571,33 +352,33 @@ static void wario_set_kobo_rgb565(Object *obj, bool value, Error **errp)
 }
 
 #define WARIO_IDME_PROPERTY(_member)                                     \
-    static char *wario_get_##_member(Object *obj, Error **errp)          \
+    static char *wario_get_idme_##_member(Object *obj, Error **errp)          \
     {                                                                    \
-        return wario_idme_get(&WARIO_MACHINE(obj)->_member);             \
+        return wario_idme_get(&WARIO_MACHINE(obj)->idme._member);             \
     }                                                                    \
-    static void wario_set_##_member(Object *obj, const char *value,      \
+    static void wario_set_idme_##_member(Object *obj, const char *value,      \
                                     Error **errp)                         \
     {                                                                    \
-        wario_idme_set(&WARIO_MACHINE(obj)->_member, value);             \
+        wario_idme_set(&WARIO_MACHINE(obj)->idme._member, value);             \
     }
 
-WARIO_IDME_PROPERTY(idme_serial)
-WARIO_IDME_PROPERTY(idme_mac)
-WARIO_IDME_PROPERTY(idme_mfg)
-WARIO_IDME_PROPERTY(idme_pcbsn)
-WARIO_IDME_PROPERTY(idme_bootmode)
-WARIO_IDME_PROPERTY(idme_postmode)
+WARIO_IDME_PROPERTY(serial)
+WARIO_IDME_PROPERTY(mac)
+WARIO_IDME_PROPERTY(mfg)
+WARIO_IDME_PROPERTY(pcbsn)
+WARIO_IDME_PROPERTY(bootmode)
+WARIO_IDME_PROPERTY(postmode)
 
 static void wario_machine_instance_init(Object *obj)
 {
     WarioMachineState *wms = WARIO_MACHINE(obj);
 
-    wms->idme_serial = g_strdup("B054000000000001");
-    wms->idme_mac = g_strdup("020000000002");
-    wms->idme_mfg = g_strdup("00000000000000000000");
-    wms->idme_pcbsn = g_strdup("0470000000000001");
-    wms->idme_bootmode = g_strdup("main");
-    wms->idme_postmode = g_strdup("normal");
+    wms->idme.serial = g_strdup("B054000000000001");
+    wms->idme.mac = g_strdup("020000000002");
+    wms->idme.mfg = g_strdup("00000000000000000000");
+    wms->idme.pcbsn = g_strdup("0470000000000001");
+    wms->idme.bootmode = g_strdup("main");
+    wms->idme.postmode = g_strdup("normal");
     wms->idme_boot_partitions = true;
     wms->kobo_rgb565 = false;
 }
@@ -606,12 +387,12 @@ static void wario_machine_instance_finalize(Object *obj)
 {
     WarioMachineState *wms = WARIO_MACHINE(obj);
 
-    g_free(wms->idme_serial);
-    g_free(wms->idme_mac);
-    g_free(wms->idme_mfg);
-    g_free(wms->idme_pcbsn);
-    g_free(wms->idme_bootmode);
-    g_free(wms->idme_postmode);
+    g_free(wms->idme.serial);
+    g_free(wms->idme.mac);
+    g_free(wms->idme.mfg);
+    g_free(wms->idme.pcbsn);
+    g_free(wms->idme.bootmode);
+    g_free(wms->idme.postmode);
 }
 
 static void wario_machine_init(ObjectClass *oc, const void *data)

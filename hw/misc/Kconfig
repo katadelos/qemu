@@ -267,3 +267,9 @@ source macio/Kconfig
 config BD72720
     bool
     depends on I2C
+
+config IMX6SL_IOMUXC
+    bool
+
+config IMX6SL_MMDC
+    bool

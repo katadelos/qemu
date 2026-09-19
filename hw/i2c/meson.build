@@ -14,8 +14,10 @@ i2c_ss.add(when: 'CONFIG_IMX50_YOSHI', if_true: files('cyttsp.c'))
 i2c_ss.add(when: 'CONFIG_IMX50_KOBOTOUCH', if_true: files('kobotouch_msp430.c'))
 i2c_ss.add(when: 'CONFIG_IMX6SLL_FORMA', if_true: files('forma-pmic.c'))
 i2c_ss.add(when: 'CONFIG_CYTTSP5', if_true: files('cyttsp5.c'))
-i2c_ss.add(when: 'CONFIG_IMX6SL_WARIO', if_true: files('max77696.c', 'drv2667.c', 'cyttsp4.c'))
 i2c_ss.add(when: 'CONFIG_BMA2X2', if_true: files('bma2x2.c'))
+i2c_ss.add(when: 'CONFIG_MAX77696', if_true: files('max77696.c'))
+i2c_ss.add(when: 'CONFIG_DRV2667', if_true: files('drv2667.c'))
+i2c_ss.add(when: 'CONFIG_CYTTSP4', if_true: files('cyttsp4.c'))
 i2c_ss.add(when: 'CONFIG_MAX77796', if_true: files('max77796.c'))
 i2c_ss.add(when: 'CONFIG_IMX6SL_EANAB', if_true: files(
   'bd71815.c',

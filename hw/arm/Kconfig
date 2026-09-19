@@ -198,11 +198,23 @@ config SABRELITE
     select FSL_IMX6
     select SSI_M25P80
 
+config IMX6SL_KINDLE
+    bool
+    select FSL_IMX6
+    select IMX6SL_MMDC
+    select IMX6SL_IOMUXC
+    select MAX77696
+    select CYTTSP4
+    select WARIO_KEYBOARD
+    select SD
+    select SSI_M25P80
+
 config IMX6SL_WARIO
     bool
     default y
     depends on TCG && ARM
-    select FSL_IMX6
+    select IMX6SL_KINDLE
+    select DRV2667
     select NEONODE_ZFORCE
     select SD
 
