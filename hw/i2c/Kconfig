@@ -30,6 +30,14 @@ config IMX_I2C
     bool
     select I2C
 
+config MAX77796
+    bool
+    select I2C
+
+config BMA2X2
+    bool
+    select I2C
+
 config MTK_I2C
     bool
     select I2C
