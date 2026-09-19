@@ -6,6 +6,8 @@
 
 enum IMXGPCv2Registers {
     GPC_NUM        = 0xE00 / sizeof(uint32_t),
+    GPC_NUM_IRQS   = 128,
+    GPC_NUM_CPUS   = 2,
 };
 
 struct IMXGPCv2State {
@@ -15,6 +17,9 @@ struct IMXGPCv2State {
     /*< public >*/
     MemoryRegion iomem;
     uint32_t     regs[GPC_NUM];
+    uint32_t     irq_levels[GPC_NUM_IRQS / 32];
+    qemu_irq     irq_out[GPC_NUM_IRQS];
+    qemu_irq     wake[GPC_NUM_CPUS];
 };
 
 #define TYPE_IMX_GPCV2 "imx-gpcv2"

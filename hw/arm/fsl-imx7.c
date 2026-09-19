@@ -41,6 +41,10 @@ static void fsl_imx7_init(Object *obj)
      */
     object_initialize_child(obj, "a7mpcore", &s->a7mpcore,
                             TYPE_A15MPCORE_PRIV);
+    for (i = 0; i < FSL_IMX7_NUM_CPUS; i++) {
+        snprintf(name, NAME_SIZE, "cpu%d-irq", i);
+        object_initialize_child(obj, name, &s->cpu_irq[i], TYPE_OR_IRQ);
+    }
 
     /*
      * GPIOs
@@ -215,12 +219,25 @@ static void fsl_imx7_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(mpcore), 0, FSL_IMX7_A7MPCORE_ADDR);
 
     gic = mpcore;
+    sysbus_realize(SYS_BUS_DEVICE(&s->gpcv2), &error_abort);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->gpcv2), 0, FSL_IMX7_GPC_ADDR);
+    for (i = 0; i < FSL_IMX7_MAX_IRQ; i++) {
+        qdev_connect_gpio_out_named(DEVICE(&s->gpcv2), "irq", i,
+                                    qdev_get_gpio_in(gic, i));
+    }
     for (i = 0; i < smp_cpus; i++) {
         SysBusDevice *sbd = SYS_BUS_DEVICE(gic);
         DeviceState  *d   = DEVICE(qemu_get_cpu(i));
 
-        irq = qdev_get_gpio_in(d, ARM_CPU_IRQ);
-        sysbus_connect_irq(sbd, i, irq);
+        DeviceState *cpu_irq = DEVICE(&s->cpu_irq[i]);
+
+        object_property_set_int(OBJECT(cpu_irq), "num-lines", 2,
+                                &error_abort);
+        qdev_realize(cpu_irq, NULL, &error_abort);
+        qdev_connect_gpio_out(cpu_irq, 0, qdev_get_gpio_in(d, ARM_CPU_IRQ));
+        sysbus_connect_irq(sbd, i, qdev_get_gpio_in(cpu_irq, 0));
+        qdev_connect_gpio_out_named(DEVICE(&s->gpcv2), "wake", i,
+                                    qdev_get_gpio_in(cpu_irq, 1));
         irq = qdev_get_gpio_in(d, ARM_CPU_FIQ);
         sysbus_connect_irq(sbd, i + smp_cpus, irq);
         irq = qdev_get_gpio_in(d, ARM_CPU_VIRQ);
@@ -228,6 +245,8 @@ static void fsl_imx7_realize(DeviceState *dev, Error **errp)
         irq = qdev_get_gpio_in(d, ARM_CPU_VFIQ);
         sysbus_connect_irq(sbd, i + 3 * smp_cpus, irq);
     }
+    /* External IRQs feed both the GIC and the independent low-power wake path. */
+    gic = DEVICE(&s->gpcv2);
 
     /*
      * A7MPCORE DAP
@@ -325,12 +344,6 @@ static void fsl_imx7_realize(DeviceState *dev, Error **errp)
      */
     sysbus_realize(SYS_BUS_DEVICE(&s->analog), &error_abort);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->analog), 0, FSL_IMX7_ANALOG_ADDR);
-
-    /*
-     * GPCv2
-     */
-    sysbus_realize(SYS_BUS_DEVICE(&s->gpcv2), &error_abort);
-    sysbus_mmio_map(SYS_BUS_DEVICE(&s->gpcv2), 0, FSL_IMX7_GPC_ADDR);
 
     /*
      * ECSPIs
@@ -599,7 +612,7 @@ static void fsl_imx7_realize(DeviceState *dev, Error **errp)
                             &error_abort);
     qdev_realize(DEVICE(&s->pcie4_msi_irq), NULL, &error_abort);
 
-    irq = qdev_get_gpio_in(DEVICE(&s->a7mpcore), FSL_IMX7_PCI_INTD_MSI_IRQ);
+    irq = qdev_get_gpio_in(gic, FSL_IMX7_PCI_INTD_MSI_IRQ);
     qdev_connect_gpio_out(DEVICE(&s->pcie4_msi_irq), 0, irq);
 
     irq = qdev_get_gpio_in(gic, FSL_IMX7_PCI_INTA_IRQ);
