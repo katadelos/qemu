@@ -15,6 +15,7 @@ struct ChipideaState {
     NICConf gadget_nic_conf;
     NICState *gadget_nic;
     bool gadget;
+    bool gadget_host_connected;
     uint32_t otgsc;
     uint32_t dc_mode;
     uint32_t endptsetupstat;

@@ -65,7 +65,8 @@ static void chipidea_inject_setup(ChipideaState *ci,
     EHCIState *ehci = &SYS_BUS_EHCI(ci)->ehci;
     hwaddr qh_addr = ehci->asynclistaddr & 0xfffff800;
 
-    if (!qh_addr || (ci->dc_mode & 3) != 2) {
+    if (!ci->gadget_host_connected || !qh_addr ||
+        (ci->dc_mode & 3) != 2) {
         return;
     }
     dma_memory_write(&address_space_memory, qh_addr + 40, setup, 8,
@@ -84,7 +85,8 @@ static void chipidea_config_timer(void *opaque)
         0x01, 0x0b, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00,
     };
 
-    if (!ci->gadget || ci->gadget_configured) {
+    if (!ci->gadget || !ci->gadget_host_connected ||
+        ci->gadget_configured) {
         return;
     }
     if (ci->gadget_config_phase == 0) {
@@ -232,6 +234,9 @@ static void chipidea_process_in(ChipideaState *ci, uint32_t bits)
     uint8_t packet[0x4000];
     unsigned ep;
 
+    if (!ci->gadget_host_connected) {
+        return;
+    }
     ci->processing_in = true;
     for (ep = 0; ep < 8; ep++) {
         size_t length = sizeof(packet);
@@ -257,7 +262,7 @@ static bool chipidea_can_receive(NetClientState *nc)
     ChipideaState *ci = qemu_get_nic_opaque(nc);
     unsigned ep;
 
-    if (ci->processing_in) {
+    if (!ci->gadget_host_connected || ci->processing_in) {
         return false;
     }
     for (ep = 1; ep < 8; ep++) {
@@ -277,6 +282,9 @@ static ssize_t chipidea_receive(NetClientState *nc, const uint8_t *buf,
     ChipideaState *ci = qemu_get_nic_opaque(nc);
     unsigned ep;
 
+    if (!ci->gadget_host_connected) {
+        return 0;
+    }
     for (ep = 1; ep < 8; ep++) {
         size_t length = size;
 
@@ -304,7 +312,10 @@ static uint64_t chipidea_read(void *opaque, hwaddr offset,
     ChipideaState *ci = opaque;
 
     switch (offset) {
-    case CI_OTGSC: return ci->otgsc | BIT(11) | BIT(8);
+    case CI_OTGSC:
+        /* ID stays high in device mode; BSV/BSE reflect the USB cable. */
+        return (ci->otgsc & ~(BIT(11) | BIT(12))) | BIT(8) |
+               (ci->gadget_host_connected ? BIT(11) : BIT(12));
     case CI_USBMODE: return ci->dc_mode;
     case CI_ENDPTSETUPSTAT: return ci->endptsetupstat;
     case CI_ENDPTPRIME: return ci->endpointprime;
@@ -384,7 +395,8 @@ static void chipidea_write(void *opaque, hwaddr offset,
         if (offset >= CI_ENDPTCTRL0 && offset < CI_ENDPTCTRL0 + 32) {
             index = (offset - CI_ENDPTCTRL0) / 4;
             ci->endptctrl[index] = value;
-            if (ci->gadget_configured && index > 0) {
+            if (ci->gadget_host_connected && ci->gadget_configured &&
+                index > 0) {
                 unsigned i;
                 bool enabled = false;
 
@@ -453,12 +465,13 @@ static void chipidea_command_write(void *opaque, hwaddr offset,
     if (!(value & BIT(0))) {
         ci->gadget_configured = false;
         ci->gadget_config_phase = 0;
-        if (ci->gadget_config_timer) {
+        if (ci->gadget_host_connected && ci->gadget_config_timer) {
             /* OTG gadget binds do not always restart RUN until VBUS work. */
             timer_mod(ci->gadget_config_timer,
                       qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 2000);
         }
-    } else if (!was_running && ci->gadget_config_timer) {
+    } else if (!was_running && ci->gadget_host_connected &&
+               ci->gadget_config_timer) {
         ci->gadget_configured = false;
         ci->gadget_config_phase = 0;
         timer_mod(ci->gadget_config_timer,
@@ -601,14 +614,18 @@ static void chipidea_realize(DeviceState *dev, Error **errp)
         memory_region_add_subregion_overlap(&SYS_BUS_EHCI(ci)->ehci.mem,
                                             0x140,
                                             &ci->dc_command_iomem, 2);
-        /* The development rootfs switches from USB storage to g_ether. */
-        timer_mod(ci->gadget_config_timer,
-                  qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 30000);
+        /* A bound UDC is not an attached USB host. */
+        if (ci->gadget_host_connected) {
+            timer_mod(ci->gadget_config_timer,
+                      qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 30000);
+        }
     }
 }
 
 static const Property chipidea_properties[] = {
     DEFINE_PROP_BOOL("gadget", ChipideaState, gadget, false),
+    DEFINE_PROP_BOOL("gadget-host-connected", ChipideaState,
+                     gadget_host_connected, true),
     DEFINE_NIC_PROPERTIES(ChipideaState, gadget_nic_conf),
 };
 
