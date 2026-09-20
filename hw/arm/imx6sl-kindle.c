@@ -191,29 +191,21 @@ void kindle_imx6sl_attach_panel_flash(FslIMX6State *s,
 {
     SSIBus *bus;
     DeviceState *flash;
-    DriveInfo *di = drive_get(IF_MTD, 0, 0);
     qemu_irq cs;
+    static const uint8_t ac_format = 0x4b;
 
     /*
-     * Keep the 4-Mbit panel NOR present even without a backing file so the
+     * Keep a synthetic 4-Mbit panel NOR present so the
      * stock driver can read its JEDEC ID.  Waveforms come from the hidden
      * eMMC store; the synthetic NOR provides the AC layout and panel ID.
      */
     bus = (SSIBus *)qdev_get_child_bus(DEVICE(&s->spi[0]), "spi");
     flash = qdev_new("mx25l4005a");
-    if (di) {
-        qdev_prop_set_drive_err(flash, "drive", blk_by_legacy_dinfo(di),
-                                &error_fatal);
-    }
     qdev_realize_and_unref(flash, BUS(bus), &error_fatal);
     cs = qdev_get_gpio_in_named(flash, SSI_GPIO_CS, 0);
-    if (!di) {
-        static const uint8_t ac_format = 0x4b;
-
-        kindle_imx6sl_panel_flash_program(bus, cs, 0x899, &ac_format, 1);
-        if (barcode) {
-            kindle_imx6sl_panel_flash_program(bus, cs, 0x70050, barcode, 3);
-        }
+    kindle_imx6sl_panel_flash_program(bus, cs, 0x899, &ac_format, 1);
+    if (barcode) {
+        kindle_imx6sl_panel_flash_program(bus, cs, 0x70050, barcode, 3);
     }
     qdev_connect_gpio_out(DEVICE(&s->gpio[3]), 11, cs);
 }

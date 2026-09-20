@@ -442,13 +442,8 @@ static void stinger_attach_wifi(FslIMX7State *s)
 static void stinger_attach_spinor(FslIMX7State *s)
 {
     SSIBus *bus = (SSIBus *)qdev_get_child_bus(DEVICE(&s->spi[0]), "spi");
-    DriveInfo *di = drive_get(IF_MTD, 0, 0);
     DeviceState *flash = qdev_new("mx25l4005a");
 
-    if (di) {
-        qdev_prop_set_drive_err(flash, "drive", blk_by_legacy_dinfo(di),
-                                &error_fatal);
-    }
     qdev_realize_and_unref(flash, BUS(bus), &error_fatal);
     qdev_connect_gpio_out(DEVICE(&s->gpio[3]), 19,
                           qdev_get_gpio_in_named(flash, SSI_GPIO_CS, 0));

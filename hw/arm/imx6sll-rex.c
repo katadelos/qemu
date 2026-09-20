@@ -33,6 +33,7 @@
 #include "system/dma.h"
 #include "system/qtest.h"
 #include "system/reset.h"
+#include "imx6sl-kindle.h"
 
 #define REX_RAM_BASE        0x80000000
 #define REX_RAM_MAX         (2 * GiB)
@@ -530,17 +531,7 @@ static void rex_attach_wifi(FslIMX6State *s)
 
 static void rex_attach_spinor(FslIMX6State *s)
 {
-    SSIBus *bus = (SSIBus *)qdev_get_child_bus(DEVICE(&s->spi[0]), "spi");
-    DriveInfo *di = drive_get(IF_MTD, 0, 0);
-    DeviceState *flash = qdev_new("mx25l4005a");
-
-    if (di) {
-        qdev_prop_set_drive_err(flash, "drive", blk_by_legacy_dinfo(di),
-                                &error_fatal);
-    }
-    qdev_realize_and_unref(flash, BUS(bus), &error_fatal);
-    qdev_connect_gpio_out(DEVICE(&s->gpio[3]), 11,
-                          qdev_get_gpio_in_named(flash, SSI_GPIO_CS, 0));
+    kindle_imx6sl_attach_panel_flash(s, NULL);
 }
 
 static size_t rex_find_uboot_ivt(const uint8_t *image, size_t size)
