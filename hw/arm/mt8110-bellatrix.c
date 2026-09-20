@@ -578,7 +578,7 @@ static void bellatrix_init(MachineState *machine)
     }
     qdev_realize(DEVICE(soc), NULL, &error_fatal);
     bms->soc = soc;
-    if (board->scribe) {
+    if (board->scribe || malbec) {
         DeviceState *adc = qdev_new(TYPE_MT6577_AUXADC);
         object_property_add_child(OBJECT(machine), "auxadc", OBJECT(adc));
         sysbus_realize_and_unref(SYS_BUS_DEVICE(adc), &error_fatal);
@@ -607,6 +607,14 @@ static void bellatrix_init(MachineState *machine)
     qdev_prop_set_uint32(DEVICE(gtx8), "width", board->touch_width);
     qdev_prop_set_uint32(DEVICE(gtx8), "height", board->touch_height);
     i2c_slave_realize_and_unref(gtx8, soc->i2c[2].bus, &error_fatal);
+
+    if (malbec) {
+        /* mt8110-malbec.dts: two-channel frontlight, enabled by GPIO44. */
+        I2CSlave *light = i2c_slave_create_simple(soc->i2c[0].bus,
+                                                TYPE_FP9966, 0x34);
+        qdev_connect_gpio_out_named(DEVICE(&soc->gpio), "gpio-out", 44,
+            qdev_get_gpio_in_named(DEVICE(light), "enable", 0));
+    }
 
     if (board->scribe) {
         qdev_connect_gpio_out_named(DEVICE(bd71828), "irq", 0,
