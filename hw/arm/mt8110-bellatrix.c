@@ -105,13 +105,18 @@ typedef struct BellatrixBoard {
     bool scribe;
 } BellatrixBoard;
 
-/* The board tattoo selects Cava or Rossini; HWID pins select its phase. */
+/* Cava and Rossini share these phase straps; Malbec has a separate table. */
 static const BellatrixDeviceProfile bellatrix_device_profiles[] = {
     { .name = "production", .hwid = 4 },
     { .name = "dvt",        .hwid = 3 },
     { .name = "evt",        .hwid = 2 },
     { .name = "hvt",        .hwid = 1 },
     { .name = "proto",      .hwid = 0 },
+};
+
+/* Malbec's shipped U-Boot names HWID 14 DVT1.1 and accepts tattoo 2R9. */
+static const BellatrixDeviceProfile malbec_device_profiles[] = {
+    { "production", 14, "2R9" },
 };
 
 /* The stock Bellatrix3 board source names each Barolo tattoo phase. */
@@ -133,6 +138,19 @@ static const BellatrixDeviceProfile pisco_device_profiles[] = {
 
 static const BellatrixBoard bellatrix_boards[] = {
     {
+        .name = "malbec",
+        .board_id = "0002R9000000000",
+        .serial = "G002DK0000000000",
+        .device_type = "2DK",
+        .ram_size = 512 * MiB,
+        .soc_type = TYPE_MT8110,
+        .manufacturing = "PAPERWHITE5QEMU00",
+        .profiles = malbec_device_profiles,
+        .num_profiles = ARRAY_SIZE(malbec_device_profiles),
+        .hwid_pins = { 14, 15, 16, 17 },
+        .touch_reset = 1, .touch_width = 1236, .touch_height = 1648,
+        .power_good = 10,
+    }, {
         .name = "cava",
         .board_id = "0002R5000000000",
         .serial = "G0022D0000000000",
@@ -206,7 +224,7 @@ static const BellatrixBoard *bellatrix_find_board(const char *name)
     }
 
     error_report("invalid Bellatrix board '%s' "
-                 "(expected cava, rossini, barolo, or pisco)",
+                 "(expected malbec, cava, rossini, barolo, or pisco)",
                  name);
     exit(EXIT_FAILURE);
 }
@@ -525,6 +543,7 @@ static void bellatrix_init(MachineState *machine)
 {
     BellatrixMachineState *bms = BELLATRIX_MACHINE(machine);
     const BellatrixBoard *board = bellatrix_find_board(bms->board);
+    bool malbec = !strcmp(board->name, "malbec");
     MT8113State *soc;
     I2CSlave *fp9930;
     I2CSlave *bd71828;
@@ -541,6 +560,12 @@ static void bellatrix_init(MachineState *machine)
     object_property_add_child(OBJECT(machine), "soc", OBJECT(soc));
     object_property_set_uint(OBJECT(soc), "reset-vector",
                              BELLATRIX_HANDOFF_ADDR, &error_fatal);
+    if (malbec) {
+        qdev_prop_set_uint32(DEVICE(&soc->hwtcon), "initial-width",
+                             board->touch_width);
+        qdev_prop_set_uint32(DEVICE(&soc->hwtcon), "initial-height",
+                             board->touch_height);
+    }
     if (board->scribe) {
         /* Linux 4.9 mtk-cmdq-mailbox.c writes the first byte after the
          * packet into END_ADDR, including the segmented-buffer path. */
