@@ -275,6 +275,7 @@ config IMX6SLL_FORMA
     select IMX6SL_WARIO
     select CYTTSP5
     select SD
+    select RTL8192ES_SDIO
 
 config MT8115_PA6_CS8
     bool

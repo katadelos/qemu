@@ -13,3 +13,4 @@ system_ss.add(when: 'CONFIG_NPCM7XX', if_true: files('npcm7xx_sdhci.c'))
 system_ss.add(when: 'CONFIG_CADENCE_SDHCI', if_true: files('cadence_sdhci.c'))
 
 system_ss.add(when: 'CONFIG_BCM4343W_SDIO', if_true: files('bcm4343w-sdio.c'))
+system_ss.add(when: 'CONFIG_RTL8192ES_SDIO', if_true: files('rtl8192es-sdio.c'))

@@ -31,3 +31,7 @@ config CADENCE_SDHCI
 config BCM4343W_SDIO
     bool
     select SD
+
+config RTL8192ES_SDIO
+    bool
+    select SD

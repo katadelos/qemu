@@ -17,6 +17,7 @@
 #include "hw/misc/imx6sl_pxp.h"
 #include "hw/misc/imx_rngc.h"
 #include "hw/sd/sd.h"
+#include "net/net.h"
 #include "qemu/error-report.h"
 #include "qemu/units.h"
 #include "system/block-backend.h"
@@ -251,6 +252,19 @@ static void forma_init(MachineState *ms)
     qdev_realize_and_unref(dev,
                            qdev_get_child_bus(DEVICE(&s->usdhc[0]), "sd-bus"),
                            &error_fatal);
+
+    dev = qdev_new("rtl8192es-sdio");
+    qemu_configure_nic_device(dev, true, "rtl8192es");
+    qdev_realize(dev,
+                 qdev_get_child_bus(DEVICE(&s->usdhc[2]), "sd-bus"),
+                 &error_fatal);
+    qdev_connect_gpio_out(DEVICE(&s->gpio[4]), 0,
+                          qdev_get_gpio_in_named(dev, "power", 0));
+    qdev_connect_gpio_out_named(dev, "irq", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->usdhc[2]), "sdio-irq", 0));
+    qdev_connect_gpio_out_named(dev, "oob-irq", 0,
+        qdev_get_gpio_in(DEVICE(&s->gpio[3]), 31));
+    object_unref(OBJECT(dev));
 
     i2c_slave_create_simple(s->i2c[2].bus, "forma-ricoh619", 0x32);
     i2c_slave_create_simple(s->i2c[1].bus, "forma-tps65185", 0x68);

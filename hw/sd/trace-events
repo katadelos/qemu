@@ -89,3 +89,9 @@ bcm4343w_frame(bool tx, unsigned channel, unsigned size, unsigned seq) "tx=%d ch
 bcm4343w_event(uint32_t event, uint32_t status, unsigned len) "event=%u status=%u len=%u"
 bcm4343w_firmware_start(void) "firmware started"
 bcm4343w_power(bool on) "on=%d"
+
+# rtl8192es-sdio.c
+rtl8192es_register(bool write, unsigned reg, uint8_t value) "write=%d reg=0x%x value=0x%02x"
+rtl8192es_frame(bool tx, uint16_t fc, unsigned size) "tx=%d fc=0x%04x size=%u"
+rtl8192es_command(unsigned cmd, uint32_t arg) "CMD%u arg=0x%08x"
+rtl8192es_power(bool on) "on=%d"
