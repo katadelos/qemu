@@ -69,6 +69,7 @@ static void kobotouch_load_firmware(MachineState *machine)
     hwaddr max_size = KOBOTOUCH_UBOOT_MAX;
     uint32_t entry = KOBOTOUCH_UBOOT_ENTRY;
     uint32_t self;
+    size_t ivt_offset = KOBOTOUCH_IVT_OFFSET;
     ssize_t size;
 
     if (!machine->firmware) {
@@ -81,13 +82,30 @@ static void kobotouch_load_firmware(MachineState *machine)
         image_size >= KOBOTOUCH_IVT_OFFSET +
                       KOBOTOUCH_IVT_SELF_OFF + sizeof(self) &&
         ldl_le_p(image + KOBOTOUCH_IVT_OFFSET) == 0x402000d1) {
-        entry = ldl_le_p(image + KOBOTOUCH_IVT_OFFSET +
+        uint32_t boot_data = ldl_le_p(image + ivt_offset + 0x10);
+
+        self = ldl_le_p(image + ivt_offset + KOBOTOUCH_IVT_SELF_OFF);
+        /* Netronix ships a ROM plug-in IVT before the SDRAM U-Boot IVT.
+         * The plug-in initializes physical DDR; QEMU already provides RAM,
+         * so enter the following image just as the ROM does after the
+         * plug-in returns.  Loading the plug-in's IRAM entry as an SDRAM
+         * address rejects the stock Mini firmware before it can boot. */
+        if (boot_data >= self && boot_data - self <= image_size - ivt_offset - 12 &&
+            ldl_le_p(image + ivt_offset + boot_data - self + 8) == 1) {
+            size_t next = ivt_offset + boot_data - self + 12;
+
+            if (next <= image_size - 0x20 &&
+                ldl_le_p(image + next) == 0x402000d1) {
+                ivt_offset = next;
+            }
+        }
+        entry = ldl_le_p(image + ivt_offset +
                          KOBOTOUCH_IVT_ENTRY_OFF);
-        self = ldl_le_p(image + KOBOTOUCH_IVT_OFFSET +
+        self = ldl_le_p(image + ivt_offset +
                         KOBOTOUCH_IVT_SELF_OFF);
-        if (self >= KOBOTOUCH_RAM_BASE + KOBOTOUCH_IVT_OFFSET &&
+        if (self >= KOBOTOUCH_RAM_BASE + ivt_offset &&
             self < KOBOTOUCH_RAM_BASE + machine->ram_size) {
-            addr = self - KOBOTOUCH_IVT_OFFSET;
+            addr = self - ivt_offset;
             max_size = KOBOTOUCH_RAM_BASE + machine->ram_size - addr;
         }
         if (entry < addr || entry >= addr + image_size) {
