@@ -428,10 +428,13 @@ static void zelda_attach_wifi(FslIMX7State *s)
      * Cognac connects its BCM43430 Wi-Fi function to USDHC1.
      */
     qdev_realize(wifi, bus, &error_fatal);
-    qemu_set_irq(qdev_get_gpio_in_named(wifi, "power", 0), 1);
+    qdev_connect_gpio_out(DEVICE(&s->gpio[2]), 3,
+                         qdev_get_gpio_in_named(wifi, "power", 0));
     qdev_connect_gpio_out_named(
         wifi, "irq", 0,
         qdev_get_gpio_in_named(DEVICE(&s->usdhc[0]), "sdio-irq", 0));
+    qdev_connect_gpio_out_named(wifi, "oob-irq", 0,
+                              qdev_get_gpio_in(DEVICE(&s->gpio[2]), 23));
     object_unref(OBJECT(wifi));
 }
 

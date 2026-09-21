@@ -20,6 +20,7 @@
 #include "hw/sd/sd.h"
 #include "hw/ssi/mc13892.h"
 #include "hw/ssi/ssi.h"
+#include "net/net.h"
 #include "qemu/error-report.h"
 #include "qemu/module.h"
 #include "qemu/units.h"
@@ -141,6 +142,24 @@ static void kobomini_attach_pmic(FslIMX50State *soc)
         qdev_get_gpio_in(DEVICE(&soc->gpio[5]), 8));
 }
 
+static void kobotouch_attach_wifi(FslIMX50State *soc, bool mini)
+{
+    DeviceState *wifi = qdev_new(TYPE_BCM43362_SDIO);
+    unsigned controller = mini ? 1 : 2;
+
+    qemu_configure_nic_device(wifi, true, "bcm43362");
+    qdev_realize(wifi,
+                 qdev_get_child_bus(DEVICE(&soc->esdhc[controller]), "sd-bus"),
+                 &error_fatal);
+    qdev_connect_gpio_out(DEVICE(&soc->gpio[4]), 14,
+                          qdev_get_gpio_in_named(wifi, "power", 0));
+    qdev_connect_gpio_out_named(wifi, "irq", 0,
+        qdev_get_gpio_in_named(DEVICE(&soc->esdhc[controller]), "sdio-irq", 0));
+    qdev_connect_gpio_out_named(wifi, "oob-irq", 0,
+        qdev_get_gpio_in(DEVICE(&soc->gpio[3]), 8));
+    object_unref(OBJECT(wifi));
+}
+
 static void kobotouch_create_peripherals(FslIMX50State *soc,
                                          KoboTouchMachineState *tms)
 {
@@ -209,6 +228,7 @@ static void kobotouch_init(MachineState *machine)
     }
     qdev_realize(DEVICE(soc), NULL, &error_fatal);
     kobotouch_create_peripherals(soc, tms);
+    kobotouch_attach_wifi(soc, tms->mini);
     if (tms->mini) {
         kobomini_attach_pmic(soc);
     }

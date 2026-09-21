@@ -143,6 +143,8 @@ static void heisenberg_attach_wifi(FslIMX6State *s)
     qdev_connect_gpio_out_named(
         wifi, "irq", 0,
         qdev_get_gpio_in_named(DEVICE(&s->usdhc[0]), "sdio-irq", 0));
+    qdev_connect_gpio_out_named(wifi, "oob-irq", 0,
+                              qdev_get_gpio_in(DEVICE(&s->gpio[2]), 31));
     object_unref(OBJECT(wifi));
 }
 
