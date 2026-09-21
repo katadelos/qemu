@@ -135,6 +135,7 @@ static void wario_attach_wifi(FslIMX6State *s)
 
     bus = qdev_get_child_bus(DEVICE(&s->usdhc[2]), "sd-bus");
     wifi = qdev_new(TYPE_AR6003_SDIO);
+    qdev_prop_set_bit(wifi, "large-connect-ie", true);
     qdev_realize(wifi, bus, &error_fatal);
 
     /* Icewine WIFI_PWD: GPIO3_29, low at boot and high when enabled. */

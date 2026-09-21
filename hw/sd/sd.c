@@ -256,6 +256,8 @@ struct SDState {
     uint8_t sdio_target_mem[2 * MiB];
     uint32_t sdio_lz_addr;
     bool sdio_bmi_done;
+    bool sdio_large_connect_ie;
+    bool sdio_associated;
     qemu_irq sdio_irq;
     QEMUTimer *sdio_scan_timer;
     QEMUTimer *sdio_connect_timer;
@@ -563,7 +565,8 @@ static ssize_t ar6003_net_receive(NetClientState *nc, const uint8_t *buf,
 {
     SDState *sd = qemu_get_nic_opaque(nc);
 
-    if (!sd->sdio_powered || !sd->sdio_bmi_done) {
+    if (!sd->sdio_powered || !sd->sdio_bmi_done || !sd->sdio_associated ||
+        nc->link_down) {
         return -1;
     }
     ar6003_data_packet(sd, buf, size);
@@ -574,7 +577,8 @@ static bool ar6003_net_can_receive(NetClientState *nc)
 {
     SDState *sd = qemu_get_nic_opaque(nc);
 
-    return sd->sdio_powered && sd->sdio_bmi_done &&
+    return sd->sdio_powered && sd->sdio_bmi_done && sd->sdio_associated &&
+           !nc->link_down &&
            !ar6003_rx_pending(sd);
 }
 
@@ -601,7 +605,9 @@ static bool ar6003_data_tx(SDState *sd, uint8_t endpoint,
     memcpy(frame + 12, llc + 6, 2);
     memcpy(frame + 14, llc + 8, len - 6 - 14 - 8);
     trace_ar6003_data_tx(endpoint, frame_len, lduw_be_p(frame + 12));
-    qemu_send_packet(qemu_get_queue(sd->sdio_nic), frame, frame_len);
+    if (sd->sdio_associated) {
+        qemu_send_packet(qemu_get_queue(sd->sdio_nic), frame, frame_len);
+    }
     return true;
 }
 
@@ -616,6 +622,11 @@ static void ar6003_wmi_scan_results(SDState *sd, uint8_t credit_ep,
     size_t event_len;
     size_t pos = 12;
 
+    if (qemu_get_queue(sd->sdio_nic)->link_down) {
+        ar6003_htc_credit(sd, credit_ep, credits);
+        ar6003_wmi_event(sd, 0x100a, complete, sizeof(complete));
+        return;
+    }
     stw_le_p(bss, 2412);
     bss[2] = 1;  /* BEACON_FTYPE */
     bss[3] = 55; /* -40 dBm */
@@ -678,6 +689,26 @@ static void ar6003_wmi_scan_timer(void *opaque)
                             sd->sdio_scan_credits);
 }
 
+static void ar6003_disconnect(SDState *sd, uint8_t reason)
+{
+    uint8_t event[11] = { 0 };
+
+    timer_del(sd->sdio_connect_timer);
+    sd->sdio_associated = false;
+    event[2] = event[7] = 0x02;
+    event[8] = reason;
+    ar6003_wmi_event(sd, 0x1003, event, sizeof(event));
+}
+
+static void ar6003_link_status_changed(NetClientState *nc)
+{
+    SDState *sd = qemu_get_nic_opaque(nc);
+
+    if (nc->link_down && sd->sdio_associated) {
+        ar6003_disconnect(sd, 2); /* LOST_LINK */
+    }
+}
+
 static void ar6003_wmi_connect_timer(void *opaque)
 {
     SDState *sd = opaque;
@@ -687,11 +718,20 @@ static void ar6003_wmi_connect_timer(void *opaque)
      * lengths in this event.  Supplying zero lengths underflows those u16s,
      * so cfg80211 never completes the WEXT association used by Kobo 3.14.
      */
-    uint8_t event[29] = { 0 };
+    static const uint8_t ies[] = {
+        0, 11, 'K', 'i', 'n', 'd', 'l', 'e', '-', 'Q', 'E', 'M', 'U',
+        1, 4, 0x82, 0x84, 0x8b, 0x96,
+    };
+    uint8_t event[32 + 2 * sizeof(ies)] = { 0 };
+    size_t info = sd->sdio_large_connect_ie ? 22 : 19;
 
     if (ar6003_rx_pending(sd)) {
         timer_mod(sd->sdio_connect_timer,
                   qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 10);
+        return;
+    }
+    if (qemu_get_queue(sd->sdio_nic)->link_down) {
+        ar6003_disconnect(sd, 1); /* NO_NETWORK_AVAIL */
         return;
     }
     stw_le_p(event, 2412);
@@ -700,10 +740,23 @@ static void ar6003_wmi_connect_timer(void *opaque)
     stw_le_p(event + 8, 10);  /* listen interval */
     stw_le_p(event + 10, 100); /* beacon interval */
     stl_le_p(event + 12, 1); /* INFRA_NETWORK */
-    event[16] = 0; /* beaconIeLen */
-    event[17] = 4; /* assocReqLen: capinfo + listen interval */
-    event[18] = 6; /* assocRespLen: capinfo + status + AID */
-    ar6003_wmi_event(sd, 0x1002, event, sizeof(event));
+    if (sd->sdio_large_connect_ie) {
+        /* Wario's firmware advertises ATH6KL_FW_CAPABILITY_LARGE_CONNECT_IE. */
+        stw_le_p(event + 18, 4 + sizeof(ies));
+        stw_le_p(event + 20, 6 + sizeof(ies));
+    } else {
+        event[17] = 4 + sizeof(ies);
+        event[18] = 6 + sizeof(ies);
+    }
+    stw_le_p(event + info, 1); /* ESS capability */
+    stw_le_p(event + info + 2, 10);
+    memcpy(event + info + 4, ies, sizeof(ies));
+    stw_le_p(event + info + 4 + sizeof(ies), 1);
+    stw_le_p(event + info + 8 + sizeof(ies), 0xc001); /* association ID */
+    memcpy(event + info + 10 + sizeof(ies), ies, sizeof(ies));
+    ar6003_wmi_event(sd, 0x1002, event, info + 10 + 2 * sizeof(ies));
+    sd->sdio_associated = true;
+    qemu_flush_queued_packets(qemu_get_queue(sd->sdio_nic));
 }
 
 static void ar6003_htc_command(SDState *sd, const uint8_t *buf, size_t len)
@@ -751,6 +804,8 @@ static void ar6003_htc_command(SDState *sd, const uint8_t *buf, size_t len)
             if (msg_id == 1) { /* WMI_CONNECT_CMDID */
                 timer_mod(sd->sdio_connect_timer,
                           qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 250);
+            } else if (msg_id == 3) { /* WMI_DISCONNECT_CMDID */
+                ar6003_disconnect(sd, 3); /* DISCONNECT_CMD */
             }
         }
         return;
@@ -1154,6 +1209,7 @@ static void ar6003_sdio_reset(DeviceState *dev)
     sd->sdio_htc_xfer_exhausted = false;
     sd->sdio_lz_addr = 0;
     sd->sdio_bmi_done = false;
+    sd->sdio_associated = false;
     if (sd->sdio_scan_timer) {
         timer_del(sd->sdio_scan_timer);
     }
@@ -4804,6 +4860,7 @@ static NetClientInfo ar6003_net_info = {
     .size = sizeof(NICState),
     .can_receive = ar6003_net_can_receive,
     .receive = ar6003_net_receive,
+    .link_status_changed = ar6003_link_status_changed,
 };
 
 static void ar6003_sdio_realize(DeviceState *dev, Error **errp)
@@ -4819,6 +4876,7 @@ static void ar6003_sdio_realize(DeviceState *dev, Error **errp)
 }
 
 static const Property ar6003_sdio_properties[] = {
+    DEFINE_PROP_BOOL("large-connect-ie", SDState, sdio_large_connect_ie, false),
     DEFINE_NIC_PROPERTIES(SDState, sdio_nic_conf),
 };
 
