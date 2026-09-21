@@ -598,7 +598,12 @@ static DeviceState *whitney_attach_pmic(FslIMX50State *soc)
     /* Whitney's system PMIC is an MC13892 on CSPI3 SS0. */
     bus = (SSIBus *)qdev_get_child_bus(DEVICE(&soc->spi[2]), "spi");
     pmic = qdev_new(TYPE_MC13892);
+    qdev_prop_set_bit(pmic, "usb-connected",
+                      soc->usb_otg.gadget_nic &&
+                      soc->usb_otg.gadget_host_connected);
     ssi_realize_and_unref(pmic, bus, &error_fatal);
+    qdev_connect_gpio_out_named(DEVICE(&soc->usb_otg), "vbus", 0,
+                                qdev_get_gpio_in_named(pmic, "vbus", 0));
 
     /* i.MX50 drives native CS low internally; MC13892 CS is active high. */
     sysbus_connect_irq(SYS_BUS_DEVICE(&soc->spi[2]), 1,

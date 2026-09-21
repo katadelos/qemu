@@ -33,6 +33,8 @@
 #define MC13892_ADC_BATT_RAW    832
 #define MC13892_TODA            (1U << 1)
 #define MC13892_PWRON1          (1U << 3)
+#define MC13892_CHGDET          (1U << 6)
+#define MC13892_VBUSVALID       (1U << 3)
 #define MC13892_RTC_DAY_SECONDS (24 * 60 * 60)
 
 struct MC13892State {
@@ -148,6 +150,23 @@ static void mc13892_update_irq(MC13892State *s)
     qemu_set_irq(s->irq, pending);
 }
 
+static void mc13892_vbus_input(void *opaque, int line, int level)
+{
+    MC13892State *s = opaque;
+
+    if (s->usb_connected != !!level) {
+        s->regs[MC13892_REG_INT_STAT0] |= MC13892_CHGDET;
+    }
+    s->usb_connected = !!level;
+    s->regs[MC13892_REG_INT_SENSE0] &=
+        ~(MC13892_CHGDET | MC13892_VBUSVALID);
+    if (level) {
+        s->regs[MC13892_REG_INT_SENSE0] |=
+            MC13892_CHGDET | MC13892_VBUSVALID;
+    }
+    mc13892_update_irq(s);
+}
+
 static void mc13892_write_register(MC13892State *s, uint8_t reg,
                                    uint32_t value)
 {
@@ -239,7 +258,8 @@ static void mc13892_reset(DeviceState *dev)
     /* PWRON1 is active low and the physical button powers up released. */
     s->regs[MC13892_REG_INT_SENSE1] = MC13892_PWRON1;
     /* CHGDETS lets the stock K4 UDC leave its unplugged low-power state. */
-    s->regs[MC13892_REG_INT_SENSE0] = s->usb_connected ? (1U << 6) : 0;
+    s->regs[MC13892_REG_INT_SENSE0] = s->usb_connected ?
+        MC13892_CHGDET | MC13892_VBUSVALID : 0;
     /* MC13892 revision 2.0A, as fitted to production Whitney boards. */
     s->regs[MC13892_REG_IDENT] = 0x0045d0;
     s->tx_frame = 0;
@@ -260,7 +280,9 @@ static void mc13892_realize(SSIPeripheral *peripheral, Error **errp)
 
     qdev_init_gpio_out_named(DEVICE(peripheral), &s->irq, "irq", 1);
     qdev_init_gpio_in_named(DEVICE(peripheral), mc13892_power_input,
-                            "power-button", 1);
+                           "power-button", 1);
+    qdev_init_gpio_in_named(DEVICE(peripheral), mc13892_vbus_input,
+                           "vbus", 1);
     s->rtc_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                 mc13892_rtc_alarm, s);
 }
@@ -280,8 +302,8 @@ static int mc13892_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_mc13892 = {
     .name = TYPE_MC13892,
-    .version_id = 2,
-    .minimum_version_id = 2,
+    .version_id = 3,
+    .minimum_version_id = 3,
     .post_load = mc13892_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_SSI_PERIPHERAL(parent_obj, MC13892State),
@@ -292,6 +314,7 @@ static const VMStateDescription vmstate_mc13892 = {
         VMSTATE_UINT8(reg, MC13892State),
         VMSTATE_BOOL(write, MC13892State),
         VMSTATE_BOOL(power_down, MC13892State),
+        VMSTATE_BOOL(usb_connected, MC13892State),
         VMSTATE_INT64(rtc_offset, MC13892State),
         VMSTATE_TIMER_PTR(rtc_timer, MC13892State),
         VMSTATE_END_OF_LIST()
