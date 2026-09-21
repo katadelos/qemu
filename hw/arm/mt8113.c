@@ -23,6 +23,7 @@
 #include "system/system.h"
 #include "system/address-spaces.h"
 #include "target/arm/cpu-qom.h"
+#include "trace.h"
 
 #define MT8113_SCPSYS_PWR_STATUS         0x180
 #define MT8113_SCPSYS_PWR_STATUS_2ND     0x184
@@ -1178,8 +1179,8 @@ static void mt8113_wifi_runtime_event(MT8113State *s, uint8_t event_id,
                                       const void *payload,
                                       size_t payload_size)
 {
-    uint8_t event[144] = { 0 };
-    size_t event_size = MT8113_WIFI_INIT_EVENT_HEADER_SIZE + payload_size;
+    uint8_t event[512] = { 0 };
+    size_t event_size = 32 + payload_size;
     uint16_t packet_length;
     uint16_t packet_type = MT8113_WIFI_EVENT_PACKET_TYPE_ID;
 
@@ -1196,9 +1197,280 @@ static void mt8113_wifi_runtime_event(MT8113State *s, uint8_t event_id,
     event[MT8113_WIFI_EVENT_ID] = event_id;
     event[MT8113_WIFI_EVENT_SEQ] = sequence;
     if (payload_size) {
-        memcpy(event + MT8113_WIFI_EVENT_DATA, payload, payload_size);
+        memcpy(event + 32, payload, payload_size);
     }
     mt8113_wifi_rx_event(s, 1, event, event_size);
+}
+
+static const uint8_t mt8113_wifi_bssid[6] = { 0x02, 0x00, 0x00, 0x81, 0x13, 0x01 };
+static const uint8_t mt8113_wifi_rates[] = {
+    1, 8, 0x82, 0x84, 0x8b, 0x96, 12, 18, 24, 36,
+    50, 4, 48, 72, 96, 108,
+};
+
+static bool mt8113_wifi_management(MT8113State *s, const uint8_t *frame,
+                                  size_t length)
+{
+    uint8_t packet[512] = { 0 };
+    size_t total = 20 + 8 + 24 + length;
+
+    if (total > sizeof(packet)) {
+        return false;
+    }
+    stw_le_p(packet, total);
+    /* Software management frame, timestamp and PHY status groups. */
+    stw_le_p(packet + 2, 0xec01);
+    packet[4] = (frame[4] & 1) ? 8 : 2;
+    packet[5] = 1;
+    packet[6] = 24;
+    packet[7] = s->wifi_bss_index << 2;
+    packet[8] = s->wifi_wlan_index;
+    stw_le_p(packet + 10, 0x2000);
+    stl_le_p(packet + 20, qemu_clock_get_us(QEMU_CLOCK_VIRTUAL));
+    stl_le_p(packet + 40, 0x8c8c8c8c);
+    memcpy(packet + 52, frame, length);
+    return mt8113_wifi_rx_event(s, 0, packet, total);
+}
+
+static void mt8113_wifi_beacon(MT8113State *s)
+{
+    uint8_t frame[128] = { 0x80 };
+    static const char ssid[] = "Kindle-QEMU";
+    size_t length = 36;
+
+    memset(frame + 4, 0xff, 6);
+    memcpy(frame + 10, mt8113_wifi_bssid, 6);
+    memcpy(frame + 16, mt8113_wifi_bssid, 6);
+    stw_le_p(frame + 22, s->wifi_rx_sequence++ << 4);
+    stq_le_p(frame + 24, qemu_clock_get_us(QEMU_CLOCK_VIRTUAL));
+    stw_le_p(frame + 32, 100);
+    stw_le_p(frame + 34, 0x0421);
+    frame[length++] = 0;
+    frame[length++] = sizeof(ssid) - 1;
+    memcpy(frame + length, ssid, sizeof(ssid) - 1);
+    length += sizeof(ssid) - 1;
+    memcpy(frame + length, mt8113_wifi_rates, sizeof(mt8113_wifi_rates));
+    length += sizeof(mt8113_wifi_rates);
+    frame[length++] = 3;
+    frame[length++] = 1;
+    frame[length++] = 1;
+    /* DTIM period one, no buffered multicast or unicast traffic. */
+    frame[length++] = 5;
+    frame[length++] = 4;
+    frame[length++] = 0;
+    frame[length++] = 1;
+    frame[length++] = 0;
+    frame[length++] = 0;
+    mt8113_wifi_management(s, frame, length);
+}
+
+static void mt8113_wifi_timer(void *opaque)
+{
+    MT8113State *s = opaque;
+
+    bool link_up = s->wifi_nic && !qemu_get_queue(s->wifi_nic)->link_down;
+
+    if (!s->wifi_firmware_ready) {
+        return;
+    }
+    if (s->wifi_management_length) {
+        if (link_up) {
+            mt8113_wifi_management(s, s->wifi_management,
+                                  s->wifi_management_length);
+        }
+        s->wifi_management_length = 0;
+    }
+    if (s->wifi_scan_pending == 2) {
+        if (link_up) {
+            mt8113_wifi_beacon(s);
+        }
+        s->wifi_scan_pending = 1;
+    } else if (s->wifi_scan_pending == 1) {
+        uint8_t done[340] = { 0 };
+        done[0] = s->wifi_scan_sequence;
+        done[4] = 1;
+        done[6] = 3;
+        mt8113_wifi_runtime_event(s, 0x0d, 0, done, sizeof(done));
+        s->wifi_scan_pending = 0;
+    } else if (s->wifi_associated && link_up) {
+        mt8113_wifi_beacon(s);
+    }
+    if (s->wifi_sched_enabled && !s->wifi_scan_pending) {
+        int64_t now = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
+        if (s->wifi_sched_event_pending) {
+            uint8_t done[4] = { s->wifi_sched_sequence };
+            mt8113_wifi_runtime_event(s, 0x23, 0, done, sizeof(done));
+            s->wifi_sched_event_pending = false;
+            s->wifi_sched_enabled = !s->wifi_sched_stop_after;
+        } else if (now >= s->wifi_sched_next) {
+            if (link_up && s->wifi_sched_matches) {
+                mt8113_wifi_beacon(s);
+                s->wifi_sched_event_pending = true;
+            }
+            s->wifi_sched_next = now + s->wifi_sched_interval;
+        }
+    }
+    if (s->wifi_associated || s->wifi_scan_pending ||
+        s->wifi_management_length || s->wifi_sched_enabled) {
+        timer_mod(s->wifi_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 100);
+    }
+}
+
+static bool mt8113_wifi_can_receive(NetClientState *nc)
+{
+    MT8113State *s = qemu_get_nic_opaque(nc);
+    hwaddr ring = MT8113_WIFI_RX_RING_BASE;
+    uint32_t count = s->wifi_regs[(ring + MT8113_WIFI_RING_COUNT) / 4];
+    uint32_t index = s->wifi_regs[(ring + MT8113_WIFI_RING_DMA_IDX) / 4];
+    uint32_t cpu = s->wifi_regs[(ring + MT8113_WIFI_RING_CPU_IDX) / 4];
+
+    return s->wifi_firmware_ready && s->wifi_associated && count &&
+           index % count != cpu % count && !nc->link_down;
+}
+
+static ssize_t mt8113_wifi_receive(NetClientState *nc, const uint8_t *buf,
+                                  size_t length)
+{
+    MT8113State *s = qemu_get_nic_opaque(nc);
+    uint8_t packet[2048] = { 0 };
+    size_t total = 20 + 16 + 24 + length;
+
+    if (length < 14 || total > sizeof(packet)) {
+        return length;
+    }
+    if (!mt8113_wifi_can_receive(nc)) {
+        return 0;
+    }
+    stw_le_p(packet, total);
+    /* Ethernet frame with translated 802.11 header (groups 4 and 3). */
+    stw_le_p(packet + 2, 0x5800);
+    packet[4] = (buf[0] & 1) ? 8 : 2;
+    packet[5] = 1;
+    packet[6] = 0x80 | 14;
+    packet[7] = s->wifi_bss_index << 2;
+    packet[8] = s->wifi_wlan_index;
+    stw_le_p(packet + 10, 0xc000); /* Non-aggregated MPDU/MSDU. */
+    stw_le_p(packet + 20, 0x0208);
+    memcpy(packet + 22, mt8113_wifi_bssid, 6);
+    stw_le_p(packet + 28, s->wifi_rx_sequence++ << 4);
+    stl_le_p(packet + 48, 0x8c8c8c8c);
+    memcpy(packet + 60, buf, length);
+    if (!mt8113_wifi_rx_event(s, 0, packet, total)) {
+        return 0;
+    }
+    s->wifi_rx_packets++;
+    trace_mt8113_wifi_frame(false, 0, length);
+    return length;
+}
+
+static void mt8113_wifi_link_changed(NetClientState *nc)
+{
+    MT8113State *s = qemu_get_nic_opaque(nc);
+
+    if (nc->link_down && s->wifi_associated) {
+        /* HIGH_PER bypasses the driver's recent-RX beacon-loss filter. */
+        uint8_t timeout[4] = { s->wifi_bss_index, 14 };
+        s->wifi_associated = false;
+        mt8113_wifi_runtime_event(s, 0x13, 0, timeout, sizeof(timeout));
+    }
+}
+
+static NetClientInfo mt8113_wifi_net_info = {
+    .type = NET_CLIENT_DRIVER_NIC,
+    .size = sizeof(NICState),
+    .can_receive = mt8113_wifi_can_receive,
+    .receive = mt8113_wifi_receive,
+    .link_status_changed = mt8113_wifi_link_changed,
+};
+
+static void mt8113_wifi_tx_frame(MT8113State *s, const uint8_t *txd,
+                                const uint8_t *frame, size_t length)
+{
+    unsigned format = (txd[5] >> 5) & 3;
+
+    trace_mt8113_wifi_frame(true, format, length);
+    if (format == 0) {
+        if (s->wifi_nic && s->wifi_associated && length >= 14) {
+            s->wifi_tx_packets++;
+            qemu_send_packet(qemu_get_queue(s->wifi_nic), frame, length);
+        }
+    } else if (format == 2 && length >= 24) {
+        uint16_t fc = lduw_le_p(frame) & 0xfc;
+        uint8_t *response = s->wifi_management;
+        size_t response_length = 0;
+
+        memset(response, 0, sizeof(s->wifi_management));
+        memcpy(response + 4, frame + 10, 6);
+        memcpy(response + 10, mt8113_wifi_bssid, 6);
+        memcpy(response + 16, mt8113_wifi_bssid, 6);
+        stw_le_p(response + 22, s->wifi_rx_sequence++ << 4);
+        if (fc == 0xb0 && length >= 30 && lduw_le_p(frame + 24) == 0) {
+            response[0] = 0xb0;
+            stw_le_p(response + 26, 2);
+            response_length = 30;
+        } else if (fc == 0 || fc == 0x20) {
+            response[0] = fc == 0 ? 0x10 : 0x30;
+            stw_le_p(response + 24, 0x0421);
+            stw_le_p(response + 28, 0xc001);
+            memcpy(response + 30, mt8113_wifi_rates, sizeof(mt8113_wifi_rates));
+            response_length = 30 + sizeof(mt8113_wifi_rates);
+        } else if (fc == 0xc0 || fc == 0xa0) {
+            s->wifi_associated = false;
+        }
+        if (response_length && s->wifi_timer) {
+            s->wifi_management_length = response_length;
+            timer_mod(s->wifi_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 10);
+        }
+    }
+    if ((txd[5] & 0x80) && txd[20]) {
+        uint8_t done[88] = { 0 };
+        done[0] = txd[20];
+        done[4] = txd[4];
+        done[5] = 1;
+        mt8113_wifi_runtime_event(s, 0x0f, 0, done, sizeof(done));
+    }
+}
+
+static void mt8113_wifi_data(MT8113State *s, const uint8_t *data, size_t length)
+{
+    unsigned format;
+    size_t header;
+
+    if (length < 8) {
+        return;
+    }
+    format = (data[5] >> 5) & 3;
+    header = (data[5] & 0x80) ? 32 : 8;
+    if (format == 2 && length > header) {
+        mt8113_wifi_tx_frame(s, data, data + header, length - header);
+    } else if (format == 0 && length >= 64) {
+        /* Connac cut-through descriptors point to separate Ethernet buffers. */
+        uint8_t report[16] = { 0 };
+        unsigned tokens = 0;
+        for (unsigned i = 0; i < 4; i++) {
+            uint16_t token = lduw_le_p(data + 32 + i * 2);
+            unsigned pair = 40 + (i / 2) * 12;
+            uint16_t len = lduw_le_p(data + pair + 4 + (i & 1) * 2);
+            uint64_t addr = ldl_le_p(data + pair + (i & 1) * 8);
+            uint8_t frame[2048];
+            if (!(token & 0x8000)) {
+                continue;
+            }
+            addr |= (uint64_t)(len & 0x7000) << 20;
+            len &= 0x0fff;
+            if (len >= 14 && len <= sizeof(frame)) {
+                dma_memory_read(&address_space_memory, addr, frame, len,
+                                MEMTXATTRS_UNSPECIFIED);
+                mt8113_wifi_tx_frame(s, data, frame, len);
+            }
+            stw_le_p(report + 8 + 2 * tokens++, token & 0x7fff);
+        }
+        if (tokens) {
+            stw_le_p(report, 8 + 2 * tokens);
+            stw_le_p(report + 2, 0xc000 | tokens);
+            mt8113_wifi_rx_event(s, 1, report, 8 + 2 * tokens);
+        }
+    }
 }
 
 static void mt8113_wifi_runtime_command(MT8113State *s,
@@ -1208,7 +1480,113 @@ static void mt8113_wifi_runtime_command(MT8113State *s,
     uint8_t command = data[MT8113_WIFI_INIT_CMD_ID];
     uint8_t sequence = data[MT8113_WIFI_INIT_CMD_SEQ];
 
+    trace_mt8113_wifi_command(true, command, sequence, length);
     switch (command) {
+    case 0x62: { /* SET_SCHED_SCAN_REQ */
+        const uint8_t *p = data + 64;
+        if (length < 64 + 1142 || p[4] > 16) {
+            break;
+        }
+        s->wifi_sched_sequence = p[1];
+        s->wifi_sched_stop_after = p[2];
+        s->wifi_sched_matches = !p[4];
+        for (unsigned i = 0; i < p[4]; i++) {
+            const uint8_t *match = p + 368 + i * 40;
+            s->wifi_sched_matches |= match[36] == 11 &&
+                !memcmp(match + 4, "Kindle-QEMU", 11);
+        }
+        s->wifi_sched_interval = MAX(lduw_le_p(p + 1140), 1) * 1000;
+        break;
+    }
+    case 0x61: /* SET_SCHED_SCAN_ENABLE: zero enables, one disables. */
+        if (length > 64 && s->wifi_timer) {
+            s->wifi_sched_enabled = data[64] == 0;
+            s->wifi_sched_event_pending = false;
+            s->wifi_sched_next = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
+            if (s->wifi_sched_enabled) {
+                timer_mod(s->wifi_timer, s->wifi_sched_next + 100);
+            }
+        }
+        break;
+    case 0x81: { /* GET_LINK_QUALITY */
+        uint8_t quality[32] = { 0 };
+        quality[0] = (uint8_t)-40;
+        quality[1] = 100;
+        stw_le_p(quality + 2, 108);
+        quality[5] = s->wifi_associated;
+        mt8113_wifi_runtime_event(s, 0x02, sequence, quality, sizeof(quality));
+        break;
+    }
+    case 0x82: { /* GET_STATISTICS */
+        uint8_t statistics[96] = { 0 };
+        stq_le_p(statistics, s->wifi_tx_packets);
+        stq_le_p(statistics + 72, s->wifi_rx_packets);
+        mt8113_wifi_runtime_event(s, 0x03, sequence, statistics, sizeof(statistics));
+        break;
+    }
+    case 0xce: { /* GET_MIB_INFO */
+        uint8_t counters[236] = { 0 };
+        mt8113_wifi_runtime_event(s, 0xce, sequence, counters, sizeof(counters));
+        break;
+    }
+    case 0xc4: /* SW_DBG_CTRL */
+        if (length >= 72) {
+            mt8113_wifi_runtime_event(s, 0x17, sequence, data + 64, 8);
+        }
+        break;
+    case 0x04: /* NIC_POWER_CTRL: calibration probe powers down before reuse. */
+        if (length > 64 && data[64] == 1) {
+            s->wifi_firmware_ready = false;
+            s->wifi_associated = false;
+            s->wifi_sched_enabled = false;
+            s->wifi_scan_pending = 0;
+            s->wifi_regs[MT8113_WIFI_SW_SYNC0 / 4] &= ~MT8113_WIFI_FW_READY;
+        }
+        break;
+    case 0x03: /* SCAN_REQ_V2 */
+    case 0x1a: /* SCAN_REQ */
+        if (length > 64 && s->wifi_timer) {
+            s->wifi_scan_sequence = data[64];
+            s->wifi_scan_pending = 2;
+            timer_mod(s->wifi_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 10);
+        }
+        break;
+    case 0x1b: /* SCAN_CANCEL */
+        s->wifi_scan_pending = 1;
+        break;
+    case 0x1c: /* CH_PRIVILEGE */
+        if (length >= 88 && data[66] == 0) {
+            uint8_t grant[24];
+            memcpy(grant, data + 64, sizeof(grant));
+            grant[2] = 0;
+            mt8113_wifi_runtime_event(s, 0x10, 0, grant, sizeof(grant));
+        }
+        break;
+    case 0x12: /* SET_BSS_INFO */
+        if (length >= 66) {
+            s->wifi_bss_index = data[64];
+            s->wifi_associated = data[65] == 0;
+            if (s->wifi_associated && s->wifi_timer) {
+                timer_mod(s->wifi_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 100);
+                if (s->wifi_nic) {
+                    qemu_flush_queued_packets(qemu_get_queue(s->wifi_nic));
+                }
+            }
+        }
+        break;
+    case 0x13: /* UPDATE_STA_RECORD */
+        if (length >= 120) {
+            s->wifi_wlan_index = data[118];
+            if (data[115]) {
+                uint8_t activate[8];
+                memcpy(activate, data + 66, 6);
+                activate[6] = data[64];
+                activate[7] = data[76];
+                mt8113_wifi_runtime_event(s, 0x0c, sequence, activate,
+                                          sizeof(activate));
+            }
+        }
+        break;
     case MT8113_WIFI_CMD_NIC_CAPABILITY: {
         uint8_t capability[116] = { 0 };
         uint16_t product_id = 0x6632;
@@ -1220,7 +1598,11 @@ static void mt8113_wifi_runtime_command(MT8113State *s,
         memcpy(capability, &product_id, sizeof(product_id));
         memcpy(capability + 2, &version, sizeof(version));
         memcpy(capability + 4, &version, sizeof(version));
-        memcpy(capability + 8, mac_address, sizeof(mac_address));
+        memcpy(capability + 8, s->wifi_conf.macaddr.a, sizeof(mac_address));
+        capability[15] = 1; /* The emulated AP is 802.11g. */
+        capability[57] = 1; /* single spatial stream */
+        capability[58] = 1; /* no simultaneous dual-band */
+        capability[59] = 1; /* one BSS */
         mt8113_wifi_runtime_event(s, MT8113_WIFI_EVENT_NIC_CAPABILITY,
                                   sequence, capability,
                                   sizeof(capability));
@@ -1267,15 +1649,7 @@ static void mt8113_wifi_command(MT8113State *s, const uint8_t *data,
     /* All init commands carry the 0xa0 command namespace in byte 37.
      * Access/download commands duplicate it in byte 5; START does not. */
     if (length < MT8113_WIFI_INIT_CMD_SIZE || data[37] != 0xa0) {
-        if (length >= 40) {
-            qemu_log_mask(LOG_GUEST_ERROR,
-                          "mt8113-wifi: non-init TX len=%zu "
-                          "h=%02x%02x%02x%02x/%02x%02x%02x%02x "
-                          "cmd=%02x%02x%02x%02x\n",
-                          length, data[0], data[1], data[2], data[3],
-                          data[4], data[5], data[6], data[7], data[36],
-                          data[37], data[38], data[39]);
-        }
+        mt8113_wifi_data(s, data, length);
         return;
     }
     if (s->wifi_firmware_ready) {
@@ -1284,6 +1658,7 @@ static void mt8113_wifi_command(MT8113State *s, const uint8_t *data,
     }
     command = data[MT8113_WIFI_INIT_CMD_ID];
     sequence = data[MT8113_WIFI_INIT_CMD_SEQ];
+    trace_mt8113_wifi_command(false, command, sequence, length);
     switch (command) {
     case 0:
         /* A firmware/patch data fragment; consuming the TX descriptor is ACK. */
@@ -1416,6 +1791,18 @@ static void mt8113_wifi_write(void *opaque, hwaddr offset, uint64_t value,
         return;
     }
     if (offset == MT8113_WIFI_WPDMA_RST_IDX) {
+        for (unsigned i = 0; i < MT8113_WIFI_HW_TX_RING_COUNT; i++) {
+            if (value & BIT(i)) {
+                s->wifi_regs[(MT8113_WIFI_TX_RING_BASE +
+                    i * MT8113_WIFI_RING_STRIDE + MT8113_WIFI_RING_DMA_IDX) / 4] = 0;
+            }
+        }
+        for (unsigned i = 0; i < MT8113_WIFI_RX_RING_COUNT; i++) {
+            if (value & BIT(16 + i)) {
+                s->wifi_regs[(MT8113_WIFI_RX_RING_BASE +
+                    i * MT8113_WIFI_RING_STRIDE + MT8113_WIFI_RING_DMA_IDX) / 4] = 0;
+            }
+        }
         s->wifi_regs[offset / 4] = 0;
         return;
     }
@@ -1454,6 +1841,12 @@ static void mt8113_wifi_write(void *opaque, hwaddr offset, uint64_t value,
                       ring_index * MT8113_WIFI_RING_STRIDE;
 
         s->wifi_regs[(ring + MT8113_WIFI_RING_CPU_IDX) / 4] = value;
+    }
+    if (s->wifi_nic && offset >= MT8113_WIFI_RX_RING_BASE &&
+        offset < MT8113_WIFI_RX_RING_BASE +
+                 MT8113_WIFI_RX_RING_COUNT * MT8113_WIFI_RING_STRIDE &&
+        (offset % MT8113_WIFI_RING_STRIDE) == MT8113_WIFI_RING_CPU_IDX) {
+        qemu_flush_queued_packets(qemu_get_queue(s->wifi_nic));
     }
 }
 
@@ -2571,6 +2964,26 @@ static void mt8113_usb_reset(MT8113USBState *usb)
                  !qemu_get_queue(usb->nic)->link_down);
 }
 
+static void mt8113_wifi_system_reset(void *opaque)
+{
+    MT8113State *s = opaque;
+
+    if (s->wifi_timer) {
+        timer_del(s->wifi_timer);
+    }
+    s->wifi_firmware_ready = false;
+    s->wifi_associated = false;
+    s->wifi_scan_pending = 0;
+    s->wifi_management_length = 0;
+    s->wifi_rx_sequence = 0;
+    s->wifi_sched_enabled = false;
+    s->wifi_sched_event_pending = false;
+    s->wifi_tx_packets = 0;
+    s->wifi_rx_packets = 0;
+    memset(s->wifi_regs, 0, sizeof(s->wifi_regs));
+    qemu_set_irq(s->wifi_irq, 0);
+}
+
 static void mt8113_usb_system_reset(void *opaque)
 {
     MT8113State *s = opaque;
@@ -2587,6 +3000,12 @@ static void mt8113_reset(DeviceState *dev)
     s->gpt_irq_status = 0;
     s->rng_ctrl = 0;
     s->wifi_firmware_ready = false;
+    s->wifi_associated = false;
+    s->wifi_scan_pending = 0;
+    s->wifi_management_length = 0;
+    if (s->wifi_timer) {
+        timer_del(s->wifi_timer);
+    }
 
     memset(s->topckgen_regs, 0, sizeof(s->topckgen_regs));
     memset(s->infrasys_regs, 0, sizeof(s->infrasys_regs));
@@ -2861,6 +3280,15 @@ static void mt8113_realize(DeviceState *dev, Error **errp)
                                 MT8113_BTIF_RX_DMA_ADDR,
                                 &s->btif_rx_dma_iomem);
 
+    qemu_macaddr_default_if_unset(&s->wifi_conf.macaddr);
+    if (s->wifi_conf.peers.ncs[0]) {
+        s->wifi_nic = qemu_new_nic(&mt8113_wifi_net_info, &s->wifi_conf,
+                                  "mt8113-wifi", dev->id,
+                                  &dev->mem_reentrancy_guard, s);
+        qemu_format_nic_info_str(qemu_get_queue(s->wifi_nic),
+                                 s->wifi_conf.macaddr.a);
+        s->wifi_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, mt8113_wifi_timer, s);
+    }
     memory_region_init_io(&s->wifi_iomem, OBJECT(s), &mt8113_wifi_ops, s,
                           "mt8113.wifi", MT8113_WIFI_SIZE);
     memory_region_add_subregion(get_system_memory(), MT8113_WIFI_ADDR,
@@ -2984,16 +3412,28 @@ static void mt8113_realize(DeviceState *dev, Error **errp)
 
     /* The busless SoC is not otherwise reached by the system reset tree. */
     qemu_register_reset(mt8113_usb_system_reset, s);
+    qemu_register_reset(mt8113_wifi_system_reset, s);
 }
 
 static void mt8113_unrealize(DeviceState *dev)
 {
-    qemu_unregister_reset(mt8113_usb_system_reset, MT8113(dev));
+    MT8113State *s = MT8113(dev);
+
+    qemu_unregister_reset(mt8113_usb_system_reset, s);
+    qemu_unregister_reset(mt8113_wifi_system_reset, s);
+    if (s->wifi_timer) {
+        timer_free(s->wifi_timer);
+    }
+    if (s->wifi_nic) {
+        qemu_del_nic(s->wifi_nic);
+    }
 }
 
 static const Property mt8113_properties[] = {
     DEFINE_PROP_UINT64("reset-vector", MT8113State, reset_vector, 0),
     DEFINE_NIC_PROPERTIES(MT8113State, usb.nic_conf),
+    DEFINE_PROP_NETDEV("wifi-netdev", MT8113State, wifi_conf.peers),
+    DEFINE_PROP_MACADDR("wifi-mac", MT8113State, wifi_conf.macaddr),
 };
 
 static void mt8113_init(Object *obj)
