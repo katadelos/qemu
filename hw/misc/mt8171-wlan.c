@@ -10,13 +10,16 @@
  * firmware. It performs real 36-bit physical descriptor/payload DMA and
  * retains downloaded bytes, including ciphertext, in download staging.
  * An explicitly virtual MCU protocol implements selected runtime services;
- * it does not execute or decrypt the original firmware. Unknown commands do not get
- * successful completions. There is no radio or network packet backend.
+ * it does not execute or decrypt the original firmware. Its open virtual AP
+ * implements scan, authentication, association and Ethernet transport through
+ * the stock driver's native DMA queues. Unknown commands remain outstanding.
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "qemu/osdep.h"
 #include "hw/misc/mt8171-wlan.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
 #include "system/address-spaces.h"
 #include "qemu/bitops.h"
 #include "qemu/log.h"
@@ -39,6 +42,10 @@
 #define DESC_DONE BIT(31)
 #define DESC_LAST BIT(30)
 #define EVENT_SIZE 512
+#define RX_DATA 0x400
+#define RX_DATA_EXT 0x580
+
+static const uint8_t ap_mac[6] = {0x02, 0x81, 0x71, 0, 0, 1};
 
 static bool ready(MT8171WlanState *s)
 {
@@ -65,6 +72,279 @@ static bool dma(MT8171WlanState *s, hwaddr address, void *data,
         return false;
     }
     return true;
+}
+
+/* The MCU delivers events and 802.11 frames through the host's real RX
+ * descriptors. Keep ownership until a complete buffer can be written. */
+static bool queue_rx(MT8171WlanState *s, const uint8_t *packet,
+                     unsigned length, unsigned ring)
+{
+    unsigned slot = (s->rx_head + s->rx_count) % ARRAY_SIZE(s->rx_queue);
+    if (s->rx_count == ARRAY_SIZE(s->rx_queue) ||
+        length > sizeof(s->rx_queue[0])) {
+        return false;
+    }
+    memcpy(s->rx_queue[slot], packet, length);
+    s->rx_length[slot] = length;
+    s->rx_ring[slot] = ring;
+    s->rx_count++;
+    timer_mod(s->dma_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 20000);
+    return true;
+}
+
+static void deliver_rx(MT8171WlanState *s)
+{
+    while (s->rx_count && ready(s) && (R(s, DMA_CONFIG) & 4) &&
+           !(R(s, SLP_PROT) & 1)) {
+        unsigned slot = s->rx_head, ring = s->rx_ring[slot];
+        unsigned reg = RX_DATA + ring * 16;
+        unsigned count = R(s, reg + 4) & 0xfff;
+        unsigned index = R(s, reg + 12) & 0xfff;
+        unsigned length = s->rx_length[slot];
+        uint8_t d[16];
+        uint32_t control;
+        hwaddr desc, buffer;
+        if (!count || index >= count || index == (R(s, reg + 8) & 0xfff)) {
+            break;
+        }
+        desc = (R(s, reg) | (uint64_t)(R(s, RX_DATA_EXT + ring * 4) & 15)
+                << 32) + index * 16;
+        if (!dma(s, desc, d, sizeof(d), false)) {
+            break;
+        }
+        control = ldl_le_p(d + 4);
+        if ((control & DESC_DONE) || extract32(control, 16, 14) < length) {
+            break;
+        }
+        buffer = ldl_le_p(d) | (uint64_t)(ldl_le_p(d + 8) & 15) << 32;
+        if (!dma(s, buffer, s->rx_queue[slot], length, true)) {
+            break;
+        }
+        stl_le_p(d + 4, deposit32(control | DESC_DONE | DESC_LAST,
+                                  16, 14, length));
+        if (!dma(s, desc, d, sizeof(d), true)) {
+            break;
+        }
+        R(s, reg + 12) = (index + 1) % count;
+        R(s, INT_STATUS) |= BIT(ring);
+        s->rx_head = (slot + 1) % ARRAY_SIZE(s->rx_queue);
+        s->rx_count--;
+        s->rx_packets += ring == 0;
+    }
+    update_irq(s);
+}
+
+static void runtime_event(MT8171WlanState *s, uint8_t id,
+                          const void *payload, unsigned length)
+{
+    uint8_t event[EVENT_SIZE] = {0};
+    assert(length + 32 <= sizeof(event));
+    stl_le_p(event, (length + 32) | 0xe0000000U);
+    stw_le_p(event + 20, length + 12);
+    stw_le_p(event + 22, 0xe000);
+    event[24] = id;
+    memcpy(event + 32, payload, length);
+    queue_rx(s, event, length + 32, 1);
+}
+
+static void management_rx(MT8171WlanState *s, uint16_t fc,
+                          const uint8_t *destination,
+                          const uint8_t *body, unsigned length)
+{
+    /* RXD20, group2 timestamp8, group3 RX vector24, MAC header24. */
+    uint8_t packet[1024] = {0};
+    uint8_t *header = packet + 52;
+    stw_le_p(packet, 76 + length);
+    stw_le_p(packet + 2, 0xe001 | (6 << 9));
+    packet[4] = (destination[0] & 1) ? 8 : 2;
+    packet[5] = 1;
+    packet[6] = 24;
+    packet[7] = s->context << 2;
+    packet[8] = s->wlan_index;
+    stw_le_p(packet + 10, 0x2000);
+    stl_le_p(packet + 20, qemu_clock_get_us(QEMU_CLOCK_VIRTUAL));
+    packet[40] = packet[41] = 150; /* virtual -35dBm station */
+    stw_le_p(header, fc);
+    memcpy(header + 4, destination, 6);
+    memcpy(header + 10, ap_mac, 6);
+    memcpy(header + 16, ap_mac, 6);
+    stw_le_p(header + 22, s->frame_sequence++ << 4);
+    memcpy(header + 24, body, length);
+    queue_rx(s, packet, 76 + length, 1);
+}
+
+static void beacon(MT8171WlanState *s)
+{
+    static const uint8_t ies[] = {
+        0, 11, 'K','i','n','d','l','e','-','Q','E','M','U',
+        1, 8, 0x82, 0x84, 0x8b, 0x96, 12, 18, 24, 36,
+        3, 1, 1, 5, 4, 0, 1, 0, 0, 50, 4, 48, 72, 96, 108,
+    };
+    uint8_t body[12 + sizeof(ies)] = {0};
+    stq_le_p(body, qemu_clock_get_us(QEMU_CLOCK_VIRTUAL));
+    stw_le_p(body + 8, 100);
+    stw_le_p(body + 10, 0x421);
+    memcpy(body + 12, ies, sizeof(ies));
+    management_rx(s, 0x80, (const uint8_t *)"\xff\xff\xff\xff\xff\xff",
+                  body, sizeof(body));
+}
+
+static void transmit(MT8171WlanState *s, const uint8_t *txd,
+                      const uint8_t *frame, unsigned length)
+{
+    uint8_t done[88] = {0};
+    bool delivered = false;
+    if (s->nic && !qemu_get_queue(s->nic)->link_down &&
+        (txd[5] & 0x60) == 0x40 && length >= 24) {
+        uint16_t fc = lduw_le_p(frame);
+        if ((fc & 0xfc) == 0xb0 && length >= 30 &&
+            !lduw_le_p(frame + 24) && lduw_le_p(frame + 26) == 1) {
+            uint8_t body[6] = {0, 0, 2, 0, 0, 0};
+            management_rx(s, 0xb0, frame + 10, body, sizeof(body));
+            delivered = true;
+        } else if ((fc & 0xfc) == 0 || (fc & 0xfc) == 0x20) {
+            static const uint8_t body[] = {
+                0x21, 4, 0, 0, 1, 0xc0,
+                1, 8, 0x82, 0x84, 0x8b, 0x96, 12, 18, 24, 36,
+                50, 4, 48, 72, 96, 108,
+            };
+            management_rx(s, (fc & 0xfc) | 0x10, frame + 10,
+                          body, sizeof(body));
+            s->associated = true;
+            delivered = true;
+        } else if ((fc & 0xfc) == 0x40) {
+            beacon(s);
+            delivered = true;
+        } else if ((fc & 0xfc) == 0xa0 || (fc & 0xfc) == 0xc0) {
+            s->associated = false;
+            delivered = true;
+        }
+    } else if (s->nic && !qemu_get_queue(s->nic)->link_down &&
+               s->associated && length >= 14) {
+        qemu_send_packet(qemu_get_queue(s->nic), frame, length);
+        s->tx_packets++;
+        delivered = true;
+    }
+    /* TX status contains the host's packet ID and WTBL index. The driver
+     * uses it to advance authentication and association state machines. */
+    if (txd[20] && (txd[21] & 6)) {
+        done[0] = txd[20];
+        done[1] = delivered ? 0 : 1;
+        done[4] = txd[4];
+        done[5] = 1;
+        runtime_event(s, 0x0f, done, sizeof(done));
+    }
+}
+
+static void transmit_data(MT8171WlanState *s)
+{
+    /* Logical data queues0/1 map to hardware rings0/1. CONNAC append V2
+     * provides four packet tokens and 36-bit scatter addresses. */
+    for (unsigned ring = 0; ring < 2; ring++) {
+        unsigned reg = 0x300 + ring * 16;
+        unsigned count = R(s, reg + 4) & 0xfff;
+        unsigned index = R(s, reg + 12) & 0xfff;
+        uint8_t descriptor[16], txd[128], frame[2048], report[12] = {0};
+        if (!count || index >= count || index == (R(s, reg + 8) & 0xfff)) {
+            continue;
+        }
+        hwaddr desc = (R(s, reg) | (uint64_t)(R(s, 0x500 + ring * 4) & 15)
+                       << 32) + index * 16;
+        if (!dma(s, desc, descriptor, sizeof(descriptor), false)) {
+            continue;
+        }
+        uint32_t control = ldl_le_p(descriptor + 4);
+        unsigned length = extract32(control, 16, 14);
+        hwaddr buffer = ldl_le_p(descriptor) |
+                       (uint64_t)(ldl_le_p(descriptor + 12) & 15) << 32;
+        if (control & DESC_DONE || length < 64 || length > sizeof(txd) ||
+            !dma(s, buffer, txd, length, false)) {
+            continue;
+        }
+        for (unsigned i = 0; i < 4; i++) {
+            unsigned token = lduw_le_p(txd + 32 + i * 2);
+            unsigned offset = 40 + (i / 2) * 12;
+            unsigned size = lduw_le_p(txd + offset + 4 + (i % 2) * 2);
+            hwaddr address = ldl_le_p(txd + offset + (i % 2) * 8) |
+                             (uint64_t)(size & 0x7000) << 20;
+            size &= 0xfff;
+            if (!(token & 0x8000)) {
+                continue;
+            }
+            if (size >= 14 && size <= sizeof(frame) &&
+                dma(s, address, frame, size, false)) {
+                transmit(s, txd, frame, size);
+            }
+            /* A CONNAC MSDU report returns packet-buffer ownership. */
+            stl_le_p(report, 12 | BIT(16) | (6U << 29));
+            stw_le_p(report + 8, token & 0x7fff);
+            queue_rx(s, report, sizeof(report), 1);
+        }
+        stl_le_p(descriptor + 4, control | DESC_DONE);
+        dma(s, desc, descriptor, sizeof(descriptor), true);
+        R(s, reg + 12) = (index + 1) % count;
+        R(s, INT_STATUS) |= BIT(4 + ring);
+        timer_mod(s->dma_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 20000);
+    }
+}
+
+static bool can_receive(NetClientState *nc)
+{
+    MT8171WlanState *s = qemu_get_nic_opaque(nc);
+    return ready(s) && s->associated && s->virtual_mcu_state == 2 &&
+           !nc->link_down && s->rx_count < ARRAY_SIZE(s->rx_queue);
+}
+
+static ssize_t receive_packet(NetClientState *nc, const uint8_t *buf, size_t size)
+{
+    MT8171WlanState *s = qemu_get_nic_opaque(nc);
+    uint8_t packet[2048] = {0};
+    if (!can_receive(nc)) {
+        return 0;
+    }
+    if (size < 14 || size + 60 > sizeof(packet)) {
+        return size;
+    }
+    /* Hardware header translation: RXD + group4 retains MAC metadata,
+     * followed by an ordinary Ethernet frame for the Linux data path. */
+    stw_le_p(packet, size + 60);
+    stw_le_p(packet + 2, 0x4000 | (12 << 9));
+    packet[4] = (buf[0] & 1) ? 4 : 2;
+    packet[5] = 1;
+    packet[6] = 0x80 | 14;
+    packet[7] = s->context << 2;
+    packet[8] = s->wlan_index;
+    stw_le_p(packet + 10, 0xc000);
+    stw_le_p(packet + 20, 0x0208);
+    memcpy(packet + 22, ap_mac, 6);
+    stw_le_p(packet + 28, s->frame_sequence++ << 4);
+    packet[48] = packet[49] = 150;
+    memcpy(packet + 60, buf, size);
+    return queue_rx(s, packet, size + 60, 0) ? size : 0;
+}
+
+static void beacon_lost(void *opaque)
+{
+    MT8171WlanState *s = opaque;
+    if (ready(s) && s->virtual_mcu_state == 2 && s->associated &&
+        qemu_get_queue(s->nic)->link_down) {
+        uint8_t event[4] = { s->context, 0, 0, 0 };
+        s->associated = false;
+        runtime_event(s, 0x13, event, sizeof(event));
+    }
+}
+
+static void link_changed(NetClientState *nc)
+{
+    MT8171WlanState *s = qemu_get_nic_opaque(nc);
+    if (nc->link_down && s->associated) {
+        /* The driver rejects beacon loss while data was received within two
+         * seconds. Model missed beacons before reporting firmware timeout. */
+        timer_mod(s->beacon_loss_timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 3000000000LL);
+    } else if (!nc->link_down) {
+        timer_del(s->beacon_loss_timer);
+    }
 }
 
 static bool identity(MT8171WlanState *s, uint32_t chip_addr, uint32_t *value)
@@ -153,6 +433,7 @@ static void subsystem_reset(void *opaque, int input, int level)
         timer_del(s->dma_timer);
         timer_del(s->protect_timer);
         timer_del(s->startup_timer);
+        timer_del(s->beacon_loss_timer);
         clear_scan(s);
         clear_download(s);
         memset(s->regs, 0, sizeof(s->regs));
@@ -161,6 +442,11 @@ static void subsystem_reset(void *opaque, int input, int level)
         memset(s->log_config, 0, sizeof(s->log_config));
         s->start_flags = s->start_address = 0;
         s->virtual_mcu_state = 0;
+        s->rx_head = s->rx_count = 0;
+        s->associated = false;
+        if (s->nic) {
+            qemu_purge_queued_packets(qemu_get_queue(s->nic));
+        }
         s->firmware_owns = false;
         s->unsupported_reported = false;
         s->subsystem_resets++;
@@ -213,7 +499,7 @@ static unsigned add_capability(uint8_t *p, uint32_t tag,
 }
 
 /* Exact TLV layouts come from the original gNicCapabilityV2InfoTable
- * consumers. Values describe this limited, disconnected virtual station:
+ * consumers. Values describe this virtual station:
  * four BSS, one WMM/spatial stream, 32 retained table entries, no offloads.
  * No efuse, RF calibration, beamforming or measured radio limits invented. */
 static unsigned capability_event(MT8171WlanState *s, uint8_t *event)
@@ -295,8 +581,8 @@ static bool set_features(MT8171WlanState *s, const uint8_t *p, unsigned length)
 }
 
 /* Runtime reply payloads are produced by specific virtual services. */
-/* Empty virtual RF environment: actual request bytes and channel intervals
- * are retained, but no APs, beacons, measured RSSI or association are invented.
+/* Virtual open AP on channel1: actual request bytes and channel intervals
+ * are retained. Scan delivery uses real receive descriptors.
  * Layout: stock scnSendScanReqV2, corroborated by mt76_connac_hw_scan_req.
  * The released MCU's zero-dwell default is opaque. This virtual service uses
  * the local mt76 CONNAC nominal 60ms active / 120ms passive policy instead. */
@@ -304,8 +590,9 @@ static bool validate_scan(MT8171WlanState *s, const uint8_t *p, unsigned length)
 {
     if (length != sizeof(s->scan_request) || p[1] >= MT8171_WLAN_CONTEXTS ||
         p[2] > 1 || p[7] != 1 || p[4] > 4 || p[0x33b] > 6 ||
-        p[0x9e] != 4 || p[0x9f] > 32 || p[0x33a] > 32 ||
-        !(p[0x9f] + p[0x33a]) || lduw_le_p(p + 0xe0) > 600 ||
+        p[0x9e] > 4 || p[0x9f] > 32 || p[0x33a] > 32 ||
+        (p[0x9e] == 4 && !(p[0x9f] + p[0x33a])) ||
+        lduw_le_p(p + 0xe0) > 600 ||
         (p[6] & 4) || s->scan_active || s->scan_event_pending) {
         return false;
     }
@@ -330,6 +617,7 @@ static void clear_scan(MT8171WlanState *s)
 {
     timer_del(s->scan_timer);
     s->scan_active = s->scan_event_pending = s->scan_timed_out = false;
+    s->scheduled_scan_enabled = false;
     s->scan_count = s->scan_index = 0;
 }
 
@@ -344,9 +632,17 @@ static void start_scan(MT8171WlanState *s, const uint8_t *p)
 {
     unsigned timeout_ms = lduw_le_p(p + 0x9c);
     memcpy(s->scan_request, p, sizeof(s->scan_request));
-    s->scan_count = p[0x9f] + p[0x33a];
-    memcpy(s->scan_channels, p + 0xa0, p[0x9f] * 2);
-    memcpy(s->scan_channels + p[0x9f], p + 0x33e, p[0x33a] * 2);
+    if (p[0x9e] == 4) {
+        s->scan_count = p[0x9f] + p[0x33a];
+        memcpy(s->scan_channels, p + 0xa0, p[0x9f] * 2);
+        memcpy(s->scan_channels + p[0x9f], p + 0x33e, p[0x33a] * 2);
+    } else {
+        s->scan_count = 13;
+        for (unsigned i = 0; i < s->scan_count; i++) {
+            s->scan_channels[i][0] = 1;
+            s->scan_channels[i][1] = i + 1;
+        }
+    }
     s->scan_index = 0;
     s->scan_dwell_ms = lduw_le_p(p + 0x9a);
     if (!s->scan_dwell_ms) {
@@ -366,10 +662,33 @@ static void scan_channel_done(void *opaque)
 {
     MT8171WlanState *s = opaque;
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    if (!s->scan_active && s->scheduled_scan_enabled && ready(s) &&
+        s->virtual_mcu_state == 2) {
+        bool matches = !s->scheduled_scan[4];
+        for (unsigned i = 0; i < MIN(s->scheduled_scan[4], 16); i++) {
+            const uint8_t *match = s->scheduled_scan + 368 + i * 40;
+            matches |= match[36] == 11 && !memcmp(match + 4, "Kindle-QEMU", 11);
+        }
+        if (matches && s->nic && !qemu_get_queue(s->nic)->link_down) {
+            uint8_t done[4] = {s->scheduled_scan[1]};
+            beacon(s);
+            runtime_event(s, 0x23, done, sizeof(done));
+            s->scheduled_scan_enabled = !s->scheduled_scan[2];
+        }
+        if (s->scheduled_scan_enabled) {
+            unsigned seconds = MAX(lduw_le_p(s->scheduled_scan + 1140), 1);
+            timer_mod(s->scan_timer, now + seconds * 1000000000LL);
+        }
+        return;
+    }
     if (!s->scan_active || !ready(s) || s->virtual_mcu_state != 2) {
         return;
     }
     if (now >= s->scan_channel_end_ns) {
+        if (s->scan_channels[s->scan_index][1] == 1 && s->nic &&
+            !qemu_get_queue(s->nic)->link_down) {
+            beacon(s);
+        }
         s->scan_index++;
         s->scanned_channels++;
     }
@@ -447,6 +766,168 @@ static bool runtime_command(MT8171WlanState *s, const uint8_t *command,
         return false;
     }
     switch (command[36]) {
+    case 0x79: /* channel/network manager snapshot, SoC2 single-radio layout */
+        if (command[38] != 0 || payload_len != 165) {
+            return false;
+        }
+        *event_size = 32 + 165;
+        event[24] = 0x79;
+        /* No DBDC or concurrent channels. The station occupies channel1. */
+        if (s->associated && s->context < MT8171_WLAN_BSS) {
+            event[33] = 1;
+            event[35] = 1;
+        }
+        break;
+    case 0x7e: /* host throughput/rate telemetry; no response requested */
+        if (command[38] != 1 || payload_len != sizeof(s->runtime.performance)) {
+            return false;
+        }
+        memcpy(s->runtime.performance, p, payload_len);
+        break;
+    case 0x10: /* station IP addresses for firmware ARP policy */
+        if (command[38] != 1 || payload_len < 4 ||
+            p[0] >= MT8171_WLAN_CONTEXTS || payload_len < 4 + p[1] * 4 ||
+            payload_len > sizeof(s->runtime.network_addresses[0])) {
+            return false;
+        }
+        memset(s->runtime.network_addresses[p[0]], 0,
+               sizeof(s->runtime.network_addresses[0]));
+        memcpy(s->runtime.network_addresses[p[0]], p, payload_len);
+        break;
+    case 0x90: /* force RTS policy; virtual medium has no RF contention */
+        if (command[38] != 1 || payload_len != 4 || p[0] > 1) {
+            return false;
+        }
+        memcpy(s->runtime.force_rts, p, payload_len);
+        break;
+    case 0xca: /* textual radio feature policy, e.g. SET_STBC 0 0 */
+        if (command[38] != 1 || payload_len != sizeof(s->runtime.chip_config) ||
+            lduw_le_p(p + 4) > 320) {
+            return false;
+        }
+        memcpy(s->runtime.chip_config, p, payload_len);
+        break;
+    case 7: /* Removing an old security key is valid on the open AP. */
+        if (command[38] != 1 || payload_len != 64 || p[0] != 0) {
+            return false;
+        }
+        break;
+    case 8: /* Default key selection; this open BSS uses no key material. */
+        if (command[38] != 1 || payload_len != 4) {
+            return false;
+        }
+        break;
+    case 0x82:
+        if (command[38] != 0) {
+            return false;
+        }
+        *event_size = 128;
+        event[24] = 3;
+        stq_le_p(event + 32, s->tx_packets);
+        stq_le_p(event + 104, s->rx_packets);
+        break;
+    case 0xcd: /* WTBL telemetry, queried by the stock Wi-Fi metrics job */
+        if (command[38] != 0 || payload_len != 160 ||
+            ldl_le_p(p) >= MT8171_WLAN_WTBL) {
+            return false;
+        }
+        /* nicCmdEventQueryWlanInfo copies the 156-byte WTBL record after
+         * the caller's index. The virtual open BSS has no key/BA/offload
+         * state. Complete the query so telemetry cannot stall command DMA. */
+        *event_size = 32 + 156;
+        event[24] = 0xcd;
+        break;
+    case 0x85: /* station statistics: hardware RF counters are unavailable */
+        if (command[38] != 0 || payload_len != 28 || p[0] >= 27) {
+            return false;
+        }
+        /* Flags.bit0 clear tells nicUpdateStaStats there is no valid RF
+         * sample. It still completes the OID and releases the command ring. */
+        *event_size = 44;
+        event[24] = 0x21;
+        event[40] = p[0];
+        break;
+    case 9: /* infrastructure mode resets the previous connection */
+        if (command[38] != 1 || payload_len) {
+            return false;
+        }
+        s->associated = false;
+        break;
+    case 0x62: /* scheduled scan's fixed header and optional probe IEs */
+        if (command[38] != 1 || payload_len < sizeof(s->scheduled_scan) ||
+            payload_len != sizeof(s->scheduled_scan) + lduw_le_p(p + 6) ||
+            p[3] > 10 || p[4] > 16) {
+            return false;
+        }
+        memcpy(s->scheduled_scan, p, sizeof(s->scheduled_scan));
+        break;
+    case 0x61:
+        if (command[38] != 1 || payload_len != 4 || p[0] > 1) {
+            return false;
+        }
+        s->scheduled_scan_enabled = p[0] == 0;
+        if (!s->scan_active && s->scheduled_scan_enabled) {
+            timer_mod(s->scan_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                                    100000000);
+        }
+        break;
+    case 0x81: /* link quality for the virtual station */
+        if (command[38] != 0) {
+            return false;
+        }
+        *event_size = 32 + 8 * MT8171_WLAN_BSS;
+        event[24] = 2;
+        if (s->associated && s->context < MT8171_WLAN_BSS) {
+            uint8_t *quality = event + 32 + s->context * 8;
+            quality[0] = (uint8_t)-35;
+            quality[1] = 100;
+            stw_le_p(quality + 2, 108);
+            quality[5] = 1;
+        }
+        break;
+    case 0x1c: /* channel request/grant or release */
+        if (command[38] != 1 || payload_len != 24 || p[2] > 1) {
+            return false;
+        }
+        if (p[2] == 0) {
+            *event_size = 56;
+            event[24] = 0x10;
+            memcpy(event + 32, p, 24);
+            event[34] = 0; /* granted */
+        }
+        break;
+    case 0x13: /* update station record; reply activates its host queue */
+        if (command[38] != 1 || payload_len != 168) {
+            return false;
+        }
+        s->station_index = p[0];
+        s->context = p[12];
+        /* Stock MT8171 cnmStaSendUpdateCmd uses offset0x33 for NeedResp
+         * and0x36 for the WTBL index (the older gen4m layout differs). */
+        s->wlan_index = p[0x36];
+        if (p[0x33]) {
+            *event_size = 40;
+            event[24] = 0x0c;
+            memcpy(event + 32, p + 2, 6);
+            event[38] = p[0];
+            event[39] = p[12];
+        }
+        break;
+    case 0x12: /* BSS parameters */
+    case 0x16: /* connected power management parameters */
+    case 0x17: /* BSS disconnect */
+    case 0x19: /* RLM parameters */
+    case 0x1d: /* WMM parameters */
+    case 0x30: /* roaming state */
+        if (command[38] != 1 || !payload_len) {
+            return false;
+        }
+        if (command[36] == 0x17) {
+            s->associated = false;
+        } else if (command[36] == 0x12 && payload_len >= 42) {
+            s->associated = p[1] == 0 && !memcmp(p + 36, ap_mac, 6);
+        }
+        break;
     case 0x8a: /* wlanQueryNicCapabilityV2, query with no request payload */
         if (command[38] != 0 || payload_len != 0) {
             return false;
@@ -476,9 +957,10 @@ static bool runtime_command(MT8171WlanState *s, const uint8_t *command,
             p[2] >= MT8171_WLAN_CONTEXTS || p[3]) {
             return false;
         }
-        /* No peer station can exist: station-add/association are unsupported.
-         * All three removal operations act on the actual empty peer set.
-         * WTBL broadcast entries belong to network activation, not STA records. */
+        if (p[0] == 1 || (p[0] == 0 && p[1] == s->station_index) ||
+            (p[0] == 2 && p[1] != s->station_index)) {
+            s->associated = false;
+        }
         break;
     case 0xa5: /* wlanoidNotifyFwCalibration after gRestoreSuccessFlag */
         if (command[38] != 1 || payload_len) {
@@ -492,8 +974,7 @@ static bool runtime_command(MT8171WlanState *s, const uint8_t *command,
             return false;
         }
         /* wlanNotifyFwSuspend sets context, enable, MDTIM and WOW enable;
-         * the remaining64 bytes are reserved. No radio packets exist to
-         * wake this empty station, and no WOW capability is advertised. */
+         * the remaining64 bytes are reserved. WOW is not advertised. */
         for (unsigned i = 4; i < 68; i++) {
             if (p[i]) {
                 return false;
@@ -598,7 +1079,15 @@ static void run_dma(void *opaque)
     MT8171WlanState *s = opaque;
     uint8_t txd[16], rxd[16], command[64 + 2048], event[EVENT_SIZE] = {0};
     unsigned txreg = TX_CMD, txext = TX_CMD_EXT, txirq = 7;
+    deliver_rx(s);
     deliver_scan_event(s);
+    if (ready(s) && s->virtual_mcu_state == 2 && !s->firmware_owns &&
+        (R(s, DMA_CONFIG) & 1) && !(R(s, SLP_PROT) & 1)) {
+        transmit_data(s);
+        if (s->nic) {
+            qemu_flush_queued_packets(qemu_get_queue(s->nic));
+        }
+    }
     /* INIT and runtime use different logical command queues in the stock
      * kalDevPortWrite / halWpdmaWriteCmd implementations. */
     if (R(s, TX_CMD + 8) == R(s, TX_CMD + 12)) {
@@ -631,17 +1120,25 @@ static void run_dma(void *opaque)
     txbuf = ldl_le_p(txd) | (uint64_t)(ldl_le_p(txd + 12) & 0xf) << 32;
     length = extract32(txctrl, 16, 14);
     if (!(txctrl & DESC_LAST) || (txctrl & 0x3fff) ||
-        length < 64 || length > sizeof(command)) {
+        length < 32 || length > sizeof(command)) {
         goto unsupported;
     }
     if (!dma(s, txbuf, command, length, false)) {
         return;
     }
+    if ((command[5] & 0x60) == 0x40 && s->virtual_mcu_state == 2) {
+        transmit(s, command, command + 32, length - 32);
+        goto complete;
+    }
+    if (length < 64) {
+        goto unsupported;
+    }
     cid = command[36];
     /* nicTxInitCmd rounds the bus transfer to four bytes. Padding is not
      * part of the firmware stream recorded in the TXD byte count. */
     if (lduw_le_p(command) < 64 ||
-        ROUND_UP(lduw_le_p(command), 4) != length ||
+        (lduw_le_p(command) != length &&
+         ROUND_UP(lduw_le_p(command), 4) != length) ||
         command[37] != 0xa0) {
         goto unsupported;
     }
@@ -729,6 +1226,7 @@ static void run_dma(void *opaque)
             return;
         }
     }
+complete:
     stl_le_p(txd + 4, txctrl | DESC_DONE);
     if (!dma(s, txdesc, txd, sizeof(txd), true)) {
         return;
@@ -930,18 +1428,21 @@ static void reset(DeviceState *dev)
     timer_del(s->dma_timer);
     timer_del(s->protect_timer);
     timer_del(s->startup_timer);
+    timer_del(s->beacon_loss_timer);
     clear_scan(s);
     s->scan_requests = s->scan_completions = s->scan_cancels = 0;
     s->scanned_channels = s->station_removals = 0;
     s->calibration_notifications = s->host_suspend_notifications = 0;
     s->virtual_mcu_state = 0;
+    s->rx_head = s->rx_count = 0;
+    s->associated = false;
     s->firmware_owns = false;
     s->virtual_starts = s->runtime_commands = s->capability_queries = 0;
     s->configuration_commands = s->virtual_stops = 0;
     s->subsystem_resets = 0;
     memset(&s->runtime, 0, sizeof(s->runtime));
     s->ownership_changes = 0;
-    memcpy(s->mac, "\x52\x54\x00\x81\x71\x01", sizeof(s->mac));
+    memcpy(s->mac, s->conf.macaddr.a, sizeof(s->mac));
     memset(s->basic_config, 0, sizeof(s->basic_config));
     memset(s->log_config, 0, sizeof(s->log_config));
     memset(s->regs, 0, sizeof(s->regs));
@@ -970,10 +1471,13 @@ static void init(Object *obj)
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->ownership_iomem);
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
     s->scan_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, scan_channel_done, s);
+    s->beacon_loss_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, beacon_lost, s);
     s->startup_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, startup_done, s);
     s->dma_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, run_dma, s);
     s->protect_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, protect_done, s);
     object_property_add_uint64_ptr(obj, "scan-requests", &s->scan_requests, OBJ_PROP_FLAG_READ);
+    object_property_add_uint8_ptr(obj, "bss-context", &s->context, OBJ_PROP_FLAG_READ);
+    object_property_add_uint8_ptr(obj, "wlan-index", &s->wlan_index, OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "scan-completions", &s->scan_completions, OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "scan-cancels", &s->scan_cancels, OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "scanned-channels", &s->scanned_channels, OBJ_PROP_FLAG_READ);
@@ -1010,11 +1514,44 @@ static void finalize(Object *obj)
     timer_free(s->protect_timer);
     timer_free(s->startup_timer);
     timer_free(s->scan_timer);
+    timer_free(s->beacon_loss_timer);
 }
+
+static NetClientInfo net_info = {
+    .type = NET_CLIENT_DRIVER_NIC,
+    .size = sizeof(NICState),
+    .can_receive = can_receive,
+    .receive = receive_packet,
+    .link_status_changed = link_changed,
+};
+
+static void realize(DeviceState *dev, Error **errp)
+{
+    MT8171WlanState *s = MT8171_WLAN(dev);
+    qemu_macaddr_default_if_unset(&s->conf.macaddr);
+    memcpy(s->mac, s->conf.macaddr.a, sizeof(s->mac));
+    s->nic = qemu_new_nic(&net_info, &s->conf, TYPE_MT8171_WLAN, dev->id,
+                          &dev->mem_reentrancy_guard, s);
+    qemu_format_nic_info_str(qemu_get_queue(s->nic), s->conf.macaddr.a);
+}
+
+static void unrealize(DeviceState *dev)
+{
+    MT8171WlanState *s = MT8171_WLAN(dev);
+    qemu_del_nic(s->nic);
+}
+
+static const Property properties[] = {
+    DEFINE_NIC_PROPERTIES(MT8171WlanState, conf),
+};
 
 static void class_init(ObjectClass *oc, const void *data)
 {
-    device_class_set_legacy_reset(DEVICE_CLASS(oc), reset);
+    DeviceClass *dc = DEVICE_CLASS(oc);
+    device_class_set_legacy_reset(dc, reset);
+    device_class_set_props(dc, properties);
+    dc->realize = realize;
+    dc->unrealize = unrealize;
 }
 
 static const TypeInfo info = {
