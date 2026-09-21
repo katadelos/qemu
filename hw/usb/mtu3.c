@@ -544,9 +544,14 @@ static void mtu3_vbus_input(void *opaque, int n, int level)
 
     if (s->vbus != !!level) {
         s->vbus = level;
+        qemu_set_irq(s->vbus_out, level);
         R(s, 0x1540) |= level ? BIT(15) : BIT(16);
         if (!level) {
             R(s, 0x241c) |= BIT(5);
+            /* The driver handles gadget disconnect through a link-speed
+             * change to UNKNOWN; the USB2 DISCONN bit alone is ignored. */
+            R(s, 0x800) &= ~7U;
+            R(s, 0x854) |= BIT(0);
         }
         mtu3_update_irq(s);
         mtu3_ecm_kick(s);
@@ -596,6 +601,7 @@ static void mtu3_reset(DeviceState *dev)
     MTU3State *s = MTU3(dev);
     /* Reset/power pins belong to IPPC; preserve their externally driven state. */
     mtu3_reset_state(s);
+    qemu_set_irq(s->vbus_out, s->vbus);
 }
 
 static void mtu3_realize(DeviceState *dev, Error **errp)
@@ -622,6 +628,7 @@ static void mtu3_init(Object *obj)
     memory_region_init_io(&s->iomem, obj, &mtu3_ops, s, TYPE_MTU3, 0x2e00);
     sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->iomem);
     sysbus_init_irq(SYS_BUS_DEVICE(s), &s->irq);
+    qdev_init_gpio_out_named(DEVICE(s), &s->vbus_out, "host-vbus", 1);
     qdev_init_gpio_in_named(DEVICE(s), mtu3_reset_input, "reset", 1);
     qdev_init_gpio_in_named(DEVICE(s), mtu3_vbus_input, "vbus", 1);
     qdev_init_gpio_in_named(DEVICE(s), mtu3_power_input, "power", 1);

@@ -23,7 +23,7 @@ typedef struct MTU3EcmHost MTU3EcmHost;
 struct MTU3State {
     SysBusDevice parent_obj;
     MemoryRegion iomem;
-    qemu_irq irq;
+    qemu_irq irq, vbus_out;
     uint32_t regs[0x2e00 / 4];
     MTU3Endpoint ep[2][MTU3_ENDPOINTS]; /* OUT, IN */
     uint32_t endpoints, fifo_bytes;

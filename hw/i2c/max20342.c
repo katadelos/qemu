@@ -12,6 +12,7 @@ struct MAX20342State {
     uint8_t regs[256];
     uint8_t pointer;
     bool expect_pointer;
+    bool vbus_present;
 };
 
 static void max20342_reset(DeviceState *dev);
@@ -24,6 +25,26 @@ static void max20342_update_irq(MAX20342State *s)
         pending |= s->regs[reg] & s->regs[reg + 11];
     }
     qemu_set_irq(s->nirq, !(pending && (s->regs[0x15] & 0x80)));
+}
+
+static void max20342_vbus(void *opaque, int input, int level)
+{
+    MAX20342State *s = opaque;
+
+    /* MAX20342 data sheet, COMMON_STATUS/CC_STATUS2/BC_STATUS: an
+     * attached USB host supplies valid VBUS, CC1 sink mode and 500 mA SDP. */
+    if (s->vbus_present != !!level) {
+        s->regs[0x01] |= 0x03; /* VBvalid/VSAFE0V changed */
+        s->regs[0x02] |= 0x38; /* CC state, pin and current changed */
+        s->regs[0x03] |= 0x12; /* charger detection complete/type changed */
+        s->regs[0x04] |= 0x02; /* OVP switch changed */
+    }
+    s->vbus_present = !!level;
+    s->regs[0x07] = level ? 0x01 : 0x02;
+    s->regs[0x09] = level ? 0x15 : 0;
+    s->regs[0x0a] = level ? 0x20 : 0;
+    s->regs[0x0b] = level ? 0x82 : 0x80;
+    max20342_update_irq(s);
 }
 
 static int max20342_send(I2CSlave *i2c, uint8_t data)
@@ -77,8 +98,8 @@ static void max20342_reset(DeviceState *dev)
 
     memset(s->regs, 0, sizeof(s->regs));
     s->regs[0x00] = 0x01; /* Virtual silicon revision. */
-    s->regs[0x07] = 0x02; /* Unplugged: VBUS at safe 0 V. */
-    s->regs[0x0b] = 0x80; /* I2C interface ready, OVP switch open. */
+    /* Software reset does not unplug the external cable. */
+    max20342_vbus(s, 0, s->vbus_present);
     s->pointer = 0;
     s->expect_pointer = true;
     max20342_update_irq(s);
@@ -88,6 +109,7 @@ static void max20342_init(Object *obj)
 {
     MAX20342State *s = MAX20342(obj);
     qdev_init_gpio_out(DEVICE(obj), &s->nirq, 1);
+    qdev_init_gpio_in_named(DEVICE(obj), max20342_vbus, "vbus", 1);
 }
 
 static const VMStateDescription max20342_vmstate = {
@@ -99,6 +121,7 @@ static const VMStateDescription max20342_vmstate = {
         VMSTATE_UINT8_ARRAY(regs, MAX20342State, 256),
         VMSTATE_UINT8(pointer, MAX20342State),
         VMSTATE_BOOL(expect_pointer, MAX20342State),
+        VMSTATE_BOOL(vbus_present, MAX20342State),
         VMSTATE_END_OF_LIST()
     },
 };

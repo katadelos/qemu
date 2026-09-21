@@ -307,6 +307,7 @@ config MT8113_ELIPSA2E
     default y
     depends on TCG && AARCH64
     select MT8110_BELLATRIX
+    select SPLIT_IRQ
 
 config MT8110_BELLATRIX
     bool

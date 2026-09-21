@@ -2754,6 +2754,10 @@ static void pa6_init(MachineState *machine)
         const MT8115I2CFittedDevice *fitted = &s->board->i2c_devices[i];
         DeviceState *dev = DEVICE(i2c_slave_create_simple(
             s->i2c[fitted->bus].bus, fitted->type, fitted->address));
+        if (!strcmp(fitted->type, "max20342")) {
+            qdev_connect_gpio_out_named(DEVICE(&s->usb), "host-vbus", 0,
+                qdev_get_gpio_in_named(dev, "vbus", 0));
+        }
         for (unsigned irq = 0; irq < ARRAY_SIZE(fitted->eint); irq++) {
             if (fitted->eint[irq] >= 0) {
                 qdev_connect_gpio_out_named(dev, fitted->irq_name, irq,

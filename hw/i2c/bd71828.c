@@ -44,6 +44,7 @@
 #define BD71828_REG_INT_MASK        0xd3
 #define BD71828_REG_INT_MAIN        0xdf
 #define BD71828_REG_INT_STATUS      0xe0
+#define BD71828_REG_INT_DCIN1       0xe1
 #define BD71828_REG_INT_DCIN2       0xe2
 #define BD71828_REG_IO_STAT         0xed
 #define BD71828_SHORTPUSH           BIT(4)
@@ -66,6 +67,7 @@ struct BD71828State {
     qemu_irq nirq;
     bool power_button_support;
     bool power_button;
+    bool vbus_present;
     uint64_t power_presses;
     uint64_t power_releases;
     uint64_t power_short_acks;
@@ -88,6 +90,19 @@ static void bd71828_update_irq(BD71828State *s)
     }
     s->regs[BD71828_REG_INT_MAIN] = pending;
     qemu_set_irq(s->nirq, !pending);
+}
+
+static void bd71828_vbus(void *opaque, int input, int level)
+{
+    BD71828State *s = opaque;
+
+    if (s->vbus_present != !!level) {
+        /* DCIN detection/removal interrupts are latched until acknowledged. */
+        s->regs[BD71828_REG_INT_DCIN1] |= level ? BIT(0) : BIT(1);
+    }
+    s->vbus_present = !!level;
+    s->regs[BD71828_REG_DCIN_STAT] = level ? BIT(0) : 0;
+    bd71828_update_irq(s);
 }
 
 static bool bd71828_get_power_button(Object *obj, Error **errp)
@@ -253,7 +268,7 @@ static void bd71828_reset(DeviceState *dev)
         BD71828_BAT_DET | BD71828_BAT_DET_DONE;
     s->regs[BD71828_REG_BAT_TEMP] = 0;
     s->regs[BD71828_REG_CHG_STATE] = 0;
-    s->regs[BD71828_REG_DCIN_STAT] = 0;
+    bd71828_vbus(s, 0, s->vbus_present);
     bd71828_store_be16(s, BD71828_REG_VBAT_U_MT8110, 4000);
     bd71828_store_be16(s, BD71828_REG_VBAT_INITIAL1_U, 4000);
     bd71828_store_be16(s, BD71828_REG_VBAT_INITIAL2_U, 4000);
@@ -281,6 +296,7 @@ static void bd71828_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(obj), s->gpio_out, "gpio",
                              ARRAY_SIZE(s->gpio_out));
     qdev_init_gpio_out_named(DEVICE(obj), &s->nirq, "irq", 1);
+    qdev_init_gpio_in_named(DEVICE(obj), bd71828_vbus, "vbus", 1);
     object_property_add_bool(obj, "power-button", bd71828_get_power_button,
                               bd71828_set_power_button);
     object_property_add_uint64_ptr(obj, "power-presses", &s->power_presses,
@@ -293,7 +309,7 @@ static void bd71828_init(Object *obj)
 
 static const VMStateDescription bd71828_vmstate = {
     .name = TYPE_BD71828,
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_I2C_SLAVE(parent_obj, BD71828State),
@@ -305,6 +321,7 @@ static const VMStateDescription bd71828_vmstate = {
         VMSTATE_UINT64_V(power_presses, BD71828State, 2),
         VMSTATE_UINT64_V(power_releases, BD71828State, 2),
         VMSTATE_UINT64_V(power_short_acks, BD71828State, 2),
+        VMSTATE_BOOL_V(vbus_present, BD71828State, 3),
         VMSTATE_END_OF_LIST()
     },
 };

@@ -536,7 +536,9 @@ static void bellatrix_usb_vbus(void *opaque, int line, int level)
      * cable supplies the fitted charger; guest extcon owns UDC activation. */
     qemu_set_irq(qdev_get_gpio_in_named(DEVICE(&bms->soc->gpio), "gpio-in", 31),
                  !level);
-    object_property_set_bool(bms->charger, "vbus", !!level, &error_abort);
+    if (bms->charger) {
+        object_property_set_bool(bms->charger, "vbus", !!level, &error_abort);
+    }
 }
 
 static void bellatrix_init(MachineState *machine)
@@ -578,6 +580,9 @@ static void bellatrix_init(MachineState *machine)
     }
     qdev_realize(DEVICE(soc), NULL, &error_fatal);
     bms->soc = soc;
+    bms->usb_vbus_input = qemu_allocate_irq(bellatrix_usb_vbus, bms, 0);
+    qdev_connect_gpio_out_named(DEVICE(soc), "usb-vbus", 0,
+                                bms->usb_vbus_input);
     if (board->scribe || malbec) {
         DeviceState *adc = qdev_new(TYPE_MT6577_AUXADC);
         object_property_add_child(OBJECT(machine), "auxadc", OBJECT(adc));
@@ -623,9 +628,6 @@ static void bellatrix_init(MachineState *machine)
         object_property_add_child(OBJECT(machine), "charger", OBJECT(charger));
         i2c_slave_realize_and_unref(charger, soc->i2c[0].bus, &error_fatal);
         bms->charger = OBJECT(charger);
-        bms->usb_vbus_input = qemu_allocate_irq(bellatrix_usb_vbus, bms, 0);
-        qdev_connect_gpio_out_named(DEVICE(soc), "usb-vbus", 0,
-                                    bms->usb_vbus_input);
         qdev_connect_gpio_out_named(DEVICE(charger), "irq", 0,
             qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in", 35));
         I2CSlave *motion = i2c_slave_new(TYPE_KX132, 0x1f);

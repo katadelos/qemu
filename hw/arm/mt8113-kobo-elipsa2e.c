@@ -12,6 +12,7 @@
 #include "hw/core/irq.h"
 #include "hw/core/loader.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/core/split-irq.h"
 #include "hw/i2c/bd71828.h"
 #include "hw/i2c/fp9935.h"
 #include "hw/i2c/max20342.h"
@@ -127,7 +128,20 @@ static void elipsa2e_init(MachineState *machine)
         qdev_get_gpio_in_named(DEVICE(epd), "enable", 0));
     qdev_connect_gpio_out_named(DEVICE(epd), "power-good", 0,
         qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in", 10));
-    i2c_slave_create_simple(soc->i2c[0].bus, TYPE_MAX20342, 0x35);
+    I2CSlave *detector = i2c_slave_create_simple(soc->i2c[0].bus,
+                                               TYPE_MAX20342, 0x35);
+    qdev_connect_gpio_out(DEVICE(detector), 0,
+        qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in", 39));
+    DeviceState *vbus = qdev_new(TYPE_SPLIT_IRQ);
+    object_property_add_child(OBJECT(machine), "usb-vbus", OBJECT(vbus));
+    qdev_prop_set_uint16(vbus, "num-lines", 2);
+    qdev_realize_and_unref(vbus, NULL, &error_fatal);
+    qdev_connect_gpio_out(vbus, 0,
+        qdev_get_gpio_in_named(DEVICE(detector), "vbus", 0));
+    qdev_connect_gpio_out(vbus, 1,
+        qdev_get_gpio_in_named(DEVICE(pmic), "vbus", 0));
+    qdev_connect_gpio_out_named(DEVICE(soc), "usb-vbus", 0,
+        qdev_get_gpio_in(vbus, 0));
     I2CSlave *touch = i2c_slave_create_simple(soc->i2c[2].bus,
                                              "elan-ekth3500", 0x10);
     qdev_connect_gpio_out_named(DEVICE(touch), "irq", 0,
