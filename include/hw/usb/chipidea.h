@@ -14,6 +14,7 @@ struct ChipideaState {
     MemoryRegion dc_command_iomem;
     NICConf gadget_nic_conf;
     NICState *gadget_nic;
+    qemu_irq vbus;
     bool gadget;
     bool gadget_host_connected;
     uint32_t otgsc;

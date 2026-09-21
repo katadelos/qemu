@@ -49,14 +49,21 @@ enum {
 #define CI_PORTSC_ENABLED BIT(2)
 #define CI_PORTSC_HIGH_SPEED BIT(27)
 
+static void chipidea_update_irq(ChipideaState *ci)
+{
+    EHCIState *ehci = &SYS_BUS_EHCI(ci)->ehci;
+
+    /* OTG change interrupts remain active while the device engine sleeps. */
+    qemu_set_irq(ehci->irq, (ehci->usbsts & ehci->usbintr) != 0 ||
+                 (ci->otgsc & (ci->otgsc >> 8) & 0x007f0000) != 0);
+}
+
 static void chipidea_raise_irq(ChipideaState *ci)
 {
     EHCIState *ehci = &SYS_BUS_EHCI(ci)->ehci;
 
     ehci->usbsts |= CI_USBSTS_INT;
-    if (ehci->usbintr & CI_USBSTS_INT) {
-        qemu_set_irq(ehci->irq, 1);
-    }
+    chipidea_update_irq(ci);
 }
 
 static void chipidea_inject_setup(ChipideaState *ci,
@@ -89,23 +96,24 @@ static void chipidea_config_timer(void *opaque)
         ci->gadget_configured) {
         return;
     }
+    if (!(SYS_BUS_EHCI(ci)->ehci.usbcmd & BIT(0))) {
+        timer_mod(ci->gadget_config_timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 250);
+        return;
+    }
     if (ci->gadget_config_phase == 0) {
         EHCIState *ehci = &SYS_BUS_EHCI(ci)->ehci;
 
         ehci->portsc[0] = CI_PORTSC_CONNECTED | CI_PORTSC_ENABLED |
                           CI_PORTSC_HIGH_SPEED;
         ehci->usbsts |= CI_USBSTS_RESET;
-        if (ehci->usbintr & CI_USBSTS_RESET) {
-            qemu_set_irq(ehci->irq, 1);
-        }
+        chipidea_update_irq(ci);
         ci->gadget_config_phase = 1;
     } else if (ci->gadget_config_phase == 1) {
         EHCIState *ehci = &SYS_BUS_EHCI(ci)->ehci;
 
         ehci->usbsts |= CI_USBSTS_PORT_CHANGE;
-        if (ehci->usbintr & CI_USBSTS_PORT_CHANGE) {
-            qemu_set_irq(ehci->irq, 1);
-        }
+        chipidea_update_irq(ci);
         ci->gadget_config_phase = 2;
     } else if (ci->gadget_config_phase == 2) {
         chipidea_inject_setup(ci, set_configuration);
@@ -299,11 +307,34 @@ static ssize_t chipidea_receive(NetClientState *nc, const uint8_t *buf,
     return 0;
 }
 
+static void chipidea_link_changed(NetClientState *nc)
+{
+    ChipideaState *ci = qemu_get_nic_opaque(nc);
+    EHCIState *ehci = &SYS_BUS_EHCI(ci)->ehci;
+
+    ci->gadget_host_connected = !nc->link_down;
+    ci->gadget_configured = false;
+    ci->gadget_config_phase = 0;
+    timer_del(ci->gadget_config_timer);
+    qemu_purge_queued_packets(nc);
+    qemu_set_irq(ci->vbus, ci->gadget_host_connected);
+    ci->otgsc |= BIT(19); /* B-session-valid changed */
+    if (nc->link_down) {
+        ehci->portsc[0] = BIT(1); /* connection-status change, disconnected */
+        ehci->usbsts |= CI_USBSTS_PORT_CHANGE;
+    } else {
+        timer_mod(ci->gadget_config_timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 250);
+    }
+    chipidea_update_irq(ci);
+}
+
 static NetClientInfo chipidea_net_info = {
     .type = NET_CLIENT_DRIVER_NIC,
     .size = sizeof(NICState),
     .can_receive = chipidea_can_receive,
     .receive = chipidea_receive,
+    .link_status_changed = chipidea_link_changed,
 };
 
 static uint64_t chipidea_read(void *opaque, hwaddr offset,
@@ -338,7 +369,10 @@ static void chipidea_write(void *opaque, hwaddr offset,
 
     switch (offset) {
     case CI_OTGSC:
-        ci->otgsc = value & ~BIT(19);
+        /* Status bits 16..22 are W1C; control and enable bits are RW. */
+        ci->otgsc = (value & ~0x007f0000) |
+                    (ci->otgsc & ~value & 0x007f0000);
+        chipidea_update_irq(ci);
         break;
     case CI_USBMODE:
         ci->dc_mode = value;
@@ -384,7 +418,7 @@ static void chipidea_write(void *opaque, hwaddr offset,
         if (!ci->endptcomplete) {
             EHCIState *ehci = &SYS_BUS_EHCI(ci)->ehci;
             ehci->usbsts &= ~CI_USBSTS_INT;
-            qemu_set_irq(ehci->irq, 0);
+            chipidea_update_irq(ci);
         }
         chipidea_process_in(ci, ci->endptstatus & 0xffff0000);
         if (ci->gadget_nic) {
@@ -436,8 +470,14 @@ static uint64_t chipidea_command_read(void *opaque, hwaddr offset,
                                       unsigned size)
 {
     ChipideaState *ci = opaque;
+    EHCIState *ehci = &SYS_BUS_EHCI(ci)->ehci;
 
-    return SYS_BUS_EHCI(ci)->ehci.usbcmd;
+    switch (offset) {
+    case 0: return ehci->usbcmd;
+    case 4: return ehci->usbsts;
+    case 8: return ehci->usbintr;
+    default: return 0;
+    }
 }
 
 static void chipidea_command_write(void *opaque, hwaddr offset,
@@ -447,6 +487,18 @@ static void chipidea_command_write(void *opaque, hwaddr offset,
     EHCIState *ehci = &SYS_BUS_EHCI(ci)->ehci;
     bool was_running = ehci->usbcmd & BIT(0);
 
+    /* Device reset/suspend status occupies bits that EHCI reserves.  Using
+     * the parent's USBSTS/USBINTR handlers silently loses UDC interrupts. */
+    if (offset == 4) {
+        ehci->usbsts &= ~value;
+        chipidea_update_irq(ci);
+        return;
+    }
+    if (offset == 8) {
+        ehci->usbintr = value;
+        chipidea_update_irq(ci);
+        return;
+    }
     if (value & BIT(1)) {
         ci->dc_mode = 0;
         ci->endptsetupstat = 0;
@@ -538,6 +590,7 @@ static void chipidea_init(Object *obj)
     ChipideaState *ci = CHIPIDEA(obj);
     int i;
 
+    qdev_init_gpio_out_named(DEVICE(obj), &ci->vbus, "vbus", 1);
     for (i = 0; i < ARRAY_SIZE(ci->iomem); i++) {
         const struct {
             const char *name;
@@ -610,7 +663,7 @@ static void chipidea_realize(DeviceState *dev, Error **errp)
                                                 chipidea_config_timer, ci);
         memory_region_init_io(&ci->dc_command_iomem, OBJECT(ci),
                               &chipidea_command_ops, ci,
-                              TYPE_CHIPIDEA ".dc-command", 4);
+                              TYPE_CHIPIDEA ".dc-command", 12);
         memory_region_add_subregion_overlap(&SYS_BUS_EHCI(ci)->ehci.mem,
                                             0x140,
                                             &ci->dc_command_iomem, 2);
