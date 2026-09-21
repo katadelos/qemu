@@ -2114,6 +2114,21 @@ static const MemoryRegionOps mt8113_usbphy_ops = {
 #define MT8113_USB_CAP_EPINFO        0x0c10
 #define MT8113_USB_FIFO_SIZE         0x8000
 #define MT8113_USB_ENDPOINTS         8
+#define MT8113_USB_RNDIS_HEADER      44
+
+enum {
+    USB_NET_RESET,
+    USB_NET_SPEED,
+    USB_NET_ADDRESS,
+    USB_NET_DESCRIPTOR,
+    USB_NET_CONFIGURATION,
+    USB_NET_INTERFACE_OR_INIT,
+    USB_NET_FILTER_OR_INIT_REPLY,
+    USB_NET_READY_OR_RNDIS_FILTER,
+    USB_NET_RNDIS_FILTER_REPLY,
+    USB_NET_READY,
+    USB_NET_FAILED,
+};
 
 #define MT8113_USB_IP_PW_CTRL2       0x08
 #define MT8113_USB_IP_PW_STS1        0x10
@@ -2272,7 +2287,31 @@ static void mt8113_usb_process_tx(MT8113USBState *usb, unsigned ep)
                                       packet, length,
                                       MEMTXATTRS_UNSPECIFIED) == MEMTX_OK &&
             length >= 14) {
-            qemu_send_packet(qemu_get_queue(usb->nic), packet, length);
+            if (!usb->rndis) {
+                qemu_send_packet(qemu_get_queue(usb->nic), packet, length);
+            } else {
+                size_t offset = 0;
+
+                while (length - offset >= MT8113_USB_RNDIS_HEADER) {
+                    const uint8_t *msg = packet + offset;
+                    uint32_t message_length = ldl_le_p(msg + 4);
+                    uint32_t data_offset = ldl_le_p(msg + 8);
+                    uint32_t data_length = ldl_le_p(msg + 12);
+
+                    if (ldl_le_p(msg) != 1 ||
+                        message_length < MT8113_USB_RNDIS_HEADER ||
+                        message_length > length - offset ||
+                        data_offset < MT8113_USB_RNDIS_HEADER - 8 ||
+                        data_offset > message_length - 8 ||
+                        data_length < 14 ||
+                        data_length > message_length - 8 - data_offset) {
+                        break;
+                    }
+                    qemu_send_packet(qemu_get_queue(usb->nic),
+                                     msg + 8 + data_offset, data_length);
+                    offset += message_length;
+                }
+            }
         }
         g_free(packet);
         mt8113_usb_complete_gpd(usb, ep, true, address, &gpd);
@@ -2320,6 +2359,8 @@ static ssize_t mt8113_usb_receive(NetClientState *nc, const uint8_t *packet,
                                   size_t size)
 {
     MT8113USBState *usb = qemu_get_nic_opaque(nc);
+    size_t header_size = usb->rndis ? MT8113_USB_RNDIS_HEADER : 0;
+    uint8_t header[MT8113_USB_RNDIS_HEADER] = { 0 };
 
     if (!mt8113_usb_can_receive(nc)) {
         return 0;
@@ -2335,14 +2376,27 @@ static ssize_t mt8113_usb_receive(NetClientState *nc, const uint8_t *packet,
             continue;
         }
         capacity = gpd.info >> 16;
-        if (!capacity || size > capacity) {
+        if (!capacity || size + header_size > capacity) {
             return 0;
         }
-        if (dma_memory_write(&address_space_memory, gpd.buffer, packet, size,
+        if (header_size) {
+            stl_le_p(header, 1); /* REMOTE_NDIS_PACKET_MSG */
+            stl_le_p(header + 4, size + header_size);
+            stl_le_p(header + 8, header_size - 8);
+            stl_le_p(header + 12, size);
+            if (dma_memory_write(&address_space_memory, gpd.buffer, header,
+                                 header_size,
+                                 MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
+                return 0;
+            }
+        }
+        if (dma_memory_write(&address_space_memory, gpd.buffer + header_size,
+                             packet, size,
                              MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
             return 0;
         }
-        gpd.length = (gpd.length & ~MT8113_USB_GPD_LENGTH_MASK) | size;
+        gpd.length = (gpd.length & ~MT8113_USB_GPD_LENGTH_MASK) |
+                     (size + header_size);
         mt8113_usb_complete_gpd(usb, ep, false, address, &gpd);
         mt8113_usb_update_irq(usb);
         return size;
@@ -2363,6 +2417,10 @@ static void mt8113_usb_disconnect(MT8113USBState *usb)
     usb->configured = false;
     usb->setup_pending = false;
     usb->config_phase = 0;
+    usb->control_tx_pending = false;
+    usb->control_out_length = 0;
+    usb->control_in_length = 0;
+    usb->rndis = false;
     if (usb->config_timer) {
         timer_del(usb->config_timer);
         timer_del(usb->tx_timer);
@@ -2399,6 +2457,8 @@ static void mt8113_usb_inject_setup(MT8113USBState *usb,
                                     const uint8_t setup[8])
 {
     usb->setup_pending = true;
+    usb->control_in_length = 0;
+    usb->control_tx_pending = false;
     memcpy(usb->ep0_fifo, setup, 8);
     usb->ep0_fifo_offset = 0;
     usb->ep0_fifo_length = 8;
@@ -2409,25 +2469,135 @@ static void mt8113_usb_inject_setup(MT8113USBState *usb,
     mt8113_usb_update_irq(usb);
 }
 
+static bool mt8113_usb_parse_configuration(MT8113USBState *usb)
+{
+    const uint8_t *desc = usb->control_in;
+    size_t length = usb->control_in_length;
+    bool found_control = false, found_data = false;
+
+    if (length < 9 || desc[1] != 2 || lduw_le_p(desc + 2) > length) {
+        return false;
+    }
+    length = lduw_le_p(desc + 2);
+    usb->config_value = desc[5];
+    for (size_t offset = 0; offset + 2 <= length;) {
+        const uint8_t *d = desc + offset;
+
+        if (d[0] < 2 || d[0] > length - offset) {
+            return false;
+        }
+        if (d[1] == 4 && d[0] >= 9) { /* interface */
+            if ((d[5] == 0xe0 && d[6] == 1 && d[7] == 3) ||
+                (d[5] == 2 && d[6] == 2 && d[7] == 0xff)) {
+                usb->rndis = true;
+                usb->control_interface = d[2];
+                found_control = true;
+            } else if (d[5] == 2 && d[6] == 6) { /* CDC ECM */
+                usb->control_interface = d[2];
+                found_control = true;
+            } else if (d[5] == 0x0a) { /* CDC data */
+                usb->data_interface = d[2];
+                found_data = true;
+            }
+        }
+        offset += d[0];
+    }
+    return found_control && found_data;
+}
+
+static void mt8113_usb_control_complete(MT8113USBState *usb)
+{
+    bool valid = true;
+
+
+    if (usb->config_phase == USB_NET_DESCRIPTOR) {
+        valid = mt8113_usb_parse_configuration(usb);
+    } else if (usb->rndis &&
+               (usb->config_phase == USB_NET_FILTER_OR_INIT_REPLY ||
+                usb->config_phase == USB_NET_RNDIS_FILTER_REPLY)) {
+        uint32_t expected = usb->config_phase == USB_NET_FILTER_OR_INIT_REPLY
+                            ? 0x80000002 : 0x80000005;
+        uint32_t request_id = usb->config_phase == USB_NET_FILTER_OR_INIT_REPLY
+                             ? 1 : 2;
+
+        if (usb->control_in_length >= 20 &&
+            ldl_le_p(usb->control_in) == 0x00000007 &&
+            ldl_le_p(usb->control_in + 4) <= usb->control_in_length) {
+            /* RNDIS may queue a media-status indication before the command
+             * completion. Drain it, then request the pending reply. */
+            usb->setup_pending = false;
+            return;
+        }
+        valid = usb->control_in_length >= 16 &&
+                ldl_le_p(usb->control_in) == expected &&
+                ldl_le_p(usb->control_in + 4) <= usb->control_in_length &&
+                ldl_le_p(usb->control_in + 8) == request_id &&
+                ldl_le_p(usb->control_in + 12) == 0;
+    }
+    usb->setup_pending = false;
+    if (valid) {
+        usb->config_phase++;
+    } else {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "mt8113-usb: invalid network control response, phase %u, "
+                      "length=%u type=%08x id=%08x status=%08x\n",
+                      usb->config_phase, usb->control_in_length,
+                      ldl_le_p(usb->control_in),
+                      ldl_le_p(usb->control_in + 8),
+                      ldl_le_p(usb->control_in + 12));
+        usb->config_phase = USB_NET_FAILED;
+        timer_del(usb->config_timer);
+    }
+}
+
 static void mt8113_usb_config_timer(void *opaque)
 {
     MT8113USBState *usb = opaque;
     static const uint8_t set_address[8] = {
         0x00, 0x05, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
     };
-    static const uint8_t set_configuration[8] = {
+    static const uint8_t get_configuration[8] = {
+        0x80, 0x06, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02,
+    };
+    uint8_t set_configuration[8] = {
         0x00, 0x09, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
     };
-    static const uint8_t set_interface[8] = {
+    uint8_t set_interface[8] = {
         0x01, 0x0b, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00,
     };
-
-    static const uint8_t set_packet_filter[8] = {
+    uint8_t set_packet_filter[8] = {
         0x21, 0x43, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00,
     };
+    uint8_t send_encapsulated[8] = {
+        0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+    uint8_t get_encapsulated[8] = {
+        0xa1, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+    };
 
-    if (!mt8113_usb_connected(usb) || usb->configured) {
+    if (!mt8113_usb_connected(usb) || usb->configured ||
+        usb->config_phase == USB_NET_FAILED) {
         return;
+    }
+    if (usb->setup_pending && usb->control_tx_pending) {
+        /* Host consumed the control-IN packet. The next EP0 interrupt
+         * lets the guest send another packet or finish the status stage. */
+        usb->control_tx_pending = false;
+        usb->mac_regs[MT8113_USB_EP0CSR / 4] &= ~MT8113_USB_EP0_TX_READY;
+        usb->mac_regs[MT8113_USB_EPISR / 4] |= MT8113_USB_EP0_IRQ;
+        mt8113_usb_update_irq(usb);
+    } else if (usb->setup_pending && usb->control_out_length &&
+               !(usb->mac_regs[MT8113_USB_EP0CSR / 4] &
+                 MT8113_USB_EP0_SETUP_READY)) {
+        /* RNDIS control commands fit in a single high-speed EP0 packet. */
+        memcpy(usb->ep0_fifo, usb->control_out, usb->control_out_length);
+        usb->ep0_fifo_length = usb->control_out_length;
+        usb->ep0_fifo_offset = 0;
+        usb->mac_regs[MT8113_USB_RXCOUNT0 / 4] = usb->control_out_length;
+        usb->control_out_length = 0;
+        usb->mac_regs[MT8113_USB_EP0CSR / 4] |= MT8113_USB_EP0_RX_READY;
+        usb->mac_regs[MT8113_USB_EPISR / 4] |= MT8113_USB_EP0_IRQ;
+        mt8113_usb_update_irq(usb);
     }
     /* Follow mtu3_gadget_ep0.c: a no-data request is complete only when
      * the driver writes DATAEND. Never replace an unhandled SETUP packet.
@@ -2437,17 +2607,17 @@ static void mt8113_usb_config_timer(void *opaque)
         (usb->mac_regs[MT8113_USB_DEV_LINK_ISR / 4] & MT8113_USB_SPEED_CHANGE)) {
         goto wait_for_guest;
     }
-    if (usb->config_phase >= 2 &&
+    if (usb->config_phase >= USB_NET_ADDRESS &&
         !(usb->mac_regs[MT8113_USB_EPIER / 4] & MT8113_USB_EP0_IRQ)) {
         goto wait_for_guest;
     }
     switch (usb->config_phase) {
-    case 0:
+    case USB_NET_RESET:
         usb->config_phase++;
         usb->mac_regs[MT8113_USB_COMMON_ISR / 4] |= MT8113_USB_RESET;
         mt8113_usb_update_irq(usb);
         break;
-    case 1:
+    case USB_NET_SPEED:
         usb->config_phase++;
         usb->mac_regs[MT8113_USB_DEVICE_CONF / 4] =
             (usb->mac_regs[MT8113_USB_DEVICE_CONF / 4] & ~7U) | 3;
@@ -2455,19 +2625,66 @@ static void mt8113_usb_config_timer(void *opaque)
             MT8113_USB_SPEED_CHANGE;
         mt8113_usb_update_irq(usb);
         break;
-    case 2:
+    case USB_NET_ADDRESS:
         mt8113_usb_inject_setup(usb, set_address);
         break;
-    case 3:
+    case USB_NET_DESCRIPTOR:
+        mt8113_usb_inject_setup(usb, get_configuration);
+        break;
+    case USB_NET_CONFIGURATION:
+        set_configuration[2] = usb->config_value;
         mt8113_usb_inject_setup(usb, set_configuration);
         break;
-    case 4:
-        mt8113_usb_inject_setup(usb, set_interface);
+    case USB_NET_INTERFACE_OR_INIT:
+        if (usb->rndis) {
+            memset(usb->control_out, 0, sizeof(usb->control_out));
+            stl_le_p(usb->control_out, 2); /* INITIALIZE_MSG */
+            stl_le_p(usb->control_out + 4, 24);
+            stl_le_p(usb->control_out + 8, 1); /* request ID */
+            stl_le_p(usb->control_out + 12, 1); /* RNDIS version 1.0 */
+            stl_le_p(usb->control_out + 20, 16384);
+            usb->control_out_length = 24;
+            send_encapsulated[4] = usb->control_interface;
+            send_encapsulated[6] = 24;
+            mt8113_usb_inject_setup(usb, send_encapsulated);
+        } else {
+            set_interface[4] = usb->data_interface;
+            mt8113_usb_inject_setup(usb, set_interface);
+        }
         break;
-    case 5:
-        mt8113_usb_inject_setup(usb, set_packet_filter);
+    case USB_NET_FILTER_OR_INIT_REPLY:
+        if (usb->rndis) {
+            get_encapsulated[4] = usb->control_interface;
+            mt8113_usb_inject_setup(usb, get_encapsulated);
+        } else {
+            set_packet_filter[4] = usb->control_interface;
+            mt8113_usb_inject_setup(usb, set_packet_filter);
+        }
         break;
+    case USB_NET_READY_OR_RNDIS_FILTER:
+        if (usb->rndis) {
+            memset(usb->control_out, 0, sizeof(usb->control_out));
+            stl_le_p(usb->control_out, 5); /* SET_MSG */
+            stl_le_p(usb->control_out + 4, 32);
+            stl_le_p(usb->control_out + 8, 2); /* request ID */
+            stl_le_p(usb->control_out + 12, 0x0001010e); /* packet filter */
+            stl_le_p(usb->control_out + 16, 4); /* information length */
+            stl_le_p(usb->control_out + 20, 20); /* offset from request ID */
+            stl_le_p(usb->control_out + 28, 0x0f);
+            usb->control_out_length = 32;
+            send_encapsulated[4] = usb->control_interface;
+            send_encapsulated[6] = 32;
+            mt8113_usb_inject_setup(usb, send_encapsulated);
+            break;
+        }
+        goto ready;
+    case USB_NET_RNDIS_FILTER_REPLY:
+        get_encapsulated[4] = usb->control_interface;
+        mt8113_usb_inject_setup(usb, get_encapsulated);
+        break;
+    case USB_NET_READY:
     default:
+ready:
         usb->configured = true;
         timer_mod(usb->tx_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL));
         qemu_flush_queued_packets(qemu_get_queue(usb->nic));
@@ -2516,6 +2733,13 @@ static void mt8113_usb_mac_write(void *opaque, hwaddr offset, uint64_t value,
         !(usb->mac_regs[offset / 4] & MT8113_USB_SOFT_CONNECT);
 
     switch (offset) {
+    case MT8113_USB_FIFO0:
+        if (usb->control_in_length + size <= sizeof(usb->control_in)) {
+            for (unsigned i = 0; i < size; i++) {
+                usb->control_in[usb->control_in_length++] = value >> (i * 8);
+            }
+        }
+        return;
     case MT8113_USB_LV1IESR:
         usb->mac_regs[MT8113_USB_LV1IER / 4] |= value;
         if (mt8113_usb_connected(usb) && !usb->configured &&
@@ -2582,15 +2806,19 @@ static void mt8113_usb_mac_write(void *opaque, hwaddr offset, uint64_t value,
             csr |= MT8113_USB_EP0_SENT_STALL;
             if (usb->setup_pending) {
                 qemu_log_mask(LOG_GUEST_ERROR,
-                              "mt8113-usb: ECM setup phase %u stalled\n",
+                              "mt8113-usb: network setup phase %u stalled\n",
                               usb->config_phase);
+                usb->config_phase = USB_NET_FAILED;
                 timer_del(usb->config_timer);
             }
         } else if ((value & MT8113_USB_EP0_DATA_END) && usb->setup_pending) {
-            usb->setup_pending = false;
-            usb->config_phase++;
+            mt8113_usb_control_complete(usb);
         }
         csr &= ~(MT8113_USB_EP0_TX_READY | MT8113_USB_EP0_DATA_END);
+        if (value & MT8113_USB_EP0_TX_READY) {
+            csr |= MT8113_USB_EP0_TX_READY;
+            usb->control_tx_pending = true;
+        }
         usb->mac_regs[offset / 4] = csr;
         return;
     }
@@ -2656,7 +2884,7 @@ static const MemoryRegionOps mt8113_usb_mac_ops = {
     .write = mt8113_usb_mac_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = {
-        .min_access_size = 4,
+        .min_access_size = 1,
         .max_access_size = 4,
     },
 };
