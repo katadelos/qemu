@@ -841,6 +841,7 @@ config IMX7D_ZELDA
     default y
     depends on TCG && ARM
     select FSL_IMX7
+    select SPLIT_IRQ
     select IMX7_DDRC
     select IMX6SL_WARIO
     select SD
@@ -854,6 +855,7 @@ config IMX7D_STINGER
     default y
     depends on TCG && ARM
     select FSL_IMX7
+    select SPLIT_IRQ
     select IMX7_DDRC
     select IMX_EPDC
     select MAX77796

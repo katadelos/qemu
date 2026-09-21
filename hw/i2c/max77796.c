@@ -7,6 +7,7 @@
 #include "qemu/osdep.h"
 #include "hw/i2c/max77796.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "qemu/module.h"
 #include "system/rtc.h"
@@ -26,10 +27,18 @@
 #define INTTOP1                  0xa2
 #define INTTOP1M                 0xa3
 #define INTTOP1_TOPSYS           (1U << 7)
+#define INTTOP1_UIC              BIT(0)
+#define UIC_INT1                 0x01
+#define UIC_INT2                 0x02
+#define UIC_INTMASK1             0x05
+#define UIC_INTMASK2             0x06
 #define INTTOP2                  0xa4
 #define INTTOP2M                 0xa5
 #define INTTOP2_ADC              (1U << 7)
 #define INTTOP2_EPD              (1U << 5)
+#define UIC_STATUS1              0x03
+#define UIC_STATUS1_VBVOLT       (1U << 4)
+#define UIC_STATUS1_CHGTYP_USB   1
 #define UIC_STATUS2              0x04
 #define UIC_STATUS2_ADC_MASK     0x1f
 #define ADC_CNTL                 0x26
@@ -75,6 +84,7 @@ struct MAX77796State {
     I2CSlave parent_obj;
     qemu_irq irq[2];
     qemu_irq page_button[2];
+    qemu_irq uic_irq;
     uint8_t page_keys[2];
     uint8_t regs[512];
     uint8_t pointer;
@@ -83,6 +93,8 @@ struct MAX77796State {
     uint8_t width;
     int64_t rtc_offset;
     bool power_down;
+    bool usb_connected;
+    bool uic_pending;
     QemuInputHandlerState *input_handler;
 };
 
@@ -101,7 +113,12 @@ static void max77796_update_irq(MAX77796State *s)
     bool topsys_pending;
     bool root_pending;
 
-    if (!max77796_is_main(s)) {
+    if (I2C_SLAVE(s)->address == MAX77796_UIC_ADDR) {
+        qemu_set_irq(s->uic_irq,
+                     (s->regs[UIC_INT1] & s->regs[UIC_INTMASK1]) ||
+                     (s->regs[UIC_INT2] & s->regs[UIC_INTMASK2]));
+        return;
+    } else if (!max77796_is_main(s)) {
         return;
     }
 
@@ -110,6 +127,11 @@ static void max77796_update_irq(MAX77796State *s)
         s->regs[INTTOP1] |= INTTOP1_TOPSYS;
     } else {
         s->regs[INTTOP1] &= ~INTTOP1_TOPSYS;
+    }
+    if (s->uic_pending) {
+        s->regs[INTTOP1] |= INTTOP1_UIC;
+    } else {
+        s->regs[INTTOP1] &= ~INTTOP1_UIC;
     }
     s->regs[INTTOP2] = 0;
     if ((s->regs[VREG_EPDINT] & ~s->regs[VREG_EPDINTM]) ||
@@ -124,6 +146,32 @@ static void max77796_update_irq(MAX77796State *s)
 
     /* The physical PMIC interrupt output is active-low. */
     qemu_set_irq(s->irq[0], root_pending ? 0 : 1);
+}
+
+static void max77796_uic_irq(void *opaque, int input, int level)
+{
+    MAX77796State *s = opaque;
+
+    s->uic_pending = !!level;
+    max77796_update_irq(s);
+}
+
+static void max77796_vbus(void *opaque, int input, int level)
+{
+    MAX77796State *s = opaque;
+
+    if (I2C_SLAVE(s)->address == MAX77796_UIC_ADDR) {
+        if (s->usb_connected != !!level) {
+            s->regs[UIC_INT1] |= BIT(1) | BIT(0); /* VBVOLT and CHGTYP */
+        }
+        s->regs[UIC_STATUS1] = level ?
+            UIC_STATUS1_VBVOLT | UIC_STATUS1_CHGTYP_USB : 0;
+    } else if (max77796_is_main(s)) {
+        s->regs[0x0a] = 0x0d | (level ? 0x40 : 0);
+        s->regs[0x0b] = level ? 0x60 : 0;
+    }
+    s->usb_connected = !!level;
+    max77796_update_irq(s);
 }
 
 static void max77796_input_event(DeviceState *dev, QemuConsole *src,
@@ -337,9 +385,7 @@ static int max77796_send(I2CSlave *i2c, uint8_t data)
         } else {
             s->regs[index] = data;
         }
-        if (max77796_is_main(s)) {
-            max77796_update_irq(s);
-        }
+        max77796_update_irq(s);
         max77796_advance(s);
     }
     return 0;
@@ -366,6 +412,11 @@ static uint8_t max77796_recv(I2CSlave *i2c)
     if (max77796_is_main(s) &&
         (index == GLBLINT || index == VREG_EPDINT ||
          index == VREG_EPDOKINT || index == ADC_INT)) {
+        s->regs[index] = 0;
+        max77796_update_irq(s);
+    }
+    if (i2c->address == MAX77796_UIC_ADDR &&
+        (index == UIC_INT1 || index == UIC_INT2)) {
         s->regs[index] = 0;
         max77796_update_irq(s);
     }
@@ -415,11 +466,11 @@ static void max77796_realize(DeviceState *dev, Error **errp)
             max77796_fg_set(s, i, 0x0100);
         }
     } else if (i2c->address == MAX77796_UIC_ADDR) {
-        /*
-         * No cable is attached to the virtual USB port.  Zero is an OTG
-         * accessory; an open-circuit code keeps host/gadget detection idle.
-         */
+        /* ID is open on a peripheral cable.  The UIC's USB source and
+         * VBUS status keep the stock driver from suspending the USB PHY. */
         s->regs[UIC_STATUS2] = UIC_STATUS2_ADC_MASK;
+        s->regs[UIC_STATUS1] = s->usb_connected ?
+            UIC_STATUS1_VBVOLT | UIC_STATUS1_CHGTYP_USB : 0;
     } else if (max77796_is_rtc(s)) {
         s->rtc_offset = 0;
         max77796_rtc_capture(s);
@@ -434,8 +485,9 @@ static void max77796_realize(DeviceState *dev, Error **errp)
         s->regs[VREG_EPDINTM] = 0xff;
         s->regs[VREG_EPDOKINTM] = 0xff;
         s->regs[VREG_EPDOKINTS] = VREG_EPDPDN;
-        /* Battery, thermistor and system supply okay; charger unplugged. */
-        s->regs[0x0a] = 0x0d;
+        /* Battery, thermistor, system supply, and optional USB input okay. */
+        s->regs[0x0a] = 0x0d | (s->usb_connected ? 0x40 : 0);
+        s->regs[0x0b] = s->usb_connected ? 0x60 : 0;
         s->regs[0x0c] = 0x38;
         s->power_down = false;
         s->input_handler = qemu_input_handler_register(
@@ -501,11 +553,14 @@ static void max77796_init(Object *obj)
     qdev_init_gpio_out(DEVICE(obj), s->irq, ARRAY_SIZE(s->irq));
     qdev_init_gpio_out_named(DEVICE(obj), s->page_button, "page-button",
                             ARRAY_SIZE(s->page_button));
+    qdev_init_gpio_out_named(DEVICE(obj), &s->uic_irq, "uic-irq-out", 1);
+    qdev_init_gpio_in_named(DEVICE(obj), max77796_uic_irq, "uic-irq", 1);
+    qdev_init_gpio_in_named(DEVICE(obj), max77796_vbus, "vbus", 1);
 }
 
 static const VMStateDescription max77796_vmstate = {
     .name = "max77796",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .post_load = max77796_post_load,
     .fields = (const VMStateField[]) {
@@ -518,8 +573,14 @@ static const VMStateDescription max77796_vmstate = {
         VMSTATE_INT64(rtc_offset, MAX77796State),
         VMSTATE_BOOL(power_down, MAX77796State),
         VMSTATE_UINT8_ARRAY(page_keys, MAX77796State, 2),
+        VMSTATE_BOOL_V(usb_connected, MAX77796State, 2),
+        VMSTATE_BOOL_V(uic_pending, MAX77796State, 2),
         VMSTATE_END_OF_LIST()
     },
+};
+
+static const Property max77796_properties[] = {
+    DEFINE_PROP_BOOL("usb-connected", MAX77796State, usb_connected, false),
 };
 
 static void max77796_class_init(ObjectClass *oc, const void *data)
@@ -530,6 +591,7 @@ static void max77796_class_init(ObjectClass *oc, const void *data)
     dc->realize = max77796_realize;
     dc->unrealize = max77796_unrealize;
     dc->vmsd = &max77796_vmstate;
+    device_class_set_props(dc, max77796_properties);
     device_class_set_legacy_reset(dc, max77796_reset);
     sc->send = max77796_send;
     sc->recv = max77796_recv;

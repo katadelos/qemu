@@ -14,6 +14,7 @@
 #include "hw/core/qdev-properties.h"
 #include "hw/display/imx_epdc.h"
 #include "hw/i2c/max77796.h"
+#include "hw/core/split-irq.h"
 #include "hw/i2c/bma2x2.h"
 #include "hw/misc/imx6sl_pxp.h"
 #include "hw/misc/imx7_ddrc.h"
@@ -559,6 +560,7 @@ static void zelda_init(MachineState *machine)
     };
     s = FSL_IMX7(object_new(TYPE_FSL_IMX7));
     object_property_add_child(OBJECT(machine), "soc", OBJECT(s));
+    qdev_prop_set_bit(DEVICE(&s->usb[0]), "gadget", true);
     object_property_set_bool(OBJECT(&s->usdhc[2]), "defer-data-transfer",
                              false, &error_fatal);
     object_property_set_uint(OBJECT(&s->gpio[3]), "reset-psr", 0x3f00,
@@ -623,12 +625,31 @@ static void zelda_init(MachineState *machine)
     zelda_attach_emmc(s, rms);
     zelda_attach_wifi(s);
     zelda_attach_spinor(s);
+    DeviceState *pmic_main = NULL;
+    DeviceState *vbus = qdev_new(TYPE_SPLIT_IRQ);
+    object_property_add_child(OBJECT(machine), "usb-vbus", OBJECT(vbus));
+    qdev_prop_set_uint16(vbus, "num-lines", 2);
+    qdev_realize_and_unref(vbus, NULL, &error_fatal);
+    qdev_connect_gpio_out_named(DEVICE(&s->usb[0]), "vbus", 0,
+                                qdev_get_gpio_in(vbus, 0));
     for (i = 0; i < 4; i++) {
         static const unsigned addresses[] = { 0x3c, 0x35, 0x34, 0x68 };
         pmic = qdev_new(TYPE_MAX77796);
         qdev_prop_set_uint8(pmic, "address", addresses[i]);
+        qdev_prop_set_bit(pmic, "usb-connected",
+                         s->usb[0].gadget_nic != NULL &&
+                         s->usb[0].gadget_host_connected);
         qdev_realize(pmic, BUS(s->i2c[0].bus), &error_fatal);
+        if (i < 2) {
+            qdev_connect_gpio_out(vbus, i,
+                                  qdev_get_gpio_in_named(pmic, "vbus", 0));
+        }
+        if (i == 1) {
+            qdev_connect_gpio_out_named(pmic, "uic-irq-out", 0,
+                qdev_get_gpio_in_named(pmic_main, "uic-irq", 0));
+        }
         if (!i) {
+            pmic_main = pmic;
             qdev_connect_gpio_out(pmic, 0,
                                   qdev_get_gpio_in(DEVICE(&s->gpio[0]), 4));
             qdev_connect_gpio_out(pmic, 1,
