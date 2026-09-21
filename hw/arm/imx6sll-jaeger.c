@@ -560,8 +560,10 @@ static void jaeger_init(MachineState *machine)
     object_property_set_bool(OBJECT(s), "sololite", true, &error_fatal);
     object_property_set_bool(OBJECT(s), "sololite-lite", true, &error_fatal);
     object_property_set_bool(OBJECT(s), "has-el3", false, &error_fatal);
-    /* Keep the stock UDC present with no emulated USB cable attached. */
-    qdev_prop_set_bit(DEVICE(&s->usb[0]), "gadget-host-connected", false);
+    /* A configured USB network backend represents the attached host. */
+    if (!s->usb[0].gadget_nic_conf.peers.ncs[0]) {
+        qdev_prop_set_bit(DEVICE(&s->usb[0]), "gadget-host-connected", false);
+    }
     /* Stock U-Boot's synchronous EXT_CSD path is used only on USDHC2/eMMC. */
     object_property_set_bool(OBJECT(&s->usdhc[1]), "defer-data-transfer",
                              false, &error_fatal);
