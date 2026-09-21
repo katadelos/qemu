@@ -23,6 +23,7 @@ struct MTU3EcmHost {
     unsigned phase;
     bool attached, configured, failed, pending, status_out;
     uint8_t configuration, control_interface, data_interface, alternate;
+    unsigned configuration_count, configuration_index;
     uint8_t in_ep, out_ep, notify_ep;
     unsigned in_max, out_max;
     uint8_t control[CONTROL_SIZE];
@@ -39,6 +40,7 @@ static void mtu3_ecm_clear(MTU3EcmHost *h)
     h->attached = h->configured = h->failed = h->pending = false;
     h->status_out = h->rx_pending = false;
     h->tx_length = h->rx_length = h->rx_offset = 0;
+    h->configuration_count = h->configuration_index = 0;
     h->in_ep = h->out_ep = h->notify_ep = 0;
     timer_del(h->timer);
     qemu_purge_queued_packets(qemu_get_queue(h->nic));
@@ -295,10 +297,20 @@ static void mtu3_ecm_run(void *opaque)
     }
     switch (h->phase) {
     case 0: mtu3_ecm_request(h, 0x80, 6, 0x0100, 0, 18); break;
-    case 1: mtu3_ecm_request(h, 0x00, 5, 1, 0, 0); break;
-    case 2: mtu3_ecm_request(h, 0x80, 6, 0x0200, 0, CONTROL_SIZE); break;
+    case 1:
+        h->configuration_count = h->control_length >= 18 ? h->control[17] : 0;
+        mtu3_ecm_request(h, 0x00, 5, 1, 0, 0);
+        break;
+    case 2:
+        mtu3_ecm_request(h, 0x80, 6, 0x0200 | h->configuration_index,
+                         0, CONTROL_SIZE);
+        break;
     case 3:
         if (!mtu3_ecm_descriptors(h)) {
+            if (++h->configuration_index < h->configuration_count) {
+                h->phase = 2;
+                goto wait;
+            }
             warn_report("mtu3: connected USB gadget has no CDC ECM interface");
             h->failed = true;
             return;
