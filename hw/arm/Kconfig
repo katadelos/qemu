@@ -233,6 +233,7 @@ config IMX6SL_EANAB
     select IMX6SL_WARIO
     select NEONODE_ZFORCE
     select SD
+    select BCM4343W_SDIO
 
 config IMX6SLL_REX
     bool
@@ -241,6 +242,7 @@ config IMX6SLL_REX
     select FSL_IMX6
     select IMX6SL_WARIO
     select SD
+    select BCM4343W_SDIO
     select SSI_M25P80
     select BD71827
     select FP9929
@@ -327,6 +329,7 @@ config IMX50_KOBOTOUCH
     select FSL_IMX50
     select NEONODE_ZFORCE
     select SD
+    select BCM4343W_SDIO
 
 config NEONODE_ZFORCE
     bool
@@ -845,6 +848,7 @@ config IMX7D_ZELDA
     select IMX7_DDRC
     select IMX6SL_WARIO
     select SD
+    select BCM4343W_SDIO
     select SSI_M25P80
     select MAX77796
     select BMA2X2

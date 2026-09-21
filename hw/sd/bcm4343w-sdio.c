@@ -54,6 +54,7 @@ struct BCM4343WState {
     qemu_irq irq, oob_irq;
     bool powered, selected, firmware_running, associated, up, software_oob;
     bool wlfc;
+    bool bcm43362;
     uint8_t cccr[0x300];
     uint8_t f1[0x100];
     uint8_t cis[0x300];
@@ -190,12 +191,14 @@ static void bcm_scan_done(void *opaque)
         return;
     }
     if (s->escan) {
-        len = 12 + bcm_bss_info(result + 12);
-        stl_le_p(result, len);
         stl_le_p(result + 4, 1);
         stw_le_p(result + 8, s->scan_sync);
-        stw_le_p(result + 10, 1);
-        bcm_event(s, 69, 8, 0, result, len); /* ESCAN_RESULT, PARTIAL */
+        if (!qemu_get_queue(s->nic)->link_down) {
+            len = 12 + bcm_bss_info(result + 12);
+            stl_le_p(result, len);
+            stw_le_p(result + 10, 1);
+            bcm_event(s, 69, 8, 0, result, len); /* ESCAN_RESULT, PARTIAL */
+        }
         stl_le_p(result, 12);
         stw_le_p(result + 10, 0);
         bcm_event(s, 69, 0, 0, result, 12);
@@ -208,6 +211,10 @@ static void bcm_join_done(void *opaque)
 {
     BCM4343WState *s = opaque;
     if (!s->powered || !s->firmware_running) {
+        return;
+    }
+    if (qemu_get_queue(s->nic)->link_down) {
+        bcm_event(s, 0, 3, 0, NULL, 0); /* SET_SSID, NO_NETWORKS */
         return;
     }
     s->associated = true;
@@ -285,6 +292,13 @@ static int bcm_iovar(BCM4343WState *s, const char *name, bool set,
             s->scan_sync = lduw_le_p(in + 6);
             timer_mod(s->scan_timer,
                       qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 100000000);
+        } else if (!strcmp(name, "iscan")) {
+            if (inlen < 8 || ldl_le_p(in) != 1) {
+                return -2;
+            }
+            s->escan = false;
+            timer_mod(s->scan_timer,
+                      qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 100000000);
         } else if (!strcmp(name, "join")) {
             return bcm_start_join(s, in, inlen);
         } else if (!strcmp(name, "cur_etheraddr")) {
@@ -325,13 +339,24 @@ static int bcm_iovar(BCM4343WState *s, const char *name, bool set,
         memcpy(out, s->conf.macaddr.a, 6);
         *outlen = 6;
     } else if (!strcmp(name, "ver")) {
-        const char version[] = "BCM43430/1 QEMU SDPCM FullMAC 7.45.41.26";
-        memcpy(out, version, sizeof(version));
-        *outlen = sizeof(version);
+        const char *version = s->bcm43362 ?
+            "BCM43362/2 QEMU SDPCM FullMAC 5.90.113.2" :
+            "BCM43430/1 QEMU SDPCM FullMAC 7.45.41.26";
+        *outlen = strlen(version) + 1;
+        memcpy(out, version, *outlen);
     } else if (!strcmp(name, "cap")) {
         const char capabilities[] = "sta escan proptxstatus";
         memcpy(out, capabilities, sizeof(capabilities));
         *outlen = sizeof(capabilities);
+    } else if (!strcmp(name, "iscanresults")) {
+        bool available = !qemu_get_queue(s->nic)->link_down;
+        unsigned len = 12 + (available ? bcm_bss_info(out + 16) : 0);
+
+        stl_le_p(out, 0); /* WL_SCAN_RESULTS_SUCCESS */
+        stl_le_p(out + 4, len);
+        stl_le_p(out + 8, 109);
+        stl_le_p(out + 12, available);
+        *outlen = len + 4;
     } else if (!strcmp(name, "wlfc_mode")) {
         stl_le_p(out, 4); /* WLFC AFQ capability bit */
         *outlen = 4;
@@ -426,6 +451,7 @@ static void bcm_control(BCM4343WState *s, const uint8_t *in, unsigned len)
         case 3: s->up = s->associated = false; break;
         case 12: stl_le_p(out, 108); break;
         case 19: stl_le_p(out, 1); break;
+        case 20: break; /* WLC_SET_INFRA */
         case 23:
             if (s->associated) {
                 memcpy(out, bcm_bssid, 6);
@@ -451,10 +477,11 @@ static void bcm_control(BCM4343WState *s, const uint8_t *in, unsigned len)
                       qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 100000000);
             break;
         case 51:
-            outlen = 12 + bcm_bss_info(out + 12);
+            outlen = 12 + (qemu_get_queue(s->nic)->link_down ? 0 :
+                           bcm_bss_info(out + 12));
             stl_le_p(out, outlen);
             stl_le_p(out + 4, 109);
-            stl_le_p(out + 8, 1);
+            stl_le_p(out + 8, outlen > 12);
             break;
         case 52:
             s->associated = false;
@@ -480,16 +507,18 @@ static void bcm_control(BCM4343WState *s, const uint8_t *in, unsigned len)
             stl_le_p(out + 4, 0x43e2);
             stl_le_p(out + 8, 1);
             stl_le_p(out + 12, 1);
-            stl_le_p(out + 16, 39);
+            stl_le_p(out + 16, s->bcm43362 ? 30 : 39);
             stl_le_p(out + 20, 0x1202);
-            stl_le_p(out + 28, 43430);
-            stl_le_p(out + 32, 1);
+            stl_le_p(out + 28, s->bcm43362 ? 43362 : 43430);
+            stl_le_p(out + 32, s->bcm43362 ? 2 : 1);
             stl_le_p(out + 36, 5); /* SDIO bus */
             stl_le_p(out + 44, 4);
             stl_le_p(out + 48, 1);
             outlen = 68;
             break;
         case 127: stl_le_p(out, -35); break;
+        case 117: stl_le_p(out, 0); break; /* WLC_GET_AP */
+        case 118: break; /* WLC_SET_AP */
         case 135: stl_le_p(out, -95); break;
         case 136:
             outlen = 4 + bcm_bss_info(out + 4);
@@ -985,16 +1014,17 @@ static void bcm_reset(DeviceState *dev)
         stl_le_p(s->cccr + base + 9, 0x1000 + base);
         stw_le_p(s->cccr + base + 0x10, 512);
     }
-    stl_le_p(s->bp, 0x1501a9a6); /* AI, five cores, BCM43430 revision 1 */
+    stl_le_p(s->bp, s->bcm43362 ? 0x1502a962 : 0x1501a9a6);
+    /* AI, five cores; BCM43362 revision 2 or BCM43430 revision 1. */
     stl_le_p(s->bp + 4, 0x10000000); /* PMU */
     stl_le_p(s->bp + 0x2c, 1);
     stl_le_p(s->bp + 0xfc, BCM_EROM);
     stl_le_p(s->bp + 0x604, 17); /* PMU revision */
     stl_le_p(s->bp + 0x608, 0x13c); /* LPO, ALP and HT available; HT selected */
     stl_le_p(s->bp + 0x1e0, 0x30000);
-    bcm_core(s, &pos, 0x800, 48, 0); /* chipcommon */
-    bcm_core(s, &pos, 0x812, 39, 1); /* 802.11 MAC */
-    bcm_core(s, &pos, 0x829, 24, 2); /* SDIO */
+    bcm_core(s, &pos, 0x800, s->bcm43362 ? 36 : 48, 0); /* chipcommon */
+    bcm_core(s, &pos, 0x812, s->bcm43362 ? 30 : 39, 1); /* 802.11 MAC */
+    bcm_core(s, &pos, 0x829, s->bcm43362 ? 7 : 24, 2); /* SDIO */
     bcm_core(s, &pos, 0x82a, 3, 3); /* ARM CM3 */
     bcm_core(s, &pos, 0x80e, 17, 4); /* SOCRAM */
     stl_le_p(s->bp + BCM_EROM - BCM_BP_BASE + pos * 4, 0xf);
@@ -1025,7 +1055,8 @@ static bool bcm_can_receive(NetClientState *nc)
     if (s->wlfc) {
         reserve += BCM_WLFC_FIFO_COUNT * BCM_WLFC_FIFO_CREDITS;
     }
-    return s->powered && s->associated && s->rx.length < BCM_QUEUE_MAX - reserve;
+    return s->powered && s->associated && !nc->link_down &&
+           s->rx.length < BCM_QUEUE_MAX - reserve;
 }
 
 static ssize_t bcm_receive(NetClientState *nc, const uint8_t *buf, size_t size)
@@ -1044,11 +1075,23 @@ static ssize_t bcm_receive(NetClientState *nc, const uint8_t *buf, size_t size)
     return size;
 }
 
+static void bcm_link_status_changed(NetClientState *nc)
+{
+    BCM4343WState *s = qemu_get_nic_opaque(nc);
+
+    if (nc->link_down && s->associated) {
+        s->associated = false;
+        timer_del(s->join_timer);
+        bcm_event(s, 16, 0, 0, NULL, 0); /* LINK, down */
+    }
+}
+
 static NetClientInfo bcm_net_info = {
     .type = NET_CLIENT_DRIVER_NIC,
     .size = sizeof(NICState),
     .can_receive = bcm_can_receive,
     .receive = bcm_receive,
+    .link_status_changed = bcm_link_status_changed,
 };
 
 static void bcm_realize(DeviceState *dev, Error **errp)
@@ -1152,9 +1195,33 @@ static const TypeInfo bcm_type = {
     .class_init = bcm_class_init,
 };
 
+/* BCM4343W contains the same BCM43430 Wi-Fi core used by these boards. */
+static const TypeInfo bcm43430_type = {
+    .name = TYPE_BCM43430_SDIO,
+    .parent = TYPE_BCM4343W_SDIO,
+};
+
+static void bcm43362_init(Object *obj)
+{
+    BCM4343WState *s = BCM4343W_SDIO(obj);
+
+    s->bcm43362 = true;
+    for (unsigned fn = 0; fn <= 2; fn++) {
+        stw_le_p(s->cis + fn * 0x100 + 4, 0x4329);
+    }
+}
+
+static const TypeInfo bcm43362_type = {
+    .name = TYPE_BCM43362_SDIO,
+    .parent = TYPE_BCM4343W_SDIO,
+    .instance_init = bcm43362_init,
+};
+
 static void bcm_register_types(void)
 {
     type_register_static(&bcm_type);
+    type_register_static(&bcm43430_type);
+    type_register_static(&bcm43362_type);
 }
 
 type_init(bcm_register_types)
