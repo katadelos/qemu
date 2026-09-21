@@ -1924,6 +1924,15 @@ static uint64_t pa6_load_fit(PA6CS8State *s, const void *fit,
          * production handoff implicitly for a driver or setup failure. */
         devinfo[4 + 0x5c] = s->development_mode ? 0 : 2; /* SBC_EN */
         devinfo[4 + 0x5e] = s->development_mode ? 0 : 8; /* AR_EN */
+        if (s->development_mode) {
+            /* An unfused development handoff has no mandatory production
+             * FIT key. U-Boot still validates each image's data hash; copied
+             * development images may supply their own kernel DT/initramfs. */
+            int signature = fdt_path_offset(dt, "/signature");
+            if (signature >= 0) {
+                fdt_del_node(dt, signature);
+            }
+        }
         memcpy(devinfo + 4 + 0x30, "ScribeColorQEMU01", 16);
         node = fdt_path_offset(dt, "/devinfo");
         ret = fdt_setprop(dt, node, "devinfo,data", devinfo, sizeof(devinfo));
