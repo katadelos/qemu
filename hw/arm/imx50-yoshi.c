@@ -1,5 +1,8 @@
 /* Amazon Yoshi-family (Tequila and Whitney) board emulation */
 #include "qemu/osdep.h"
+#include <zlib.h>
+#include "qemu/bswap.h"
+#include "hw/block/flash.h"
 #include "qapi/error.h"
 #include "hw/arm/boot.h"
 #include "hw/arm/fsl-imx50.h"
@@ -558,7 +561,76 @@ static void yoshi_attach_wifi(FslIMX50State *soc)
     object_unref(OBJECT(wifi));
 }
 
-static void yoshi_attach_panel_flash(FslIMX50State *soc)
+/* Program one page of the panel's serial NOR before connecting the SoC. */
+static void yoshi_panel_program(SSIBus *bus, qemu_irq cs, uint32_t address,
+                                const uint8_t *data, size_t length)
+{
+    g_assert((address & 0xff) + length <= 256);
+    qemu_set_irq(cs, 1);
+    qemu_set_irq(cs, 0);
+    ssi_transfer(bus, 0x06); /* write enable */
+    qemu_set_irq(cs, 1);
+    qemu_set_irq(cs, 0);
+    ssi_transfer(bus, 0x02); /* page program */
+    ssi_transfer(bus, address >> 16);
+    ssi_transfer(bus, (address >> 8) & 0xff);
+    ssi_transfer(bus, address & 0xff);
+    for (size_t i = 0; i < length; i++) {
+        ssi_transfer(bus, data[i]);
+    }
+    qemu_set_irq(cs, 1);
+}
+
+static void yoshi_seed_panel_flash(SSIBus *bus, qemu_irq cs, bool celeste)
+{
+    /*
+     * A complete, synthetic WJ waveform. The stock video service exports this
+     * from SPI, checks its CRC, and runs eu to expand it into a controller WRF.
+     * Four modes share a single temperature range and one neutral frame of
+     * 256 pixel transitions. The emulated EPDC draws pixels directly, so this
+     * describes the file format, not physical panel calibration.
+     *
+     * Merely setting the format byte leaves the size erased (0xffffffff),
+     * causing the K4 extractor to crash before the display can initialize.
+     */
+    uint8_t waveform[0x5e] = {
+        [0x08] = 'Q', 'E', 'M', 'U',
+        [0x0c] = 1, 6,                 /* test waveform, V220 */
+        [0x10] = 1, 1,                 /* DU/GC16/GC4 mode version */
+        [0x13] = 0x15, 0x3c, 0x33,     /* WJ, 6-inch panel, manufacturer */
+        [0x17] = 0x50,                 /* 50 Hz (BCD) */
+        [0x1c] = 0x33,                 /* extra information offset */
+        [0x20] = 0x3a, 0, 0, 1,        /* mode table, address version */
+        [0x25] = 3,                    /* four modes, one temperature */
+        [0x28] = 0xff, 0xfc,           /* end and escape markers */
+        [0x30] = 0, 35, 35,            /* temperature bounds, checksum */
+        [0x33] = 5, 0, 0, 0, 0, 0, 5, /* extra information, checksum */
+        [0x5a] = 0, 63, 0xff, 62,      /* 64 packed zero bytes, end, sum */
+    };
+    /* Panel data uses a custom alphabet: '-'=12, '.'=11, digits=0..9. */
+    uint8_t panel[256] = { [0x10] = 12, 2, 11, 0, 0 }; /* VCOM -2.00 */
+
+    if (celeste) {
+        waveform[0x14] = 0x3d; /* 6-inch HD, 758 x 1024 */
+    }
+    stl_le_p(waveform + 4, sizeof(waveform));
+    for (unsigned i = 0; i < 4; i++) {
+        /* Each 24-bit pointer is followed by its additive checksum. */
+        waveform[0x3a + 4 * i] = waveform[0x3d + 4 * i] = 0x4a + 4 * i;
+        waveform[0x4a + 4 * i] = waveform[0x4d + 4 * i] = 0x5a;
+    }
+    for (unsigned i = 0; i < 0x1f; i++) {
+        waveform[0x1f] += waveform[i];
+    }
+    for (unsigned i = 0x20; i < 0x2f; i++) {
+        waveform[0x2f] += waveform[i];
+    }
+    stl_le_p(waveform, crc32(0, waveform, sizeof(waveform)));
+    yoshi_panel_program(bus, cs, 0x886, waveform, sizeof(waveform));
+    yoshi_panel_program(bus, cs, 0x30000, panel, sizeof(panel));
+}
+
+static void yoshi_attach_panel_flash(FslIMX50State *soc, bool celeste)
 {
     SSIBus *bus;
     DeviceState *flash;
@@ -567,27 +639,13 @@ static void yoshi_attach_panel_flash(FslIMX50State *soc)
     bus = (SSIBus *)qdev_get_child_bus(DEVICE(&soc->spi[1]), "spi");
     flash = qdev_new("mx25l4005a");
     qdev_realize_and_unref(flash, BUS(bus), &error_fatal);
-
     cs = qdev_get_gpio_in_named(flash, SSI_GPIO_CS, 0);
-    /*
-     * Seed the waveform-format byte to select the board-default panel mode,
-     * leaving the rest of the synthetic flash erased.
-     */
-    qemu_set_irq(cs, 1);
-    qemu_set_irq(cs, 0);
-    ssi_transfer(bus, 0x06); /* write enable */
-    qemu_set_irq(cs, 1);
-    qemu_set_irq(cs, 0);
-    ssi_transfer(bus, 0x02); /* page program */
-    ssi_transfer(bus, 0x00);
-    ssi_transfer(bus, 0x08);
-    ssi_transfer(bus, 0x99);
-    ssi_transfer(bus, 0x15); /* WJ waveform layout */
-    qemu_set_irq(cs, 1);
+    if (!m25p80_get_blk(flash)) {
+        yoshi_seed_panel_flash(bus, cs, celeste);
+    }
 
     /* CSPI2 SS0 is the first sysbus output following the controller IRQ. */
-    sysbus_connect_irq(SYS_BUS_DEVICE(&soc->spi[1]), 1,
-                       cs);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&soc->spi[1]), 1, cs);
 }
 
 static DeviceState *whitney_attach_pmic(FslIMX50State *soc)
@@ -772,7 +830,7 @@ static void yoshi_init(MachineState *machine)
     /* The onboard flash is the first registered device, on eSDHC3. */
     yoshi_attach_emmc(soc, tms, 2, 0);
     yoshi_attach_wifi(soc);
-    yoshi_attach_panel_flash(soc);
+    yoshi_attach_panel_flash(soc, tms->celeste);
     /* The production Yoshi-family boards use MC13892 on CSPI3. */
     pmic = whitney_attach_pmic(soc);
     if (tms->whitney) {
