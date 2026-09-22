@@ -6,6 +6,7 @@
 #include "qemu/osdep.h"
 #include "imx6sl-kindle.h"
 #include "qapi/error.h"
+#include "hw/block/flash.h"
 #include "hw/core/irq.h"
 #include "hw/core/loader.h"
 #include "hw/core/qdev-properties.h"
@@ -203,9 +204,11 @@ void kindle_imx6sl_attach_panel_flash(FslIMX6State *s,
     flash = qdev_new("mx25l4005a");
     qdev_realize_and_unref(flash, BUS(bus), &error_fatal);
     cs = qdev_get_gpio_in_named(flash, SSI_GPIO_CS, 0);
-    kindle_imx6sl_panel_flash_program(bus, cs, 0x899, &ac_format, 1);
-    if (barcode) {
-        kindle_imx6sl_panel_flash_program(bus, cs, 0x70050, barcode, 3);
+    if (!m25p80_get_blk(flash)) {
+        kindle_imx6sl_panel_flash_program(bus, cs, 0x899, &ac_format, 1);
+        if (barcode) {
+            kindle_imx6sl_panel_flash_program(bus, cs, 0x70050, barcode, 3);
+        }
     }
     qdev_connect_gpio_out(DEVICE(&s->gpio[3]), 11, cs);
 }

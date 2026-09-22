@@ -160,7 +160,12 @@ static void wario_init(MachineState *machine)
     bool bourbon = wario_is_bourbon(wms);
     bool pinot = wario_is_pinot(wms);
     bool muscat = wario_is_muscat(wms);
-    static const uint8_t muscat_barcode[] = { 0xe9, 0xe8, 0x04 };
+    static const uint8_t muscat_barcode[] = { 0xe9, 0xe8, 0x04 }; /* ED4 */
+    static const uint8_t bourbon_barcode[] = { 0xe9, 0xe6, 0xf6 }; /* EBS */
+    static const uint8_t icewine_barcode[] = { 0xe9, 0xe6, 0xe5 }; /* EBA */
+    const uint8_t *panel_barcode = bourbon ? bourbon_barcode :
+                                  muscat ? muscat_barcode :
+                                  pinot ? NULL : icewine_barcode;
 
     if (machine->ram_size > WARIO_RAM_MAX) {
         error_report("RAM size " RAM_ADDR_FMT " exceeds i.MX6SL maximum",
@@ -200,8 +205,8 @@ static void wario_init(MachineState *machine)
     /* USDHC2 is eMMC; USDHC3's Wi-Fi SDIO function is modeled separately. */
     wario_attach_card(s, wms, 1, 1, true);
     wario_attach_wifi(s);
-    /* ED4 identifies Muscat's ED060TC1-3CE panel. */
-    kindle_imx6sl_attach_panel_flash(s, muscat ? muscat_barcode : NULL);
+    /* Match the stock driver's panel table to the board's framebuffer mode. */
+    kindle_imx6sl_attach_panel_flash(s, panel_barcode);
 
     i2c = s->i2c[0].bus;
     i2c_slave_create_simple(i2c, TYPE_MAX77696, 0x34);
