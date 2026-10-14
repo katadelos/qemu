@@ -27,6 +27,9 @@
 #define BD71828_REG_BAT_STAT         0x67
 #define BD71828_REG_DCIN_STAT        0x68
 #define BD71828_REG_BAT_TEMP         0x6c
+#define BD71828_REG_ILIM_DCIN_STAT   0x6d
+#define BD71828_REG_DCIN_SET         0x70
+#define BD71828_DCIN_LIMIT_MASK      0x3f
 #define BD71828_REG_VBAT_U_MT8110    0x84
 #define BD71828_REG_VBAT_INITIAL1_U  0x86
 #define BD71828_REG_VBAT_INITIAL2_U  0x88
@@ -197,8 +200,9 @@ static int bd71828_send(I2CSlave *i2c, uint8_t data)
             s->power_short_acks++;
         }
         s->regs[s->pointer] &= ~data;
-    } else if (!s->power_button_support ||
-               s->pointer != BD71828_REG_INT_MAIN) {
+    } else if (s->pointer != BD71828_REG_ILIM_DCIN_STAT &&
+               (!s->power_button_support ||
+                s->pointer != BD71828_REG_INT_MAIN)) {
         s->regs[s->pointer] = data;
     }
     bd71828_update_irq(s);
@@ -233,6 +237,15 @@ static uint8_t bd71828_recv(I2CSlave *i2c)
     if (s->pointer >= BD71828_REG_RTC_SEC &&
         s->pointer <= BD71828_REG_RTC_YEAR) {
         bd71828_rtc_capture(s);
+    }
+    if (s->pointer == BD71828_REG_ILIM_DCIN_STAT) {
+        /* Read-only LIM_DCIN_STAT[5:0] uses the same 50 mA-step encoding
+         * as DCIN_SET. This ideal supply has no input-voltage collapse or
+         * automatic current reduction, so the programmed limit is applied.
+         * This is the configured current ceiling, independent of load/DCIN.
+         */
+        s->regs[BD71828_REG_ILIM_DCIN_STAT] =
+            s->regs[BD71828_REG_DCIN_SET] & BD71828_DCIN_LIMIT_MASK;
     }
     return s->regs[s->pointer++];
 }

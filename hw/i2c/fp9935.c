@@ -14,15 +14,29 @@ struct FP9935State {
     uint8_t pointer;
     bool expect_pointer;
     bool enabled;
+    bool temperature_enabled;
     qemu_irq power_good;
 };
+
+static void fp9935_update_power_good(FP9935State *s)
+{
+    qemu_set_irq(s->power_good, s->enabled);
+}
 
 static void fp9935_set_enable(void *opaque, int line, int level)
 {
     FP9935State *s = opaque;
 
     s->enabled = level;
-    qemu_set_irq(s->power_good, s->enabled);
+    fp9935_update_power_good(s);
+}
+
+static void fp9935_set_temperature_enable(void *opaque, int line, int level)
+{
+    FP9935State *s = opaque;
+
+    /* EN_TS controls the ADC independently of the display rail enable. */
+    s->temperature_enabled = level;
 }
 
 static int fp9935_send(I2CSlave *i2c, uint8_t data)
@@ -64,19 +78,28 @@ static void fp9935_reset(DeviceState *dev)
     s->pointer = 0;
     s->expect_pointer = true;
     s->enabled = false;
+    s->temperature_enabled = false;
     qemu_set_irq(s->power_good, 0);
+}
+
+static int fp9935_post_load(void *opaque, int version_id)
+{
+    fp9935_update_power_good(opaque);
+    return 0;
 }
 
 static const VMStateDescription fp9935_vmstate = {
     .name = TYPE_FP9935,
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
+    .post_load = fp9935_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_I2C_SLAVE(parent_obj, FP9935State),
         VMSTATE_UINT8_ARRAY(regs, FP9935State, FP9935_REGISTER_COUNT),
         VMSTATE_UINT8(pointer, FP9935State),
         VMSTATE_BOOL(expect_pointer, FP9935State),
         VMSTATE_BOOL(enabled, FP9935State),
+        VMSTATE_BOOL(temperature_enabled, FP9935State),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -86,6 +109,8 @@ static void fp9935_init(Object *obj)
     FP9935State *s = FP9935(obj);
 
     qdev_init_gpio_in_named(DEVICE(obj), fp9935_set_enable, "enable", 1);
+    qdev_init_gpio_in_named(DEVICE(obj), fp9935_set_temperature_enable,
+                             "temperature-enable", 1);
     qdev_init_gpio_out_named(DEVICE(obj), &s->power_good,
                              "power-good", 1);
 }
