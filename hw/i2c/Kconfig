@@ -30,6 +30,10 @@ config IMX_I2C
     bool
     select I2C
 
+config KOBO_MSP430
+    bool
+    select I2C
+
 config MAX77796
     bool
     select I2C

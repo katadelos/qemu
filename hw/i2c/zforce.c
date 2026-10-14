@@ -9,6 +9,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "hw/i2c/zforce.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
@@ -58,6 +59,8 @@ struct ZForceState {
     bool kindle_ti_protocol;
     bool input_events;
     bool reset_level;
+    uint16_t width;
+    uint16_t height;
     uint16_t input_x;
     uint16_t input_y;
     uint16_t report_x;
@@ -320,10 +323,10 @@ static void zforce_finish_write(ZForceState *s)
             response[22] = 45;    /* idle scan frequency */
             response[24] = 60;    /* finger scan frequency */
             response[26] = 60;    /* stylus scan frequency */
-            response[28] = ZFORCE_WIDTH & 0xff;
-            response[29] = ZFORCE_WIDTH >> 8;
-            response[30] = ZFORCE_HEIGHT & 0xff;
-            response[31] = ZFORCE_HEIGHT >> 8;
+            response[28] = s->width & 0xff;
+            response[29] = s->width >> 8;
+            response[30] = s->height & 0xff;
+            response[31] = s->height >> 8;
             response[32] = 90;    /* physical width, millimetres */
             response[34] = 120;   /* physical height, millimetres */
             response[36] = 1;     /* first active X LED */
@@ -337,10 +340,10 @@ static void zforce_finish_write(ZForceState *s)
             /* Preserve the existing ST/Kobo status response verbatim. */
             response[1] = 1;      /* firmware major, little endian */
             response[7] = s->kindle_v2_protocol ? 8 : 0;
-            response[21] = ZFORCE_WIDTH & 0xff;
-            response[22] = ZFORCE_WIDTH >> 8;
-            response[23] = ZFORCE_HEIGHT & 0xff;
-            response[24] = ZFORCE_HEIGHT >> 8;
+            response[21] = s->width & 0xff;
+            response[22] = s->width >> 8;
+            response[23] = s->height & 0xff;
+            response[24] = s->height >> 8;
             response[41] = 2;     /* interface protocol major */
             response[42] = 0;
             zforce_queue(s, response, 124);
@@ -412,10 +415,10 @@ static size_t zforce_build_touch_report(ZForceState *s, uint8_t *response,
 
     screen_x = qemu_input_scale_axis(s->input_x, INPUT_EVENT_ABS_MIN,
                                      INPUT_EVENT_ABS_MAX, 0,
-                                     ZFORCE_WIDTH - 1);
+                                     s->width - 1);
     screen_y = qemu_input_scale_axis(s->input_y, INPUT_EVENT_ABS_MIN,
                                      INPUT_EVENT_ABS_MAX, 0,
-                                     ZFORCE_HEIGHT - 1);
+                                     s->height - 1);
     if (s->kindle_protocol) {
         /*
          * Lab126's Yoshi/Whitney driver uses a seven-byte contact record:
@@ -488,9 +491,17 @@ static int zforce_event(I2CSlave *i2c, enum i2c_event event)
              * present in these scans; returning zero contacts here cancels
              * a normal host tap before its actual button-up arrives.
              */
-            idle_len = zforce_build_touch_report(s, idle_touch,
-                                                  s->input_pressed,
-                                                  s->input_pressed ? 1 : 0);
+            if (!s->input_pressed && s->packed_protocol &&
+                !s->kindle_protocol && !s->kindle_ti_protocol) {
+                /* The original Kobo driver parses a contact even when the
+                 * count is zero.  Keep idle scans released, not phantom down.
+                 */
+                idle_len = zforce_build_touch_report(s, idle_touch, true, 2);
+            } else {
+                idle_len = zforce_build_touch_report(s, idle_touch,
+                                                      s->input_pressed,
+                                                      s->input_pressed ? 1 : 0);
+            }
             zforce_queue_packet(s, idle_touch, idle_len, false);
         }
         s->read_pos = 0;
@@ -562,10 +573,10 @@ static void zforce_input_sync(DeviceState *dev)
     }
     screen_x = qemu_input_scale_axis(s->input_x, INPUT_EVENT_ABS_MIN,
                                      INPUT_EVENT_ABS_MAX, 0,
-                                     ZFORCE_WIDTH);
+                                     s->width);
     screen_y = qemu_input_scale_axis(s->input_y, INPUT_EVENT_ABS_MIN,
                                      INPUT_EVENT_ABS_MAX, 0,
-                                     ZFORCE_HEIGHT);
+                                     s->height);
     if (s->input_pressed == s->report_pressed &&
         (!s->input_pressed ||
          (screen_x == s->report_x && screen_y == s->report_y))) {
@@ -642,6 +653,10 @@ static void zforce_realize(DeviceState *dev, Error **errp)
 {
     ZForceState *s = ZFORCE(dev);
 
+    if (!s->width || !s->height) {
+        error_setg(errp, "zForce dimensions must be nonzero");
+        return;
+    }
     if (s->input_events) {
         s->input_handler = qemu_input_handler_register(
             dev, &zforce_input_handler);
@@ -695,6 +710,8 @@ static void zforce_class_init(ObjectClass *oc, const void *data)
     I2CSlaveClass *sc = I2C_SLAVE_CLASS(oc);
     static const Property properties[] = {
         DEFINE_PROP_BOOL("input-events", ZForceState, input_events, true),
+        DEFINE_PROP_UINT16("width", ZForceState, width, ZFORCE_WIDTH),
+        DEFINE_PROP_UINT16("height", ZForceState, height, ZFORCE_HEIGHT),
     };
 
     dc->realize = zforce_realize;
