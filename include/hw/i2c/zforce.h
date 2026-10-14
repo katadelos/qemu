@@ -10,6 +10,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(ZForceState, ZFORCE)
 #define TYPE_KINDLE_ZFORCE "kindle-neonode-zforce"
 #define TYPE_KINDLE_ZFORCE2 "kindle-neonode-zforce2"
 #define TYPE_KINDLE_ZFORCE2_TI "kindle-neonode-zforce2-ti"
+#define TYPE_ZFORCE3 "neonode-zforce3"
 
 #define TYPE_TPS65185 "tps65185"
 OBJECT_DECLARE_SIMPLE_TYPE(TPS65185State, TPS65185)

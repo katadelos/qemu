@@ -37,6 +37,7 @@ enum {
     EPDC_IRQ = 0x420,
     EPDC_STATUS_LUTS = 0x440,
     EPDC_STATUS_LUTS2 = 0x450,
+    EPDC_STATUS_NEXTLUT = 0x460,
     EPDC_STATUS = 0x4a0,
     EPDC_VERSION = 0x7f0,
 };
@@ -48,6 +49,9 @@ enum {
 #define EPDC_UPD_LUT_SHIFT      16
 #define EPDC_UPD_LUT_MASK       0x3f
 #define EPDC_STATUS_WB_BUSY     (1U << 0)
+#define EPDC_NEXT_LUT_VALID     (1U << 8)
+#define EPDC_FORMAT_BUF_MASK    0x700
+#define EPDC_FORMAT_BUF_P5N     0x500
 #define EPDC_VERSION_2_1_0      0x02010000
 #define EPDC_MAX_PANEL_DIMENSION 4096
 #define EPDC_SCANOUT_INTERVAL_MS 100
@@ -436,6 +440,22 @@ static uint64_t imx_epdc_read(void *opaque, hwaddr offset, unsigned size)
         qemu_log_mask(LOG_GUEST_ERROR,
                       "%s: invalid read at 0x%" HWADDR_PRIx "\n",
                       TYPE_IMX_EPDC, offset);
+        return 0;
+    }
+    if (offset == EPDC_STATUS_NEXTLUT) {
+        uint64_t active = *epdc_reg(s, EPDC_STATUS_LUTS) |
+            ((uint64_t)*epdc_reg(s, EPDC_STATUS_LUTS2) << 32);
+        unsigned count =
+            (*epdc_reg(s, EPDC_FORMAT) & EPDC_FORMAT_BUF_MASK) ==
+            EPDC_FORMAT_BUF_P5N ? 16 : 64;
+
+        /* P5N's larger pixel history leaves sixteen waveform slots. The
+         * normal update path waits for VALID before choosing a free LUT. */
+        for (unsigned lut = 0; lut < count; lut++) {
+            if (!(active & (1ULL << lut))) {
+                return EPDC_NEXT_LUT_VALID | lut;
+            }
+        }
         return 0;
     }
     return *epdc_reg(s, offset);

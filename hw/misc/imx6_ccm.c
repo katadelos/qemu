@@ -222,6 +222,22 @@ static const char *imx6_analog_reg_name(uint32_t reg)
         return "PMU_MISC1_CLR";
     case PMU_MISC1_TOG:
         return "PMU_MISC1_TOG";
+    case CCM_ANALOG_TEMPSENSE0:
+        return "TEMPSENSE0";
+    case CCM_ANALOG_TEMPSENSE0_SET:
+        return "TEMPSENSE0_SET";
+    case CCM_ANALOG_TEMPSENSE0_CLR:
+        return "TEMPSENSE0_CLR";
+    case CCM_ANALOG_TEMPSENSE0_TOG:
+        return "TEMPSENSE0_TOG";
+    case CCM_ANALOG_TEMPSENSE1:
+        return "TEMPSENSE1";
+    case CCM_ANALOG_TEMPSENSE1_SET:
+        return "TEMPSENSE1_SET";
+    case CCM_ANALOG_TEMPSENSE1_CLR:
+        return "TEMPSENSE1_CLR";
+    case CCM_ANALOG_TEMPSENSE1_TOG:
+        return "TEMPSENSE1_TOG";
     case USB_ANALOG_DIGPROG:
         return "USB_ANALOG_DIGPROG";
     case USB_ANALOG_DIGPROG_SL:
@@ -448,6 +464,8 @@ static void imx6_ccm_reset(DeviceState *dev)
     s->analog[PMU_MISC0] = 0x04000080;
     s->analog[PMU_MISC1] = 0x00000000;
     s->analog[PMU_MISC2] = 0x00272727;
+    s->analog[CCM_ANALOG_TEMPSENSE0] = TEMPSENSE0_POWER_DOWN;
+    s->analog[CCM_ANALOG_TEMPSENSE1] = 0;
 
     s->analog[USB_ANALOG_USB1_VBUS_DETECT] = 0x00000004;
     s->analog[USB_ANALOG_USB1_CHRG_DETECT] = 0x00000000;
@@ -505,6 +523,27 @@ static uint64_t imx6_analog_read(void *opaque, hwaddr offset, unsigned size)
     IMX6CCMState *s = (IMX6CCMState *)opaque;
 
     switch (index) {
+    case CCM_ANALOG_TEMPSENSE0:
+    case CCM_ANALOG_TEMPSENSE0_SET:
+    case CCM_ANALOG_TEMPSENSE0_CLR:
+    case CCM_ANALOG_TEMPSENSE0_TOG:
+        value = s->analog[CCM_ANALOG_TEMPSENSE0];
+        if ((value & (TEMPSENSE0_POWER_DOWN | TEMPSENSE0_MEASURE_TEMP)) ==
+            TEMPSENSE0_MEASURE_TEMP) {
+            /* Complete conversions synchronously, including repeated samples
+             * after FINISHED is cleared while measurement remains enabled.
+             * The board's OCOTP calibration determines the temperature. */
+            value &= ~TEMPSENSE0_TEMP_VALUE_MASK;
+            value |= (TEMPSENSE0_NOMINAL_COUNT << 8) | TEMPSENSE0_FINISHED;
+            s->analog[CCM_ANALOG_TEMPSENSE0] = value;
+        }
+        break;
+    case CCM_ANALOG_TEMPSENSE1:
+    case CCM_ANALOG_TEMPSENSE1_SET:
+    case CCM_ANALOG_TEMPSENSE1_CLR:
+    case CCM_ANALOG_TEMPSENSE1_TOG:
+        value = s->analog[CCM_ANALOG_TEMPSENSE1];
+        break;
     case USB_ANALOG_DIGPROG_SL:
         value = s->sololite && !s->sololite_lite ? 0x00600000 : 0;
         break;
@@ -604,6 +643,39 @@ static void imx6_analog_write(void *opaque, hwaddr offset, uint64_t value,
     IMX6CCMState *s = (IMX6CCMState *)opaque;
 
     trace_imx6_analog_write(imx6_analog_reg_name(index), (uint32_t)value);
+
+    if (index >= CCM_ANALOG_TEMPSENSE0 && index <= CCM_ANALOG_TEMPSENSE1_TOG) {
+        unsigned base = index & ~3;
+        uint32_t old = s->analog[base];
+        uint32_t next;
+
+        switch (index & 3) {
+        case 1:
+            next = old | value;
+            break;
+        case 2:
+            next = old & ~value;
+            break;
+        case 3:
+            next = old ^ value;
+            break;
+        default:
+            next = value;
+            break;
+        }
+        if (base == CCM_ANALOG_TEMPSENSE0) {
+            /* TEMP_VALUE is a read-only conversion result. */
+            next = (next & ~TEMPSENSE0_TEMP_VALUE_MASK) |
+                   (old & TEMPSENSE0_TEMP_VALUE_MASK);
+            if (next & TEMPSENSE0_POWER_DOWN) {
+                next &= ~TEMPSENSE0_FINISHED;
+            }
+        } else {
+            next &= 0xffff; /* MEASURE_FREQ */
+        }
+        s->analog[base] = next;
+        return;
+    }
 
     switch (index) {
     case USB_ANALOG_DIGPROG_SL:

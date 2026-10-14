@@ -290,7 +290,32 @@ static void zforce_finish_write(ZForceState *s)
     case ZFORCE_RESOLUTION:
     case ZFORCE_SCAN_FREQ:
     case 0x03: /* configuration */
+    case 0x09: /* touch size limits */
+    case 0x22: /* photodiode amplifier register */
         zforce_ack(s, command);
+        break;
+    case 0x0f: /* fixed signal strength */
+        if (s->write_buf[0] == ZFORCE_FRAME_START) {
+            unsigned signals = command_data[1] ? 22 : 16;
+
+            /* Glo HD calibrates X then Y before enabling touch reports.
+             * Return one healthy sample per emitter, below its saturation
+             * threshold, so calibration can advance to Set Resolution. */
+            response[0] = command;
+            response[1] = command_data[1];
+            response[2] = signals;
+            memset(response + 3, 100, signals);
+            zforce_queue(s, response, signals + 3);
+        } else {
+            zforce_ack(s, command);
+        }
+        break;
+    case 0x0d: /* low-signal diagnostic */
+        response[0] = command;
+        response[1] = command_data[1];
+        response[2] = command_data[1] ? 22 : 16;
+        /* The zero bitmap reports no obstructed emitters. */
+        zforce_queue(s, response, 3 + DIV_ROUND_UP(response[2], 8));
         break;
     case ZFORCE_TOUCH_DATA:
         s->streaming = true;
@@ -880,6 +905,10 @@ static const TypeInfo zforce_types[] = {
         .instance_init = kindle_zforce2_init,
     }, {
         .name = TYPE_KINDLE_ZFORCE2_TI,
+        .parent = TYPE_ZFORCE,
+        .instance_init = kindle_zforce2_ti_init,
+    }, {
+        .name = TYPE_ZFORCE3,
         .parent = TYPE_ZFORCE,
         .instance_init = kindle_zforce2_ti_init,
     }, {

@@ -293,6 +293,21 @@ config IMX6SLL_CLARA_HD
     select KOBO_NTX_BUTTONS
     select LM3630A
 
+config IMX6SL_KOBO_GLO_HD
+    bool
+    default y
+    depends on TCG && ARM
+    select FSL_IMX6
+    select IMX6SL_MMDC
+    select IMX6SL_IOMUXC
+    select IMX6SLL_OCOTP
+    select NEONODE_ZFORCE
+    select SD
+    select BCM4343W_SDIO
+    select KOBO_MSP430
+    select KOBO_NTX_PMIC
+    select KOBO_NTX_BUTTONS
+
 config MT8115_PA6_CS8
     bool
     select PARADE_TT
