@@ -6,6 +6,7 @@
 #ifndef EXEC_TB_CPU_STATE_H
 #define EXEC_TB_CPU_STATE_H
 
+#include "qemu/typedefs.h"
 #include "exec/vaddr.h"
 
 typedef struct TCGTBCPUState {
@@ -14,5 +15,8 @@ typedef struct TCGTBCPUState {
     uint32_t cflags;
     uint64_t cs_base;
 } TCGTBCPUState;
+
+/* Lookup after the caller allows I/O and extracts the current target state. */
+const void *tcg_lookup_tb_ptr(CPUState *cpu, TCGTBCPUState state);
 
 #endif

@@ -627,7 +627,8 @@ static bool mve_no_pred(CPUARMState *env)
     return true;
 }
 
-TCGTBCPUState arm_get_tb_cpu_state(CPUState *cs)
+static inline QEMU_ALWAYS_INLINE TCGTBCPUState
+arm_get_tb_cpu_state_internal(CPUState *cs)
 {
     CPUARMState *env = cpu_env(cs);
     CPUARMTBFlags flags;
@@ -702,4 +703,17 @@ TCGTBCPUState arm_get_tb_cpu_state(CPUState *cs)
         .flags = flags.flags,
         .cs_base = flags.flags2,
     };
+}
+
+TCGTBCPUState arm_get_tb_cpu_state(CPUState *cs)
+{
+    return arm_get_tb_cpu_state_internal(cs);
+}
+
+const void *HELPER(lookup_tb_ptr_arm)(CPUARMState *env)
+{
+    CPUState *cpu = env_cpu(env);
+
+    cpu->neg.can_do_io = true;
+    return tcg_lookup_tb_ptr(cpu, arm_get_tb_cpu_state_internal(cpu));
 }

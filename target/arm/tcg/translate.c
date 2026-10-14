@@ -1306,7 +1306,7 @@ void write_neon_element64(TCGv_i64 src, int reg, int ele, MemOp memop)
 
 static void gen_goto_ptr(void)
 {
-    tcg_gen_lookup_and_goto_ptr();
+    tcg_gen_lookup_and_goto_ptr_helper(&helper_info_lookup_tb_ptr_arm);
 }
 
 /* This will end the TB but doesn't guarantee we'll return to

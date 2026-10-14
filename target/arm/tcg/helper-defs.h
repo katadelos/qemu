@@ -2,6 +2,7 @@
 
 DEF_HELPER_FLAGS_1(sxtb16, TCG_CALL_NO_RWG_SE, i32, i32)
 DEF_HELPER_FLAGS_1(uxtb16, TCG_CALL_NO_RWG_SE, i32, i32)
+DEF_HELPER_FLAGS_1(lookup_tb_ptr_arm, TCG_CALL_NO_WG_SE, cptr, env)
 
 DEF_HELPER_3(add_setq, i32, env, i32, i32)
 DEF_HELPER_3(add_saturate, i32, env, i32, i32)

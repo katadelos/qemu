@@ -418,28 +418,19 @@ static inline bool check_for_breakpoints(CPUState *cpu, vaddr pc,
 }
 
 /**
- * helper_lookup_tb_ptr: quick check for next tb
- * @env: current cpu state
+ * tcg_lookup_tb_ptr: quick check for next tb
+ * @cpu: current CPU
+ * @s: current target state, with cflags supplied by this function
  *
  * Look for an existing TB matching the current cpu state.
  * If found, return the code pointer.  If not found, return
  * the tcg epilogue so that we return into cpu_tb_exec.
  */
-const void *HELPER(lookup_tb_ptr)(CPUArchState *env)
+QEMU_ALWAYS_INLINE const void *
+tcg_lookup_tb_ptr(CPUState *cpu, TCGTBCPUState s)
 {
-    CPUState *cpu = env_cpu(env);
     TranslationBlock *tb;
 
-    /*
-     * By definition we've just finished a TB, so I/O is OK.
-     * Avoid the possibility of calling cpu_io_recompile() if
-     * a page table walk triggered by tb_lookup() calling
-     * probe_access_internal() happens to touch an MMIO device.
-     * The next TB, if we chain to it, will clear the flag again.
-     */
-    cpu->neg.can_do_io = true;
-
-    TCGTBCPUState s = cpu->cc->tcg_ops->get_tb_cpu_state(cpu);
     s.cflags = curr_cflags(cpu);
 
     if (check_for_breakpoints(cpu, s.pc, &s.cflags)) {
@@ -456,6 +447,22 @@ const void *HELPER(lookup_tb_ptr)(CPUArchState *env)
     }
 
     return tb->tc.ptr;
+}
+
+const void *HELPER(lookup_tb_ptr)(CPUArchState *env)
+{
+    CPUState *cpu = env_cpu(env);
+
+    /*
+     * By definition we've just finished a TB, so I/O is OK.
+     * Avoid the possibility of calling cpu_io_recompile() if
+     * a page table walk triggered by tb_lookup() calling
+     * probe_access_internal() happens to touch an MMIO device.
+     * The next TB, if we chain to it, will clear the flag again.
+     */
+    cpu->neg.can_do_io = true;
+
+    return tcg_lookup_tb_ptr(cpu, cpu->cc->tcg_ops->get_tb_cpu_state(cpu));
 }
 
 /* Return the current PC from CPU, which may be cached in TB. */
