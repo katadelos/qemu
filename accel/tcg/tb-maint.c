@@ -896,10 +896,11 @@ static void tb_jmp_cache_inval_tb(TranslationBlock *tb)
     CPUState *cpu;
 
     if (tb_cflags(tb) & CF_PCREL) {
-        /* A TB may be at any virtual address */
-        CPU_FOREACH(cpu) {
-            tcg_flush_jmp_cache(cpu);
-        }
+        /*
+         * Cached aliases reject CF_INVALID. TB storage survives until the
+         * synchronized arena flush, which invalidates all cache generations.
+         */
+        return;
     } else {
         uint32_t h = tb_jmp_cache_hash_func(tb->pc);
 
