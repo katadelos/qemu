@@ -259,11 +259,33 @@ static bool mt8113_gce_condition(unsigned op, uint32_t left,
     }
 }
 
+static void mt8113_gce_schedule_pending(MT8113GCEState *s)
+{
+    uint32_t pending = s->pending_threads;
+    int64_t next = INT64_MAX;
+
+    while (pending) {
+        unsigned thread = ctz32(pending);
+
+        pending &= ~BIT(thread);
+        next = MIN(next, s->thread_ready_ns[thread]);
+    }
+    if (next == INT64_MAX) {
+        timer_del(s->exec_timer);
+    } else {
+        timer_mod(s->exec_timer, next);
+    }
+}
+
 static void mt8113_gce_schedule_thread(MT8113GCEState *s, unsigned thread)
 {
+    /* A submission must not postpone threads already waiting to execute. */
+    if (!(s->pending_threads & BIT(thread))) {
+        s->thread_ready_ns[thread] =
+            qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + GCE_EXEC_DELAY_NS;
+    }
     s->pending_threads |= BIT(thread);
-    timer_mod(s->exec_timer,
-              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + GCE_EXEC_DELAY_NS);
+    mt8113_gce_schedule_pending(s);
 }
 
 static void mt8113_gce_execute(MT8113GCEState *s, unsigned thread)
@@ -440,18 +462,23 @@ static void mt8113_gce_run_pending(void *opaque)
 {
     MT8113GCEState *s = opaque;
     uint32_t pending = s->pending_threads;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
-    s->pending_threads = 0;
     while (pending) {
         unsigned thread = ctz32(pending);
 
         pending &= ~BIT(thread);
+        if (s->thread_ready_ns[thread] > now) {
+            continue;
+        }
+        s->pending_threads &= ~BIT(thread);
         if ((*mt8113_gce_thread_reg(s, thread, GCE_THR_ENABLE) & 1) &&
             !(*mt8113_gce_thread_reg(s, thread, GCE_THR_SUSPEND) & 1) &&
             !s->waiting[thread]) {
             mt8113_gce_execute(s, thread);
         }
     }
+    mt8113_gce_schedule_pending(s);
 }
 
 static void mt8113_gce_event(void *opaque, int line, int level)
@@ -520,6 +547,7 @@ static void mt8113_gce_write(void *opaque, hwaddr offset, uint64_t value,
             *mt8113_gce_thread_reg(s, thread, GCE_THR_IRQ_ENABLE) = 0;
             s->waiting[thread] = false;
             s->pending_threads &= ~BIT(thread);
+            mt8113_gce_schedule_pending(s);
             mt8113_gce_update_irq(s);
             return;
         case GCE_THR_SUSPEND:
@@ -557,6 +585,7 @@ static void mt8113_gce_write(void *opaque, hwaddr offset, uint64_t value,
                 }
             } else {
                 s->pending_threads &= ~BIT(thread);
+                mt8113_gce_schedule_pending(s);
             }
             return;
         default:
@@ -587,6 +616,7 @@ static void mt8113_gce_reset(DeviceState *dev)
     memset(s->tokens, 0, sizeof(s->tokens));
     memset(s->waiting, 0, sizeof(s->waiting));
     memset(s->wait_token, 0, sizeof(s->wait_token));
+    memset(s->thread_ready_ns, 0, sizeof(s->thread_ready_ns));
     s->selected_token = 0;
     s->pending_threads = 0;
     timer_del(s->exec_timer);

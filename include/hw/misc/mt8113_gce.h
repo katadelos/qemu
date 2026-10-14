@@ -29,6 +29,7 @@ struct MT8113GCEState {
     uint16_t selected_token;
     QEMUTimer *exec_timer;
     uint32_t pending_threads;
+    int64_t thread_ready_ns[MT8113_GCE_THREADS];
     uint32_t frame_done_event;
     bool inclusive_end_address;
 };
