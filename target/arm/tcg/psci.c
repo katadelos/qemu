@@ -61,6 +61,8 @@
 #define MTK_OPTEE_SESSION_KREE_CONSOLE   3
 #define MTK_OPTEE_SESSION_EFUSE          4
 #define MTK_OPTEE_SESSION_ROLLBACK       5
+#define MTK_OPTEE_SESSION_KEYSTORE       6
+#define MTK_OPTEE_SESSION_CREDENTIAL     7
 
 #define MTK_OPTEE_RETURN_OK              0
 #define MTK_OPTEE_RETURN_EBADADDR        4
@@ -95,6 +97,13 @@
 #define MTK_OPTEE_MAX_KEY_SIZE           4096
 #define MTK_OPTEE_MAX_REGISTRATIONS      32
 #define MTK_OPTEE_PAGE_MASK              (~0xfffULL)
+#define MTK_KEYSTORE_INPUT_SIZE          1036
+#define MTK_KEYSTORE_OUTPUT_SIZE         260
+#define MTK_KEYSTORE_MAX_INPUT_SIZE      1024
+#define MTK_KEYSTORE_MAX_KEY_SIZE        256
+#define MTK_CREDENTIAL_CHECK_ENABLED     5
+#define MTK_CREDENTIAL_INPUT_SIZE        76
+#define MTK_CREDENTIAL_OUTPUT_SIZE       20
 
 typedef struct MtkOpteeRegistration {
     bool used;
@@ -109,6 +118,16 @@ static MtkOpteeRegistration mtk_optee_registrations[
 static const uint8_t mtk_optee_fbe_uuid[16] = {
     0xa6, 0xf7, 0x22, 0xd3, 0xfa, 0xec, 0x49, 0x06,
     0xbf, 0xc4, 0xe8, 0x93, 0x83, 0x73, 0xfa, 0xab,
+};
+
+static const uint8_t mtk_optee_keystore_uuid[16] = {
+    0x2f, 0x28, 0x11, 0xb2, 0x2f, 0x2a, 0x48, 0x94,
+    0xae, 0xe8, 0xb5, 0xd2, 0x60, 0x87, 0x97, 0x5e,
+};
+
+static const uint8_t mtk_optee_credential_uuid[16] = {
+    0x5a, 0x8f, 0xcf, 0x35, 0x8e, 0x6d, 0x41, 0x96,
+    0x9a, 0x52, 0xc3, 0xeb, 0x14, 0x29, 0xb5, 0xa5,
 };
 
 static const uint8_t mtk_optee_kree_console_uuid[16] = {
@@ -361,6 +380,128 @@ static bool mtk_optee_fbe_get_key(uint8_t *msg, uint32_t num_params)
     return ok;
 }
 
+static bool mtk_optee_keystore_get_key(uint8_t *msg, uint32_t num_params)
+{
+    uint8_t request[12];
+    uint8_t response[MTK_KEYSTORE_OUTPUT_SIZE] = { 0 };
+    uint8_t *input = msg + MTK_OPTEE_MSG_ARG_SIZE;
+    uint8_t *output = input + MTK_OPTEE_MSG_PARAM_SIZE;
+    uint64_t input_addr, input_size, output_addr, output_size;
+    uint64_t hash = 1469598103934665603ULL;
+    uint64_t state;
+    uint32_t input_type, output_type, key_size, data_size;
+    g_autofree char *serial = NULL;
+
+    if (num_params != 4) {
+        return false;
+    }
+    input_type = ldq_le_p(input) & MTK_OPTEE_ATTR_TYPE_MASK;
+    output_type = ldq_le_p(output) & MTK_OPTEE_ATTR_TYPE_MASK;
+    if ((input_type != MTK_OPTEE_ATTR_TMEM_INPUT &&
+         input_type != MTK_OPTEE_ATTR_RMEM_INPUT) ||
+        (output_type != MTK_OPTEE_ATTR_TMEM_OUTPUT &&
+         output_type != MTK_OPTEE_ATTR_RMEM_OUTPUT)) {
+        return false;
+    }
+    for (uint32_t n = 2; n < num_params; n++) {
+        uint8_t *param = input + n * MTK_OPTEE_MSG_PARAM_SIZE;
+
+        if (ldq_le_p(param) & MTK_OPTEE_ATTR_TYPE_MASK) {
+            return false;
+        }
+    }
+    if (!mtk_optee_resolve_memref(input, &input_addr, &input_size) ||
+        !mtk_optee_resolve_memref(output, &output_addr, &output_size) ||
+        input_size != MTK_KEYSTORE_INPUT_SIZE ||
+        output_size != MTK_KEYSTORE_OUTPUT_SIZE ||
+        !mtk_optee_read(input_addr, request, sizeof(request))) {
+        return false;
+    }
+    key_size = ldl_le_p(request);
+    data_size = ldl_le_p(request + 8);
+    if (!key_size || key_size > MTK_KEYSTORE_MAX_KEY_SIZE ||
+        data_size > MTK_KEYSTORE_MAX_INPUT_SIZE) {
+        return false;
+    }
+
+    /*
+     * KT7's KeyStore TA returns an application status followed by its key.
+     * Derive a stable synthetic key from the virtual device identity, purpose
+     * and request data, without importing any physical device's secrets.
+     */
+    serial = object_property_get_str(OBJECT(qdev_get_machine()),
+                                     "idme-serial", NULL);
+    if (!serial || !*serial) {
+        return false;
+    }
+    for (size_t n = 0; serial[n]; n++) {
+        hash ^= (uint8_t)serial[n];
+        hash *= 1099511628211ULL;
+    }
+    if (!mtk_optee_mix_mem(&hash, input_addr,
+                           sizeof(request) + data_size, 0)) {
+        return false;
+    }
+    state = hash ^ 0x4b54372d4b455931ULL;
+    for (uint32_t n = 0; n < key_size; n++) {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        response[sizeof(uint32_t) + n] =
+            (state * 2685821657736338717ULL) >> 56;
+    }
+    if (!mtk_optee_write(output_addr, response, sizeof(response))) {
+        return false;
+    }
+    stq_le_p(output + 16, sizeof(response));
+    return true;
+}
+
+static bool mtk_optee_credential_check_enabled(uint8_t *msg,
+                                              uint32_t num_params)
+{
+    uint8_t request[MTK_CREDENTIAL_INPUT_SIZE];
+    uint8_t response[MTK_CREDENTIAL_OUTPUT_SIZE] = { 0 };
+    uint8_t *input, *output;
+    uint64_t input_addr, input_size, output_addr, output_size;
+    uint32_t input_type, output_type;
+
+    if (num_params != 4) {
+        return false;
+    }
+    input = msg + MTK_OPTEE_MSG_ARG_SIZE;
+    output = input + MTK_OPTEE_MSG_PARAM_SIZE;
+    input_type = ldq_le_p(input) & MTK_OPTEE_ATTR_TYPE_MASK;
+    output_type = ldq_le_p(output) & MTK_OPTEE_ATTR_TYPE_MASK;
+    if ((input_type != MTK_OPTEE_ATTR_TMEM_INPUT &&
+         input_type != MTK_OPTEE_ATTR_RMEM_INPUT) ||
+        (output_type != MTK_OPTEE_ATTR_TMEM_OUTPUT &&
+         output_type != MTK_OPTEE_ATTR_RMEM_OUTPUT)) {
+        return false;
+    }
+    for (uint32_t n = 2; n < num_params; n++) {
+        uint8_t *param = input + n * MTK_OPTEE_MSG_PARAM_SIZE;
+
+        if (ldq_le_p(param) & MTK_OPTEE_ATTR_TYPE_MASK) {
+            return false;
+        }
+    }
+    if (!mtk_optee_resolve_memref(input, &input_addr, &input_size) ||
+        !mtk_optee_resolve_memref(output, &output_addr, &output_size) ||
+        input_size != sizeof(request) || output_size != sizeof(response) ||
+        !mtk_optee_read(input_addr, request, sizeof(request))) {
+        return false;
+    }
+
+    /* Application status is at offset 0; credential-enabled is at offset 8. */
+    /* A fresh virtual device has no configured screen or device credentials. */
+    if (!mtk_optee_write(output_addr, response, sizeof(response))) {
+        return false;
+    }
+    stq_le_p(output + 16, sizeof(response));
+    return true;
+}
+
 static bool mtk_optee_efuse_read(uint8_t *msg, uint32_t num_params)
 {
     uint8_t *fuse_param;
@@ -440,6 +581,14 @@ static uint32_t mtk_optee_call_with_arg(ARMCPU *cpu, uint64_t addr)
                            sizeof(mtk_optee_fbe_uuid))) {
             stl_le_p(msg + 8, MTK_OPTEE_SESSION_FBE);
         } else if (!memcmp(msg + MTK_OPTEE_MSG_ARG_SIZE + 8,
+                           mtk_optee_keystore_uuid,
+                           sizeof(mtk_optee_keystore_uuid))) {
+            stl_le_p(msg + 8, MTK_OPTEE_SESSION_KEYSTORE);
+        } else if (!memcmp(msg + MTK_OPTEE_MSG_ARG_SIZE + 8,
+                           mtk_optee_credential_uuid,
+                           sizeof(mtk_optee_credential_uuid))) {
+            stl_le_p(msg + 8, MTK_OPTEE_SESSION_CREDENTIAL);
+        } else if (!memcmp(msg + MTK_OPTEE_MSG_ARG_SIZE + 8,
                            mtk_optee_enum_uuid,
                            sizeof(mtk_optee_enum_uuid))) {
             stl_le_p(msg + 8, MTK_OPTEE_SESSION_ENUM);
@@ -498,6 +647,14 @@ static uint32_t mtk_optee_call_with_arg(ARMCPU *cpu, uint64_t addr)
                    ldl_le_p(msg + 4) == 0 &&
                    mtk_optee_efuse_read(msg, num_params)) {
             /* Efuse value was copied to the guest's registered buffer. */
+        } else if (ldl_le_p(msg + 8) == MTK_OPTEE_SESSION_KEYSTORE &&
+                   ldl_le_p(msg + 4) == 1 &&
+                   mtk_optee_keystore_get_key(msg, num_params)) {
+            /* The structured KeyStore response was copied to the guest. */
+        } else if (ldl_le_p(msg + 8) == MTK_OPTEE_SESSION_CREDENTIAL &&
+                   ldl_le_p(msg + 4) == MTK_CREDENTIAL_CHECK_ENABLED &&
+                   mtk_optee_credential_check_enabled(msg, num_params)) {
+            /* No credential has been configured on the virtual device. */
         } else if (ldl_le_p(msg + 8) != MTK_OPTEE_SESSION_FBE ||
                    ldl_le_p(msg + 4) != 1 ||
                    !mtk_optee_fbe_get_key(msg, num_params)) {
