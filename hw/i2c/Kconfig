@@ -98,6 +98,14 @@ config LM3697
     bool
     select I2C
 
+config AW99703
+    bool
+    select I2C
+
+config TMP103
+    bool
+    select I2C
+
 config MAX14656
     bool
     select I2C
