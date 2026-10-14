@@ -1842,6 +1842,12 @@ tb_page_addr_t get_page_addr_code_hostp(CPUArchState *env, vaddr addr,
         *group = tb_jmp_cache_group(full->invalidation_group,
                                    full->context_independent);
     }
+    if (memory_region_is_ram(full->section->mr)) {
+        /* The TLB already retains the translated ram_addr_t. */
+        return addr + full->xlat_offset;
+    }
+
+    /* ROMD retains a MemoryRegion offset rather than a ram_addr_t. */
     return qemu_ram_addr_from_host_nofail(p);
 }
 
