@@ -121,7 +121,7 @@ static void imx_epdc_render_framebuffer(IMXEPDCState *s)
     size_t buffer_size;
     MemTxResult result;
     unsigned x, y;
-    unsigned bpp = s->fb_bpp;
+    unsigned bpp = s->fb_scanout_bpp;
     unsigned first = s->fb_height, last = 0;
     uint8_t *previous;
 
@@ -129,7 +129,10 @@ static void imx_epdc_render_framebuffer(IMXEPDCState *s)
         return;
     }
 
-    /* Forma switches from RGB565 during boot to XRGB8888 in Nickel. */
+    /*
+     * Kobo switches from RGB565 during boot to XRGB8888 in Nickel. Retain
+     * the last framebuffer format when later PxP jobs use scratch buffers.
+     */
     if (s->fb_follow_pxp && s->pxp) {
         IMX6SLPXPState *pxp = s->pxp;
         uint64_t end = s->fb_addr +
@@ -140,7 +143,7 @@ static void imx_epdc_render_framebuffer(IMXEPDCState *s)
             pxp->last_source_addr >= s->fb_addr &&
             pxp->last_source_addr < end &&
             pxp->last_source_pitch == s->fb_stride * pxp->last_source_bpp) {
-            bpp = pxp->last_source_bpp;
+            s->fb_scanout_bpp = bpp = pxp->last_source_bpp;
         }
     }
     buffer_size = (size_t)s->fb_stride * s->fb_height * bpp;
@@ -567,18 +570,20 @@ static void imx_epdc_reset(DeviceState *dev)
     s->update_pending = false;
     s->pending_luts = 0;
     s->fb_previous_valid = false;
+    s->fb_scanout_bpp = s->fb_bpp;
     timer_del(s->lut_timer);
     qemu_set_irq(s->irq, 0);
 }
 
 static const VMStateDescription vmstate_imx_epdc = {
     .name = TYPE_IMX_EPDC,
-    .version_id = 2,
-    .minimum_version_id = 2,
+    .version_id = 3,
+    .minimum_version_id = 3,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IMXEPDCState,
                              IMX_EPDC_MMIO_SIZE / sizeof(uint32_t)),
         VMSTATE_BOOL(update_pending, IMXEPDCState),
+        VMSTATE_UINT8(fb_scanout_bpp, IMXEPDCState),
         VMSTATE_UINT64(pending_luts, IMXEPDCState),
         VMSTATE_TIMER_PTR(lut_timer, IMXEPDCState),
         VMSTATE_END_OF_LIST()

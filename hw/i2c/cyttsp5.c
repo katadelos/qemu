@@ -13,6 +13,7 @@
 
 #define TYPE_CYTTSP5 "cyttsp5"
 #define CYTTSP5_TOUCH_QUEUE_SIZE 64
+#define CYTTSP5_TOUCH_EMPTY 4
 OBJECT_DECLARE_SIMPLE_TYPE(CYTTSP5State, CYTTSP5)
 typedef struct CYTTSP5Touch {
     uint16_t x, y;
@@ -254,9 +255,20 @@ static int cyttsp5_event(I2CSlave *i2c, enum i2c_event event)
         } else if (s->rx_pending && s->rx_pos >= s->rx_len) {
             timer_del(s->ready_timer);
             if (s->rx_is_touch) {
-                s->reported = s->touches[s->touch_head].event != 3;
-                s->touch_head = (s->touch_head + 1) % CYTTSP5_TOUCH_QUEUE_SIZE;
-                s->touch_count--;
+                CYTTSP5Touch *touch = &s->touches[s->touch_head];
+
+                s->reported = touch->event < 3;
+                if (touch->event == 3) {
+                    /*
+                     * Kobo needs explicit lift-off to clear its suspend
+                     * busy flag, then an empty frame to release protocol A.
+                     */
+                    touch->event = CYTTSP5_TOUCH_EMPTY;
+                } else {
+                    s->touch_head =
+                        (s->touch_head + 1) % CYTTSP5_TOUCH_QUEUE_SIZE;
+                    s->touch_count--;
+                }
             }
             s->rx_pending = s->rx_is_touch = false;
             memset(s->rx, 0, sizeof(s->rx));
@@ -316,7 +328,7 @@ static void cyttsp5_input_sync(DeviceState *dev)
     s->input_dirty = false;
     if (s->touch_count) {
         tail = (s->touch_head + s->touch_count - 1) % CYTTSP5_TOUCH_QUEUE_SIZE;
-        previous_pressed = s->touches[tail].event != 3;
+        previous_pressed = s->touches[tail].event < 3;
     }
     if (!s->pressed && !previous_pressed) {
         return;
@@ -337,7 +349,7 @@ static void cyttsp5_input_sync(DeviceState *dev)
         if (s->touch_count == CYTTSP5_TOUCH_QUEUE_SIZE) {
             /* Keep the active report and reconcile the latest host state. */
             s->touch_count = 1;
-            previous_pressed = s->touches[s->touch_head].event != 3;
+            previous_pressed = s->touches[s->touch_head].event < 3;
             if (!s->pressed && !previous_pressed) {
                 return;
             }
@@ -359,11 +371,11 @@ static void cyttsp5_deliver_touch(CYTTSP5State *s)
         return;
     }
     touch = &s->touches[s->touch_head];
-    pressed = touch->event != 3;
+    pressed = touch->event < 3;
     memset(s->rx, 0, sizeof(s->rx));
     s->rx[2] = 1;
     stw_le_p(s->rx + 3, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL));
-    s->rx[5] = pressed;
+    s->rx[5] = touch->event != CYTTSP5_TOUCH_EMPTY;
     s->rx[6] = s->sequence++;
     s->rx[9] = touch->event;
     s->rx[10] = pressed;
@@ -372,8 +384,7 @@ static void cyttsp5_deliver_touch(CYTTSP5State *s)
     stw_le_p(s->rx + 13, s->invert_y ? s->height - touch->y : touch->y);
     s->rx[15] = pressed ? 64 : 0;
     s->rx[16] = s->rx[17] = 2;
-    /* An empty contact frame releases the Linux protocol-A touch slot. */
-    cyttsp5_queue(s, pressed ? 19 : 7);
+    cyttsp5_queue(s, touch->event == CYTTSP5_TOUCH_EMPTY ? 7 : 19);
     s->rx_is_touch = true;
 }
 static const QemuInputHandler cyttsp5_input = {

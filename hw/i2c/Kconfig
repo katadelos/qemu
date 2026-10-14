@@ -98,6 +98,14 @@ config LM3695
     bool
     select I2C
 
+config LM3630A
+    bool
+    select I2C
+
+config KOBO_NTX_PMIC
+    bool
+    select I2C
+
 config LM3697
     bool
     select I2C

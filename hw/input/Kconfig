@@ -35,3 +35,6 @@ config LASIPS2
     select PS2
 config WARIO_KEYBOARD
     bool
+
+config KOBO_NTX_BUTTONS
+    bool

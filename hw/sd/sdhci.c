@@ -1255,9 +1255,28 @@ static inline void sdhci_blkgap_write(SDHCIState *s, uint8_t value)
 static inline void sdhci_reset_write(SDHCIState *s, uint8_t value)
 {
     switch (value) {
-    case SDHC_RESET_ALL:
+    case SDHC_RESET_ALL: {
+        uint16_t norintstsen = s->norintstsen;
+        uint16_t errintstsen = s->errintstsen;
+        uint16_t norintsigen = s->norintsigen;
+        uint16_t errintsigen = s->errintsigen;
+
         sdhci_reset(s);
+        if (s->preserve_interrupt_enables_on_reset) {
+            /*
+             * Clara HD's vendor esdhc_hw_reset() issues RSTA after enabling
+             * interrupts, then submits the SDIO reset command without
+             * restoring those enables.  This opt-in driver compatibility
+             * behavior applies only to software reset, not power-on reset.
+             */
+            s->norintstsen = norintstsen;
+            s->errintstsen = errintstsen;
+            s->norintsigen = norintsigen;
+            s->errintsigen = errintsigen;
+            sdhci_update_irq(s);
+        }
         break;
+    }
     case SDHC_RESET_CMD:
         s->prnsts &= ~SDHC_CMD_INHIBIT;
         s->norintsts &= ~SDHC_NIS_CMDCMP;
@@ -2150,6 +2169,16 @@ static void imx_usdhc_init(Object *obj)
     qdev_prop_set_uint8(dev, "sd-spec-version", 3);
 }
 
+static const Property imx_usdhc_properties[] = {
+    DEFINE_PROP_BOOL("preserve-interrupt-enables-on-reset", SDHCIState,
+                     preserve_interrupt_enables_on_reset, false),
+};
+
+static void imx_usdhc_class_init(ObjectClass *klass, const void *data)
+{
+    device_class_set_props(DEVICE_CLASS(klass), imx_usdhc_properties);
+}
+
 /* --- qdev Samsung s3c --- */
 
 #define S3C_SDHCI_CONTROL2      0x80
@@ -2237,6 +2266,7 @@ static const TypeInfo sdhci_types[] = {
         .name = TYPE_IMX_USDHC,
         .parent = TYPE_SYSBUS_SDHCI,
         .instance_init = imx_usdhc_init,
+        .class_init = imx_usdhc_class_init,
     },
     {
         .name = TYPE_S3C_SDHCI,

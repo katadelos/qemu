@@ -1,7 +1,8 @@
 /*
- * Realtek RTL8192ES SDIO radio and an open emulated access point.
+ * Realtek RTL8192ES / RTL8189FS SDIO radios and an open emulated access point.
  *
- * The register/FIFO protocol follows Realtek's GPL RTL8192ES SDIO driver.
+ * The register/FIFO protocol follows Realtek's GPL RTL8192ES and RTL8188F
+ * SDIO drivers (the latter is shipped as 8189fs.ko).
  * Guest firmware downloads initialize the modeled MAC; 802.11 management
  * frames and LLC data travel through the same descriptor queues as on silicon.
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -19,6 +20,7 @@
 #include "trace.h"
 
 #define TYPE_RTL8192ES_SDIO "rtl8192es-sdio"
+#define TYPE_RTL8189FS_SDIO "rtl8189fs-sdio"
 OBJECT_DECLARE_SIMPLE_TYPE(RTL8192ESState, RTL8192ES_SDIO)
 #define RTL_MAX_FRAME 16384
 #define RTL_SSID "Kindle-QEMU"
@@ -40,6 +42,7 @@ struct RTL8192ESState {
     uint32_t status, mask;
     unsigned address, position, length, fn;
     uint16_t sequence;
+    bool rtl8189fs;
     bool powered, writing, increment, firmware, associated;
     GQueue rx;
     QEMUTimer *beacon_timer;
@@ -125,13 +128,15 @@ static void rtl_beacon_tick(void *opaque)
 static void rtl_tx_report(RTL8192ESState *s)
 {
     RTLPacket *packet;
+    unsigned length = s->rtl8189fs ? 9 : 8;
 
     if (g_queue_get_length(&s->rx) >= 128) {
         return;
     }
     packet = g_new0(RTLPacket, 1);
-    packet->length = 24 + 8;
-    stl_le_p(packet->data, 8);
+    /* RTL8188F's CCX report has a two-byte header and seven-byte payload. */
+    packet->length = 24 + length;
+    stl_le_p(packet->data, length);
     stl_le_p(packet->data + 8, BIT(28)); /* C2H, rather than an 802.11 frame */
     packet->data[24] = 3; /* C2H_CCX_TX_RPT, successful transmission */
     g_queue_push_tail(&s->rx, packet);
@@ -222,7 +227,16 @@ static uint8_t rtl_read(RTL8192ESState *s, unsigned fn, unsigned address)
         if (address == 0x1c || address == 0x1d) {
             return (packet ? packet->length : 0) >> ((address - 0x1c) * 8);
         }
-        if (address >= 0x1e && address < 0x24) {
+        if (s->rtl8189fs) {
+            /* RTL8188F exposes five 16-bit FIFO page counts, followed by
+             * separate AC and non-AC outstanding-queue-token counts. */
+            if (address >= 0x20 && address < 0x2a) {
+                return (address & 1) ? 0 : 0xff;
+            }
+            if (address == 0x2a || address == 0x2b) {
+                return 0xff;
+            }
+        } else if (address >= 0x1e && address < 0x24) {
             return 0xff;
         }
         return s->local[address];
@@ -239,6 +253,10 @@ static uint8_t rtl_read(RTL8192ESState *s, unsigned fn, unsigned address)
             value = 0xff; /* unprogrammed EFUSE data */
         } else if (reg == 0x33) {
             value |= 0x80; /* EFUSE read complete */
+        } else if (s->rtl8189fs && reg == 0x286) {
+            /* RX DMA completes synchronously.  Report idle when the
+             * driver requests packet release before powering down. */
+            value = (value & ~BIT(1)) | ((value & BIT(2)) ? BIT(1) : 0);
         }
         return value;
     }
@@ -264,7 +282,7 @@ static void rtl_write(RTL8192ESState *s, unsigned fn, unsigned address, uint8_t 
         } else if (address == 0x86) {
             s->local[address] = (value & ~2) | ((value & 1) ? 0 : 2);
         } else if (address == 0x80) {
-            s->local[0x24] = value;
+            s->local[s->rtl8189fs ? 0x38 : 0x24] = value;
             s->status |= BIT(18); /* CPWM1 */
         }
     } else if (address & 0x10000) {
@@ -455,8 +473,8 @@ static void rtl_reset(DeviceState *dev)
     stw_le_p(s->cccr + 0x110, 512);
     s->local[0x86] = 2;
     s->regs[6] = 2;
-    s->regs[0xf0] = 0x80; /* normal production RTL8192E, 2T2R */
-    s->regs[0xf2] = 0x10;
+    s->regs[0xf0] = 0x80; /* SYS_CFG: software offload enabled, production IC */
+    s->regs[0xf2] = s->rtl8189fs ? 0 : 0x10; /* RTL8188F: TSMC, A-cut */
     s->status = s->mask = 0;
     s->length = s->position = 0;
     s->associated = s->firmware = false;
@@ -566,6 +584,16 @@ static void rtl_finalize(Object *obj)
     }
 }
 
+static void rtl8189fs_init(Object *obj)
+{
+    RTL8192ESState *s = RTL8192ES_SDIO(obj);
+
+    s->rtl8189fs = true;
+    /* CISTPL_MANFID identifies the RTL8188F SDIO die used by RTL8189FS. */
+    stw_le_p(s->cis + 4, 0xf179);
+    stw_le_p(s->cis + 0x104, 0xf179);
+}
+
 static const Property rtl_properties[] = {
     DEFINE_NIC_PROPERTIES(RTL8192ESState, conf),
 };
@@ -605,8 +633,21 @@ static const TypeInfo rtl_type = {
     .class_init = rtl_class_init,
 };
 
+static void rtl8189fs_class_init(ObjectClass *klass, const void *data)
+{
+    DEVICE_CLASS(klass)->desc = "Realtek RTL8189FS SDIO Wi-Fi";
+}
+
+static const TypeInfo rtl8189fs_type = {
+    .name = TYPE_RTL8189FS_SDIO,
+    .parent = TYPE_RTL8192ES_SDIO,
+    .instance_init = rtl8189fs_init,
+    .class_init = rtl8189fs_class_init,
+};
+
 static void rtl_register_types(void)
 {
     type_register_static(&rtl_type);
+    type_register_static(&rtl8189fs_type);
 }
 type_init(rtl_register_types)
