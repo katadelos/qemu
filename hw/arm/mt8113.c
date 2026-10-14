@@ -107,6 +107,7 @@
 #define MT8113_WIFI_INIT_EVENT_WORD_SIZE   4
 #define MT8113_WIFI_ACCESS_EVENT_SIZE      36
 #define MT8113_WIFI_INIT_CMD_SIZE         64
+#define MT8113_WIFI_WTBL_ENTRIES          32
 #define MT8113_WIFI_INIT_CMD_ID           36
 #define MT8113_WIFI_INIT_CMD_SEQ          39
 #define MT8113_WIFI_EVENT_ID              24
@@ -1522,6 +1523,40 @@ static void mt8113_wifi_runtime_command(MT8113State *s,
         stq_le_p(statistics, s->wifi_tx_packets);
         stq_le_p(statistics + 72, s->wifi_rx_packets);
         mt8113_wifi_runtime_event(s, 0x03, sequence, statistics, sizeof(statistics));
+        break;
+    }
+    case 0xcd: { /* GET_WLAN_INFO: indexed WTBL record. */
+        uint8_t information[156] = { 0 };
+        uint32_t index;
+
+        /* Stock wlanQueryWlanInfo sends a 160-byte request whose first
+         * LE32 word is the WTBL index. secGetStaIdxByWlanIdx bounds it
+         * to 0..31. Reject malformed/set requests rather than acknowledging
+         * arbitrary command data. */
+        if (length != MT8113_WIFI_INIT_CMD_SIZE + 160 || data[38] != 0) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "mt8113-wifi: invalid WTBL query length=%zu mode=%u\n",
+                          length, data[38]);
+            break;
+        }
+        index = ldl_le_p(data + MT8113_WIFI_INIT_CMD_SIZE);
+        if (index >= MT8113_WIFI_WTBL_ENTRIES) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "mt8113-wifi: invalid WTBL query index=%u\n", index);
+            break;
+        }
+        /* nicCmdEventQueryWlanInfo copies the event's 156-byte record
+         * after the caller's index. Its first six bytes are the peer MAC,
+         * as decoded by priv_driver_dump_helper_wtbl_info. Only our active
+         * open 802.11g station has an address; other WTBL entries are empty.
+         * Security, BA/HT/VHT offloads and unmodeled RF counters remain zero.
+         */
+        if (s->wifi_associated && index == s->wifi_wlan_index) {
+            memcpy(information, mt8113_wifi_bssid,
+                   sizeof(mt8113_wifi_bssid));
+        }
+        mt8113_wifi_runtime_event(s, 0xcd, sequence, information,
+                                  sizeof(information));
         break;
     }
     case 0xce: { /* GET_MIB_INFO */
