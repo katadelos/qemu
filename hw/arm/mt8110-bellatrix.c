@@ -15,6 +15,7 @@
 #include "hw/core/loader.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/i2c/bd71828.h"
+#include "hw/i2c/aw99703.h"
 #include "hw/i2c/fp9935.h"
 #include "hw/i2c/fp9966.h"
 #include "hw/i2c/bq25611d.h"
@@ -23,6 +24,9 @@
 #include "hw/i2c/wacom_emr.h"
 #include "hw/i2c/goodix_gtx8.h"
 #include "hw/i2c/max20342.h"
+#include "hw/i2c/parade-tt7010.h"
+#include "hw/i2c/tmp103.h"
+#include "hw/nvram/eeprom_at24c.h"
 #include "hw/sd/sd.h"
 #include "qapi/error.h"
 #include "qemu/bswap.h"
@@ -53,6 +57,8 @@ typedef struct BellatrixMachineState {
     Object *pmic;
     Object *charger;
     qemu_irq usb_vbus_input;
+    qemu_irq usb_detector_vbus;
+    bool usb_vbus;
     Notifier powerdown_notifier;
     bool powerdown_registered;
     char *board;
@@ -60,6 +66,7 @@ typedef struct BellatrixMachineState {
     char *bl2;
     char *tee;
     char *quickboot;
+    char *touch_firmware;
     char *boot_stage;
     char *idme_board_id;
     char *idme_serial;
@@ -68,6 +75,7 @@ typedef struct BellatrixMachineState {
     char *idme_product_name;
     char *idme_device_type;
     char *idme_bootmode;
+    bool idme_bootmode_explicit;
     char *idme_postmode;
     char *idme_fos_flags;
     char *idme_hwid;
@@ -92,17 +100,20 @@ typedef struct BellatrixBoard {
     const char *board_id;
     const char *serial;
     const char *device_type;
+    const char *product_name;
     ram_addr_t ram_size;
     const char *soc_type;
     const char *manufacturing;
     const BellatrixDeviceProfile *profiles;
     unsigned num_profiles;
     unsigned hwid_pins[4];
+    unsigned num_hwid_pins;
     unsigned touch_reset;
     unsigned touch_width;
     unsigned touch_height;
     unsigned power_good;
     bool scribe;
+    bool prosecco;
 } BellatrixBoard;
 
 /* Cava and Rossini share these phase straps; Malbec has a separate table. */
@@ -136,6 +147,68 @@ static const BellatrixDeviceProfile pisco_device_profiles[] = {
     { "dvt",        6, "3XE" },
 };
 
+/*
+ * Prosecco's stock U-Boot names HWIDs 0..3 Proto/HVT/EVT/DVT.  Its po8
+ * table uses GPIO113/112/114; EVT_DOE belongs to the ao5/jp5 table.
+ * The PSN revision in IDME is independent of these hardware ID straps.
+ */
+static const BellatrixDeviceProfile prosecco_device_profiles[] = {
+    { .name = "production", .hwid = 3 },
+    { .name = "dvt",        .hwid = 3 },
+    { .name = "evt",        .hwid = 2 },
+    { .name = "hvt",        .hwid = 1 },
+    { .name = "proto",      .hwid = 0 },
+};
+
+static void prosecco_init_battery_eeprom(I2CBus *bus)
+{
+    /*
+     * The signed kernel accepts the public SWCS/1040 mAh pack profile.
+     * Its virtual serial has date 2026-01-01 and sequence 0000.  The
+     * 4480 mV rating and product 0056 satisfy the board compatibility
+     * checks; the writable records use the kernel/U-Boot defaults.
+     */
+    static const struct {
+        uint16_t offset;
+        const char *record;
+    } records[] = {
+        { 0x010, "PV200" },
+        { 0x020, "DI2QM" },
+        { 0x030, "S1CSWCS26101000" },
+        { 0x040, "S2800000056" },
+        { 0x050, "BC41040" },
+        { 0x060, "NV43850" },
+        { 0x070, "RV44480" },
+        { 0x080, "PH1Q" },
+        { 0x090, "PC40056" },
+        { 0x200, "FU10" },
+        { 0x210, "FR10" },
+        { 0x220, "CC10" },
+        { 0x230, "SH3100" },
+        { 0x240, "PE15" },
+        { 0x250, "PT3000" },
+        { 0x260, "PF10" },
+    };
+    g_autofree uint8_t *contents = g_malloc0(8 * KiB);
+
+    for (unsigned i = 0; i < ARRAY_SIZE(records); i++) {
+        uint8_t *record = contents + records[i].offset;
+        size_t len = strlen(records[i].record);
+        uint8_t crc = 0;
+
+        memcpy(record, records[i].record, len);
+        for (size_t j = 0; j < len; j++) {
+            crc ^= record[j];
+            for (unsigned bit = 0; bit < 8; bit++) {
+                crc = (crc << 1) ^ ((crc & 0x80) ? 0x07 : 0);
+            }
+        }
+        record[15] = crc;
+        memcpy(record + 0x400, record, 16);
+    }
+    at24c_eeprom_init_rom(bus, 0x50, 8 * KiB, contents, 8 * KiB);
+}
+
 static const BellatrixBoard bellatrix_boards[] = {
     {
         .name = "malbec",
@@ -148,6 +221,7 @@ static const BellatrixBoard bellatrix_boards[] = {
         .profiles = malbec_device_profiles,
         .num_profiles = ARRAY_SIZE(malbec_device_profiles),
         .hwid_pins = { 14, 15, 16, 17 },
+        .num_hwid_pins = 4,
         .touch_reset = 1, .touch_width = 1236, .touch_height = 1648,
         .power_good = 10,
     }, {
@@ -161,6 +235,7 @@ static const BellatrixBoard bellatrix_boards[] = {
         .profiles = bellatrix_device_profiles,
         .num_profiles = ARRAY_SIZE(bellatrix_device_profiles),
         .hwid_pins = { 14, 15, 16, 17 },
+        .num_hwid_pins = 4,
         .touch_reset = 1, .touch_width = 1072, .touch_height = 1448,
         .power_good = 10,
     }, {
@@ -174,6 +249,7 @@ static const BellatrixBoard bellatrix_boards[] = {
         .profiles = bellatrix_device_profiles,
         .num_profiles = ARRAY_SIZE(bellatrix_device_profiles),
         .hwid_pins = { 14, 15, 16, 17 },
+        .num_hwid_pins = 4,
         .touch_reset = 1, .touch_width = 1072, .touch_height = 1448,
         .power_good = 10,
     }, {
@@ -185,6 +261,7 @@ static const BellatrixBoard bellatrix_boards[] = {
         .profiles = barolo_device_profiles,
         .num_profiles = ARRAY_SIZE(barolo_device_profiles),
         .hwid_pins = { 113, 112, 114, 115 },
+        .num_hwid_pins = 4,
         .touch_reset = 20, .touch_width = 1860, .touch_height = 2480,
         .power_good = 37, .scribe = true,
     }, {
@@ -196,8 +273,26 @@ static const BellatrixBoard bellatrix_boards[] = {
         .profiles = pisco_device_profiles,
         .num_profiles = ARRAY_SIZE(pisco_device_profiles),
         .hwid_pins = { 113, 112, 114, 115 },
+        .num_hwid_pins = 4,
         .touch_reset = 20, .touch_width = 1860, .touch_height = 2480,
         .power_good = 37, .scribe = true,
+    }, {
+        .name = "prosecco",
+        .board_id = "PN44PB0200000000",
+        .serial = "GN456U0000000000",
+        .device_type = "A1BCDFP38HIEWE",
+        .product_name = "po8",
+        .ram_size = 1 * GiB,
+        .soc_type = TYPE_MT8110,
+        .manufacturing = "KT7QEMU0000000000 "
+                         "bsn_shipped=SWCS2610100000000056",
+        .profiles = prosecco_device_profiles,
+        .num_profiles = ARRAY_SIZE(prosecco_device_profiles),
+        .hwid_pins = { 113, 112, 114 },
+        .num_hwid_pins = 3,
+        .touch_reset = 20, .touch_width = 1072, .touch_height = 1448,
+        .power_good = 37,
+        .prosecco = true,
     },
 };
 
@@ -224,7 +319,7 @@ static const BellatrixBoard *bellatrix_find_board(const char *name)
     }
 
     error_report("invalid Bellatrix board '%s' "
-                 "(expected malbec, cava, rossini, barolo, or pisco)",
+                 "(expected malbec, cava, rossini, barolo, pisco, or prosecco)",
                  name);
     exit(EXIT_FAILURE);
 }
@@ -246,7 +341,7 @@ static void bellatrix_apply_identity(BellatrixMachineState *bms)
         g_strdup(board->board_id);
     bms->idme_serial = g_strdup(board->serial);
     bms->idme_mfg = g_strdup(board->manufacturing);
-    bms->idme_product_name = g_strdup("");
+    bms->idme_product_name = g_strdup(board->product_name ?: "");
     bms->idme_device_type = g_strdup(board->device_type);
     bms->idme_hwid = g_strdup_printf("%u", profile->hwid);
 }
@@ -254,10 +349,16 @@ static void bellatrix_apply_identity(BellatrixMachineState *bms)
 static void bellatrix_set_board_identity(BellatrixMachineState *bms,
                                           const char *name)
 {
-    bellatrix_find_board(name);
+    const BellatrixBoard *board = bellatrix_find_board(name);
+
     g_free(bms->board);
     bms->board = g_strdup(name);
     bellatrix_apply_identity(bms);
+    if (!bms->idme_bootmode_explicit) {
+        /* Stock KT7 recovery interprets bootmode1 as diagnostics. */
+        g_free(bms->idme_bootmode);
+        bms->idme_bootmode = g_strdup(board->prosecco ? "0" : "1");
+    }
 }
 
 static void bellatrix_set_device_profile_identity(
@@ -283,10 +384,15 @@ static void bellatrix_profile_reset(void *opaque)
     const BellatrixDeviceProfile *profile =
         bellatrix_find_device_profile(board, bms->device_profile);
 
-    for (size_t bit = 0; bit < ARRAY_SIZE(board->hwid_pins); bit++) {
+    for (size_t bit = 0; bit < board->num_hwid_pins; bit++) {
         qemu_set_irq(qdev_get_gpio_in_named(DEVICE(&bms->soc->gpio),
                                             "gpio-in", board->hwid_pins[bit]),
                      profile->hwid & BIT(bit));
+    }
+    if (board->prosecco) {
+        /* Stock touch job maps GPIO18 low to the fitted Parade controller. */
+        qemu_set_irq(qdev_get_gpio_in_named(DEVICE(&bms->soc->gpio),
+                                            "gpio-in", 18), 0);
     }
 }
 
@@ -500,9 +606,12 @@ static void bellatrix_attach_emmc(BellatrixMachineState *bms)
     BusState *bus = qdev_get_child_bus(DEVICE(&bms->soc->msdc0), "sd-bus");
     DeviceState *card = qdev_new(TYPE_EMMC);
 
-    qdev_prop_set_uint64(card, "boot-partition-size", 4 * MiB);
+    qdev_prop_set_uint64(card, "boot-partition-size",
+                         bellatrix_find_board(bms->board)->prosecco ?
+                         8 * MiB : 4 * MiB);
     qdev_prop_set_bit(card, "boot-partitions-in-memory", true);
-    qdev_prop_set_bit(card, "trim", bellatrix_find_board(bms->board)->scribe);
+    qdev_prop_set_bit(card, "trim", bellatrix_find_board(bms->board)->scribe ||
+                                    bellatrix_find_board(bms->board)->prosecco);
     qdev_prop_set_drive_err(card, "drive", blk, &error_fatal);
     qdev_realize(card, bus, &error_fatal);
 
@@ -532,12 +641,17 @@ static void bellatrix_usb_vbus(void *opaque, int line, int level)
 {
     BellatrixMachineState *bms = opaque;
 
+    bms->usb_vbus = !!level;
+
     /* Signed DT: GPIO31 is the active-low extcon VBUS detector. The same
      * cable supplies the fitted charger; guest extcon owns UDC activation. */
     qemu_set_irq(qdev_get_gpio_in_named(DEVICE(&bms->soc->gpio), "gpio-in", 31),
                  !level);
     if (bms->charger) {
         object_property_set_bool(bms->charger, "vbus", !!level, &error_abort);
+    }
+    if (bms->usb_detector_vbus) {
+        qemu_set_irq(bms->usb_detector_vbus, level);
     }
 }
 
@@ -546,10 +660,11 @@ static void bellatrix_init(MachineState *machine)
     BellatrixMachineState *bms = BELLATRIX_MACHINE(machine);
     const BellatrixBoard *board = bellatrix_find_board(bms->board);
     bool malbec = !strcmp(board->name, "malbec");
+    bool button_support = board->scribe || board->prosecco;
     MT8113State *soc;
-    I2CSlave *fp9930;
+    I2CSlave *fp9930 = NULL;
     I2CSlave *bd71828;
-    I2CSlave *gtx8;
+    I2CSlave *gtx8 = NULL;
 
     if (machine->ram_size > board->ram_size) {
         error_report("%s RAM exceeds its %" PRIu64 " MiB hardware "
@@ -562,7 +677,10 @@ static void bellatrix_init(MachineState *machine)
     object_property_add_child(OBJECT(machine), "soc", OBJECT(soc));
     object_property_set_uint(OBJECT(soc), "reset-vector",
                              BELLATRIX_HANDOFF_ADDR, &error_fatal);
-    if (malbec) {
+    if (board->prosecco) {
+        qdev_prop_set_uint32(DEVICE(soc), "iommu-irq", 75);
+    }
+    if (malbec || board->prosecco) {
         qdev_prop_set_uint32(DEVICE(&soc->hwtcon), "initial-width",
                              board->touch_width);
         qdev_prop_set_uint32(DEVICE(&soc->hwtcon), "initial-height",
@@ -583,7 +701,7 @@ static void bellatrix_init(MachineState *machine)
     bms->usb_vbus_input = qemu_allocate_irq(bellatrix_usb_vbus, bms, 0);
     qdev_connect_gpio_out_named(DEVICE(soc), "usb-vbus", 0,
                                 bms->usb_vbus_input);
-    if (board->scribe || malbec) {
+    if (board->scribe || malbec || board->prosecco) {
         DeviceState *adc = qdev_new(TYPE_MT6577_AUXADC);
         object_property_add_child(OBJECT(machine), "auxadc", OBJECT(adc));
         sysbus_realize_and_unref(SYS_BUS_DEVICE(adc), &error_fatal);
@@ -593,25 +711,62 @@ static void bellatrix_init(MachineState *machine)
         qemu_register_reset(bellatrix_firmware_reset, &soc->cpu[cpu]);
     }
 
-    fp9930 = i2c_slave_create_simple(soc->i2c[0].bus, TYPE_FP9935, 0x18);
-    i2c_slave_create_simple(soc->i2c[0].bus, TYPE_MAX20342, 0x35);
+    fp9930 = i2c_slave_new(TYPE_FP9935, 0x18);
+    if (board->prosecco) {
+        object_property_add_child(OBJECT(machine), "epd-pmic", OBJECT(fp9930));
+    }
+    i2c_slave_realize_and_unref(fp9930, soc->i2c[0].bus, &error_fatal);
+    if (board->prosecco) {
+        /* Shipped Prosecco frontlight and battery EEPROM. */
+        I2CSlave *amzn_light = i2c_slave_create_simple(soc->i2c[0].bus,
+                                                     TYPE_AW99703, 0x36);
+        qdev_connect_gpio_out_named(DEVICE(&soc->gpio), "gpio-out", 0,
+            qdev_get_gpio_in_named(DEVICE(amzn_light), "enable", 0));
+        prosecco_init_battery_eeprom(soc->i2c[0].bus);
+        i2c_slave_create_simple(soc->i2c[0].bus, TYPE_TMP103, 0x70);
+    }
+    I2CSlave *usb_detector = i2c_slave_create_simple(soc->i2c[0].bus,
+                                                   TYPE_MAX20342, 0x35);
+    if (board->prosecco) {
+        qdev_connect_gpio_out(DEVICE(usb_detector), 0,
+            qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in", 29));
+        bms->usb_detector_vbus = qdev_get_gpio_in_named(DEVICE(usb_detector),
+                                                       "vbus", 0);
+        qemu_set_irq(bms->usb_detector_vbus, bms->usb_vbus);
+    }
     bd71828 = i2c_slave_new(TYPE_BD71828, 0x4b);
-    if (board->scribe) {
+    if (button_support) {
         object_property_add_child(OBJECT(machine), "pmic", OBJECT(bd71828));
         qdev_prop_set_bit(DEVICE(bd71828), "power-button-support", true);
     }
     i2c_slave_realize_and_unref(bd71828, soc->i2c[1].bus, &error_fatal);
-    if (board->scribe) {
+    if (button_support) {
         bms->pmic = OBJECT(bd71828);
         bms->powerdown_notifier.notify = bellatrix_powerdown;
         qemu_register_powerdown_notifier(&bms->powerdown_notifier);
         bms->powerdown_registered = true;
     }
     i2c_slave_create_simple(soc->i2c[1].bus, TYPE_BD71828, 0x4d);
-    gtx8 = i2c_slave_new(TYPE_GOODIX_GTX8, 0x5d);
-    qdev_prop_set_uint32(DEVICE(gtx8), "width", board->touch_width);
-    qdev_prop_set_uint32(DEVICE(gtx8), "height", board->touch_height);
-    i2c_slave_realize_and_unref(gtx8, soc->i2c[2].bus, &error_fatal);
+    if (!board->prosecco) {
+        gtx8 = i2c_slave_new(TYPE_GOODIX_GTX8, 0x5d);
+        qdev_prop_set_uint32(DEVICE(gtx8), "width", board->touch_width);
+        qdev_prop_set_uint32(DEVICE(gtx8), "height", board->touch_height);
+        i2c_slave_realize_and_unref(gtx8, soc->i2c[2].bus, &error_fatal);
+    } else {
+        I2CSlave *touch = i2c_slave_new(TYPE_PARADE_TT5, 0x24);
+        object_property_add_child(OBJECT(machine), "touch", OBJECT(touch));
+        qdev_prop_set_string(DEVICE(touch), "firmware-image",
+                              bms->touch_firmware);
+        qdev_prop_set_uint8(DEVICE(touch), "panel-id", 0);
+        qdev_prop_set_uint16(DEVICE(touch), "resolution-x", board->touch_width);
+        qdev_prop_set_uint16(DEVICE(touch), "resolution-y", board->touch_height);
+        i2c_slave_realize_and_unref(touch, soc->i2c[2].bus, &error_fatal);
+        qdev_connect_gpio_out(DEVICE(touch), 0,
+            qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in", 26));
+        qdev_connect_gpio_out_named(DEVICE(&soc->gpio), "gpio-out",
+                                    board->touch_reset,
+            qdev_get_gpio_in_named(DEVICE(touch), "reset", 0));
+    }
 
     if (malbec) {
         /* mt8110-malbec.dts: two-channel frontlight, enabled by GPIO44. */
@@ -664,15 +819,30 @@ static void bellatrix_init(MachineState *machine)
     qdev_connect_gpio_out_named(DEVICE(bd71828), "gpio", 1,
         qdev_get_gpio_in_named(DEVICE(fp9930), "enable", 0));
     qdev_connect_gpio_out_named(DEVICE(fp9930), "power-good", 0,
-        qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in", board->power_good));
-    qemu_set_irq(qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in",
-                                      board->power_good),
-                 0);
-    qdev_connect_gpio_out_named(DEVICE(gtx8), "irq", 0,
         qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in",
-                              board->scribe ? 26 : 0));
-    qdev_connect_gpio_out_named(DEVICE(&soc->gpio), "gpio-out", board->touch_reset,
-        qdev_get_gpio_in_named(DEVICE(gtx8), "reset", 0));
+                              board->power_good));
+    qemu_set_irq(qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in",
+                                      board->power_good), 0);
+    if (board->prosecco) {
+        qdev_connect_gpio_out_named(DEVICE(bd71828), "irq", 0,
+            qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in", 62));
+        /*
+         * HWID0 also raises EN_TS while enabling the panel.  All phases
+         * toggle it for temperature reads; it must not gate EN or PG.
+         */
+        qemu_irq temperature_enable =
+            qdev_get_gpio_in_named(DEVICE(fp9930), "temperature-enable", 0);
+        qdev_connect_gpio_out_named(DEVICE(&soc->gpio), "gpio-out", 36,
+                                    temperature_enable);
+        qemu_set_irq(temperature_enable, 0);
+    } else {
+        qdev_connect_gpio_out_named(DEVICE(gtx8), "irq", 0,
+            qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in",
+                                  board->scribe ? 26 : 0));
+        qdev_connect_gpio_out_named(DEVICE(&soc->gpio), "gpio-out",
+                                    board->touch_reset,
+            qdev_get_gpio_in_named(DEVICE(gtx8), "reset", 0));
+    }
     bellatrix_profile_reset(bms);
 
     memory_region_add_subregion(get_system_memory(), MT8113_RAM_BASE,
@@ -707,6 +877,7 @@ static void bellatrix_set_string(char **field, const char *value)
 BELLATRIX_STRING_PROPERTY(bl2)
 BELLATRIX_STRING_PROPERTY(tee)
 BELLATRIX_STRING_PROPERTY(quickboot)
+BELLATRIX_STRING_PROPERTY(touch_firmware)
 BELLATRIX_STRING_PROPERTY(boot_stage)
 BELLATRIX_STRING_PROPERTY(idme_board_id)
 BELLATRIX_STRING_PROPERTY(idme_serial)
@@ -714,11 +885,24 @@ BELLATRIX_STRING_PROPERTY(idme_mac)
 BELLATRIX_STRING_PROPERTY(idme_mfg)
 BELLATRIX_STRING_PROPERTY(idme_product_name)
 BELLATRIX_STRING_PROPERTY(idme_device_type)
-BELLATRIX_STRING_PROPERTY(idme_bootmode)
 BELLATRIX_STRING_PROPERTY(idme_postmode)
 BELLATRIX_STRING_PROPERTY(idme_fos_flags)
 BELLATRIX_STRING_PROPERTY(idme_hwid)
 BELLATRIX_STRING_PROPERTY(idme_bcm_stress)
+
+static char *bellatrix_get_idme_bootmode(Object *obj, Error **errp)
+{
+    return bellatrix_get_string(&BELLATRIX_MACHINE(obj)->idme_bootmode);
+}
+
+static void bellatrix_set_idme_bootmode(Object *obj, const char *value,
+                                        Error **errp)
+{
+    BellatrixMachineState *bms = BELLATRIX_MACHINE(obj);
+
+    bellatrix_set_string(&bms->idme_bootmode, value);
+    bms->idme_bootmode_explicit = true;
+}
 
 static char *bellatrix_get_board(Object *obj, Error **errp)
 {
@@ -776,6 +960,7 @@ static void bellatrix_machine_instance_finalize(Object *obj)
     g_free(bms->bl2);
     g_free(bms->tee);
     g_free(bms->quickboot);
+    g_free(bms->touch_firmware);
     g_free(bms->boot_stage);
     g_free(bms->idme_board_id);
     g_free(bms->idme_serial);
@@ -817,6 +1002,7 @@ static void bellatrix_machine_class_init(ObjectClass *oc, const void *data)
     BELLATRIX_ADD_PROPERTY("bl2", bl2);
     BELLATRIX_ADD_PROPERTY("tee", tee);
     BELLATRIX_ADD_PROPERTY("quickboot", quickboot);
+    BELLATRIX_ADD_PROPERTY("touch-firmware", touch_firmware);
     BELLATRIX_ADD_PROPERTY("boot-stage", boot_stage);
     BELLATRIX_ADD_PROPERTY("idme-board-id", idme_board_id);
     BELLATRIX_ADD_PROPERTY("idme-serial", idme_serial);
