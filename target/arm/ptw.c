@@ -1149,6 +1149,9 @@ static bool get_phys_addr_v5(CPUARMState *env, S1Translate *ptw,
         goto do_fault;
     }
     result->f.phys_addr = phys_addr;
+    result->f.invalidation_group = domain +
+        (regime_el(ptw->in_mmu_idx) == 1 ? CPU_TLB_GROUP_DOMAIN_NS
+                                       : CPU_TLB_GROUP_DOMAIN_S);
     return false;
 do_fault:
     fi->domain = domain;
@@ -1174,6 +1177,7 @@ static bool get_phys_addr_v6(CPUARMState *env, S1Translate *ptw,
     hwaddr phys_addr;
     uint32_t dacr;
     bool ns;
+    bool non_global;
     ARMSecuritySpace out_space;
 
     /* Pagetable walk.  */
@@ -1232,6 +1236,7 @@ static bool get_phys_addr_v6(CPUARMState *env, S1Translate *ptw,
         xn = desc & (1 << 4);
         pxn = desc & 1;
         ns = extract32(desc, 19, 1);
+        non_global = extract32(desc, 17, 1);
     } else {
         if (cpu_isar_feature(aa32_pxn, cpu)) {
             pxn = (desc >> 2) & 1;
@@ -1246,6 +1251,7 @@ static bool get_phys_addr_v6(CPUARMState *env, S1Translate *ptw,
         if (fi->type != ARMFault_None) {
             goto do_fault;
         }
+        non_global = extract32(desc, 11, 1);
         ap = ((desc >> 4) & 3) | ((desc >> 7) & 4);
         switch (desc & 3) {
         case 0: /* Page translation fault.  */
@@ -1306,6 +1312,10 @@ static bool get_phys_addr_v6(CPUARMState *env, S1Translate *ptw,
     result->f.attrs.space = out_space;
     result->f.attrs.secure = arm_space_is_secure(out_space);
     result->f.phys_addr = phys_addr;
+    result->f.invalidation_group = domain +
+        (regime_el(mmu_idx) == 1 ? CPU_TLB_GROUP_DOMAIN_NS
+                               : CPU_TLB_GROUP_DOMAIN_S);
+    result->f.context_independent = !non_global;
     return false;
 do_fault:
     fi->domain = domain;
@@ -3662,8 +3672,14 @@ static bool get_phys_addr_nogpc(CPUARMState *env, S1Translate *ptw,
     case ARMMMUIdx_Phys_Root:
     case ARMMMUIdx_Phys_Realm:
         /* Checking Phys early avoids special casing later vs regime_el. */
-        return get_phys_addr_disabled(env, ptw, address, access_type,
-                                      result, fi);
+        if (get_phys_addr_disabled(env, ptw, address, access_type,
+                                   result, fi)) {
+            return true;
+        }
+        /* Physical page-table mappings do not depend on DACR domains. */
+        result->f.invalidation_group = CPU_TLB_GROUP_INDEPENDENT;
+        result->f.context_independent = true;
+        return false;
 
     case ARMMMUIdx_Stage1_E0:
     case ARMMMUIdx_Stage1_E1:

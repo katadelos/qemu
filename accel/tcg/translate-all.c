@@ -257,8 +257,12 @@ static int setjmp_gen_code(CPUArchState *env, TranslationBlock *tb,
     return tcg_gen_code(tcg_ctx, tb, pc);
 }
 
-/* Called with mmap_lock held for user mode emulation.  */
-TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
+/*
+ * Called with mmap_lock held for user mode emulation. Optional outputs
+ * describe the first instruction translation before code generation starts.
+ */
+TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s,
+                             uint8_t *group, uint64_t *group_generation)
 {
     CPUArchState *env = cpu_env(cpu);
     TranslationBlock *tb, *existing_tb;
@@ -271,7 +275,11 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
     assert_memory_lock();
     qemu_thread_jit_write();
 
-    phys_pc = get_page_addr_code_hostp(env, s.pc, &host_pc);
+    phys_pc = get_page_addr_code_hostp(env, s.pc, &host_pc, group);
+    if (group_generation) {
+        assert(group);
+        *group_generation = cpu->tb_jmp_cache->group_generation[*group];
+    }
 
     if (phys_pc == -1) {
         /* Generate a one-shot TB with 1 insn in it */
@@ -621,20 +629,106 @@ void cpu_io_recompile(CPUState *cpu, uintptr_t retaddr)
 
 #endif /* CONFIG_USER_ONLY */
 
-/*
- * Called by generic code at e.g. cpu reset after cpu creation,
- * therefore we must be prepared to allocate the jump cache.
- */
-void tcg_flush_jmp_cache(CPUState *cpu)
+static void tcg_jmp_cache_reset_generation(CPUState *cpu,
+                                           run_on_cpu_data unused)
 {
     CPUJumpCache *jc = cpu->tb_jmp_cache;
 
-    /* During early initialization, the cache may not yet be allocated. */
+    g_assert(qemu_cpu_is_self(cpu));
+    assert(qatomic_read(&jc->generation) == 0);
+    for (int i = 0; i < TB_JMP_CACHE_SIZE; i++) {
+        qatomic_set(&jc->array[i].tb, NULL);
+    }
+    qatomic_store_release(&jc->generation, 1);
+}
+
+/* Called by generic code at e.g. cpu reset, including before allocation. */
+void tcg_flush_jmp_cache(CPUState *cpu)
+{
+    CPUJumpCache *jc = cpu->tb_jmp_cache;
+    uint64_t generation;
+
     if (unlikely(jc == NULL)) {
         return;
     }
 
-    for (int i = 0; i < TB_JMP_CACHE_SIZE; i++) {
-        qatomic_set(&jc->array[i].tb, NULL);
+    generation = qatomic_read(&jc->generation);
+    while (generation) {
+        uint64_t next = generation + 1;
+        uint64_t old = qatomic_cmpxchg(&jc->generation, generation, next);
+
+        if (old == generation) {
+            if (unlikely(next == 0)) {
+                /*
+                 * Keep the cache disabled until its owning CPU has finished
+                 * any lookup/publication using an old epoch.  Clear pointers
+                 * there before reusing epoch 1, avoiding wraparound ABA.
+                 */
+                async_run_on_cpu(cpu, tcg_jmp_cache_reset_generation,
+                                 RUN_ON_CPU_NULL);
+            }
+            return;
+        }
+        generation = old;
     }
+}
+
+static void tcg_flush_jmp_cache_group_classes(CPUState *cpu, uint64_t groups,
+                                             bool context_independent)
+{
+    CPUJumpCache *jc = cpu->tb_jmp_cache;
+
+    if (unlikely(jc == NULL) || !groups) {
+        return;
+    }
+    g_assert(qemu_cpu_is_self(cpu));
+    assert(!(groups >> CPU_TLB_INVALIDATION_GROUPS));
+
+    if (unlikely(jc->group_flush_generation == UINT64_MAX)) {
+        goto reset_groups;
+    }
+    for (uint64_t bits = groups; bits; bits &= bits - 1) {
+        unsigned group = ctz64(bits);
+
+        if (unlikely(jc->group_generation[group] == UINT64_MAX ||
+                     (context_independent &&
+                      jc->group_generation[tb_jmp_cache_group(group, true)] ==
+                      UINT64_MAX))) {
+            goto reset_groups;
+        }
+    }
+
+    jc->group_flush_generation++;
+    for (; groups; groups &= groups - 1) {
+        unsigned group = ctz64(groups);
+
+        jc->group_generation[group]++;
+        if (context_independent) {
+            jc->group_generation[tb_jmp_cache_group(group, true)]++;
+        }
+    }
+    return;
+
+ reset_groups:
+    /* The full epoch prevents old group proofs from becoming valid again. */
+    tcg_flush_jmp_cache(cpu);
+    jc->group_flush_generation = 1;
+    for (unsigned i = 0; i < TB_JMP_CACHE_GROUPS; i++) {
+        jc->group_generation[i] = 1;
+    }
+}
+
+void tcg_flush_jmp_cache_by_groups(CPUState *cpu, uint64_t groups)
+{
+    if (groups) {
+        /* Unclassified and two-page code may depend on any selected group. */
+        tcg_flush_jmp_cache_group_classes(cpu,
+            groups | BIT_ULL(CPU_TLB_GROUP_UNKNOWN), true);
+    }
+}
+
+void tcg_flush_jmp_cache_context(CPUState *cpu)
+{
+    tcg_flush_jmp_cache_group_classes(cpu,
+        MAKE_64BIT_MASK(0, CPU_TLB_INVALIDATION_GROUPS), false);
 }

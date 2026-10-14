@@ -209,7 +209,17 @@ static CPUARMTBFlags rebuild_hflags_a32(CPUARMState *env, int fp_el,
         DP_TBFLAG_A32(flags, SME_TRAP_NONSTREAMING, 1);
     }
 
-    return rebuild_hflags_common_32(env, fp_el, mmu_idx, flags);
+    flags = rebuild_hflags_common_32(env, fp_el, mmu_idx, flags);
+#ifndef CONFIG_USER_ONLY
+    if (!arm_feature(env, ARM_FEATURE_PMSA)) {
+        ARMMMUIdx stage1_idx = stage_1_mmu_idx(mmu_idx);
+
+        if (!regime_using_lpae_format(env, stage1_idx)) {
+            DP_TBFLAG_A32(flags, DACR_ACTIVE, 1);
+        }
+    }
+#endif
+    return flags;
 }
 
 /*

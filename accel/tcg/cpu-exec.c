@@ -192,22 +192,84 @@ static bool tb_lookup_cmp(const void *p, const void *d)
     return false;
 }
 
-static TranslationBlock *tb_htable_lookup(CPUState *cpu, TCGTBCPUState s)
+typedef struct TBJumpCacheContext {
+    uint64_t generation;
+    uint64_t group_flush_generation;
+    uint64_t group_generation;
+    uint64_t unknown_generation;
+    uint8_t group;
+} TBJumpCacheContext;
+
+static inline TBJumpCacheContext tb_jmp_cache_context(CPUJumpCache *jc,
+                                                      uint64_t generation)
+{
+    return (TBJumpCacheContext) {
+        .generation = generation,
+        .group_flush_generation = jc->group_flush_generation,
+        .unknown_generation = jc->group_generation[CPU_TLB_GROUP_UNKNOWN],
+    };
+}
+
+static TranslationBlock *tb_htable_lookup(CPUState *cpu, TCGTBCPUState s,
+                                          TBJumpCacheContext *context)
 {
     tb_page_addr_t phys_pc;
     struct tb_desc desc;
+    void *discard;
     uint32_t h;
 
     desc.s = s;
     desc.env = cpu_env(cpu);
-    phys_pc = get_page_addr_code(desc.env, s.pc);
+    phys_pc = get_page_addr_code_hostp(desc.env, s.pc, &discard,
+                                      &context->group);
     if (phys_pc == -1) {
         return NULL;
     }
+    context->group_generation =
+        cpu->tb_jmp_cache->group_generation[context->group];
     desc.page_addr0 = phys_pc;
     h = tb_hash_func(phys_pc, (s.cflags & CF_PCREL ? 0 : s.pc),
                      s.flags, s.cs_base, s.cflags);
     return qht_lookup_custom(&tb_ctx.htable, &desc, h, tb_lookup_cmp);
+}
+
+static inline void tb_jmp_cache_publish(CPUJumpCache *jc, uint32_t hash,
+                                       TCGTBCPUState s, TranslationBlock *tb,
+                                       TBJumpCacheContext context)
+{
+    if (tb_page_addr1(tb) != -1) {
+        context.group = CPU_TLB_GROUP_UNKNOWN;
+        context.group_generation = context.unknown_generation;
+    }
+    assert(context.group < TB_JMP_CACHE_GROUPS);
+    /* Guard probing before its permission/context class is known. */
+    if (context.generation &&
+        context.generation == qatomic_read(&jc->generation) &&
+        context.group_flush_generation == jc->group_flush_generation &&
+        context.group_generation == jc->group_generation[context.group]) {
+        jc->array[hash].pc = s.pc;
+        jc->array[hash].generation = context.generation;
+        jc->array[hash].group = context.group;
+        jc->array[hash].group_generation = context.group_generation;
+        qatomic_set(&jc->array[hash].tb, tb);
+    }
+}
+
+/* Keep probing and publication outside the frequently inlined fast path. */
+static __attribute__((noinline)) TranslationBlock *
+tb_lookup_slow(CPUState *cpu, TCGTBCPUState s, uint32_t hash,
+               uint64_t generation)
+{
+    CPUJumpCache *jc = cpu->tb_jmp_cache;
+    TBJumpCacheContext context = tb_jmp_cache_context(jc, generation);
+    TranslationBlock *tb = tb_htable_lookup(cpu, s, &context);
+
+    if (tb) {
+        /* An intervening flush cannot promote this lookup into a new epoch. */
+        tb_jmp_cache_publish(jc, hash, s, tb, context);
+        assert((tb_cflags(tb) & CF_PCREL) || tb->pc == s.pc);
+    }
+    return tb;
 }
 
 /**
@@ -224,42 +286,34 @@ static TranslationBlock *tb_htable_lookup(CPUState *cpu, TCGTBCPUState s)
  *
  * Returns: an existing translation block or NULL.
  */
-static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s)
+static inline QEMU_ALWAYS_INLINE TranslationBlock *
+tb_lookup(CPUState *cpu, TCGTBCPUState s)
 {
     TranslationBlock *tb;
     CPUJumpCache *jc;
     uint32_t hash;
+    uint64_t generation;
 
     /* we should never be trying to look up an INVALID tb */
     tcg_debug_assert(!(s.cflags & CF_INVALID));
 
     hash = tb_jmp_cache_hash_func(s.pc);
     jc = cpu->tb_jmp_cache;
+    generation = qatomic_read(&jc->generation);
 
     tb = qatomic_read(&jc->array[hash].tb);
-    if (likely(tb &&
+    if (likely(generation && jc->array[hash].generation == generation && tb &&
+               jc->array[hash].group_generation ==
+               jc->group_generation[jc->array[hash].group] &&
                jc->array[hash].pc == s.pc &&
                tb->cs_base == s.cs_base &&
                tb->flags == s.flags &&
-               tb_cflags(tb) == s.cflags)) {
-        goto hit;
+               tb_cflags(tb) == s.cflags &&
+               generation == qatomic_read(&jc->generation))) {
+        assert((tb_cflags(tb) & CF_PCREL) || tb->pc == s.pc);
+        return tb;
     }
-
-    tb = tb_htable_lookup(cpu, s);
-    if (tb == NULL) {
-        return NULL;
-    }
-
-    jc->array[hash].pc = s.pc;
-    qatomic_set(&jc->array[hash].tb, tb);
-
-hit:
-    /*
-     * As long as tb is not NULL, the contents are consistent.  Therefore,
-     * the virtual PC has to match for non-CF_PCREL translations.
-     */
-    assert((tb_cflags(tb) & CF_PCREL) || tb->pc == s.pc);
-    return tb;
+    return tb_lookup_slow(cpu, s, hash, generation);
 }
 
 static void log_cpu_exec(vaddr pc, CPUState *cpu,
@@ -574,7 +628,7 @@ void cpu_exec_step_atomic(CPUState *cpu)
         tb = tb_lookup(cpu, s);
         if (tb == NULL) {
             mmap_lock();
-            tb = tb_gen_code(cpu, s);
+            tb = tb_gen_code(cpu, s, NULL, NULL);
             mmap_unlock();
         }
 
@@ -963,11 +1017,15 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
 
             tb = tb_lookup(cpu, s);
             if (tb == NULL) {
-                CPUJumpCache *jc;
+                CPUJumpCache *jc = cpu->tb_jmp_cache;
+                uint64_t generation = qatomic_read(&jc->generation);
+                TBJumpCacheContext context =
+                    tb_jmp_cache_context(jc, generation);
                 uint32_t h;
 
                 mmap_lock();
-                tb = tb_gen_code(cpu, s);
+                tb = tb_gen_code(cpu, s, &context.group,
+                                 &context.group_generation);
                 mmap_unlock();
 
                 /*
@@ -975,9 +1033,7 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
                  * for the fast lookup
                  */
                 h = tb_jmp_cache_hash_func(s.pc);
-                jc = cpu->tb_jmp_cache;
-                jc->array[h].pc = s.pc;
-                qatomic_set(&jc->array[h].tb, tb);
+                tb_jmp_cache_publish(jc, h, s, tb, context);
             }
 
 #ifndef CONFIG_USER_ONLY
@@ -1066,6 +1122,11 @@ bool tcg_exec_realizefn(CPUState *cpu, Error **errp)
     }
 
     cpu->tb_jmp_cache = g_new0(CPUJumpCache, 1);
+    cpu->tb_jmp_cache->generation = 1;
+    cpu->tb_jmp_cache->group_flush_generation = 1;
+    for (unsigned i = 0; i < TB_JMP_CACHE_GROUPS; i++) {
+        cpu->tb_jmp_cache->group_generation[i] = 1;
+    }
     tlb_init(cpu);
 #ifndef CONFIG_USER_ONLY
     tcg_iommu_init_notifier_list(cpu);

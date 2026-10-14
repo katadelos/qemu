@@ -903,6 +903,8 @@ typedef struct ARMCPRegInfo ARMCPRegInfo;
 typedef uint64_t CPReadFn(CPUARMState *env, const ARMCPRegInfo *ri);
 typedef void CPWriteFn(CPUARMState *env, const ARMCPRegInfo *ri,
                        uint64_t value);
+typedef bool CPWriteTBEndFn(CPUARMState *env, const ARMCPRegInfo *ri,
+                           uint64_t value);
 /* Access permission check functions for coprocessor registers. */
 typedef CPAccessResult CPAccessFn(CPUARMState *env,
                                   const ARMCPRegInfo *ri,
@@ -1025,6 +1027,13 @@ struct ARMCPRegInfo {
      * by fieldoffset.
      */
     CPWriteFn *writefn;
+    /*
+     * Optional equivalent write hook returning whether the TB must end.
+     * Returning false requires unchanged decode/hflags and preservation of
+     * every previously valid instruction fetch. Instrumented execution uses
+     * writefn and the normal unconditional TB boundary.
+     */
+    CPWriteTBEndFn *writefn_tb_end;
     /*
      * Function for doing a "raw" read; used when we need to copy
      * coprocessor state to the kernel for KVM or out for

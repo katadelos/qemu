@@ -60,7 +60,13 @@ static void tlbiasid_is_write(CPUARMState *env, const ARMCPRegInfo *ri,
 {
     CPUState *cs = env_cpu(env);
 
-    tlb_flush_all_cpus_synced(cs);
+    if (arm_uses_short_descriptor_tlb(env)) {
+        /* ASID invalidation excludes global translations. */
+        tlb_flush_by_mmuidx_context_all_cpus_synced(cs,
+            MAKE_64BIT_MASK(0, NB_MMU_MODES));
+    } else {
+        tlb_flush_all_cpus_synced(cs);
+    }
 }
 
 static void tlbimva_is_write(CPUARMState *env, const ARMCPRegInfo *ri,
@@ -122,10 +128,21 @@ static void tlbiasid_write(CPUARMState *env, const ARMCPRegInfo *ri,
     /* Invalidate by ASID (TLBIASID) */
     CPUState *cs = env_cpu(env);
 
-    if (tlb_force_broadcast(env)) {
-        tlb_flush_all_cpus_synced(cs);
+    if (arm_uses_short_descriptor_tlb(env)) {
+        /* Conservatively invalidate every ASID, preserving proven globals. */
+        if (tlb_force_broadcast(env)) {
+            tlb_flush_by_mmuidx_context_all_cpus_synced(cs,
+                MAKE_64BIT_MASK(0, NB_MMU_MODES));
+        } else {
+            tlb_flush_by_mmuidx_context(cs,
+                                      MAKE_64BIT_MASK(0, NB_MMU_MODES));
+        }
     } else {
-        tlb_flush(cs);
+        if (tlb_force_broadcast(env)) {
+            tlb_flush_all_cpus_synced(cs);
+        } else {
+            tlb_flush(cs);
+        }
     }
 }
 

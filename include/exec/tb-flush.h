@@ -35,4 +35,10 @@ void queue_tb_flush(CPUState *cs);
 
 void tcg_flush_jmp_cache(CPUState *cs);
 
+/* Owning-CPU invalidation; unclassified translations depend on every group. */
+void tcg_flush_jmp_cache_by_groups(CPUState *cs, uint64_t groups);
+
+/* Owning-CPU invalidation of context-dependent instruction translations. */
+void tcg_flush_jmp_cache_context(CPUState *cs);
+
 #endif /* _TB_FLUSH_H_ */

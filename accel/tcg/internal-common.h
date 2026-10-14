@@ -47,7 +47,8 @@ static inline bool cpu_plugin_mem_cbs_enabled(const CPUState *cpu)
 #endif
 }
 
-TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s);
+TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s,
+                             uint8_t *group, uint64_t *group_generation);
 void page_init(void);
 void tb_htable_init(void);
 void tb_reset_jump(TranslationBlock *tb, int n);
@@ -78,6 +79,7 @@ void tb_check_watchpoint(CPUState *cpu, uintptr_t retaddr);
  * get_page_addr_code_hostp()
  * @env: CPUArchState
  * @addr: guest virtual address of guest code
+ * @group: optional encoded jump-cache dependency group output
  *
  * See get_page_addr_code() (full-system version) for documentation on the
  * return value.
@@ -85,11 +87,13 @@ void tb_check_watchpoint(CPUState *cpu, uintptr_t retaddr);
  * Sets *@hostp as follows.
  * If the return value is -1, sets *@hostp to NULL. Otherwise, sets *@hostp
  * to the host address where @addr's content is kept.
+ * Sets *@group to the current instruction mapping's permission/context class,
+ * or CPU_TLB_GROUP_UNKNOWN if no entire RAM page can be executed.
  *
  * Note: this function can trigger an exception.
  */
 tb_page_addr_t get_page_addr_code_hostp(CPUArchState *env, vaddr addr,
-                                        void **hostp);
+                                        void **hostp, uint8_t *group);
 
 /**
  * get_page_addr_code()
@@ -106,7 +110,7 @@ static inline tb_page_addr_t get_page_addr_code(CPUArchState *env,
                                                 vaddr addr)
 {
     void *discard;
-    return get_page_addr_code_hostp(env, addr, &discard);
+    return get_page_addr_code_hostp(env, addr, &discard, NULL);
 }
 
 /*

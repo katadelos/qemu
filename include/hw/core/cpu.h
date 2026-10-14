@@ -212,6 +212,14 @@ typedef uint32_t MMUIdxMap;
 /* Use a fully associative victim tlb of 8 entries. */
 #define CPU_VTLB_SIZE 8
 
+/* Group zero contains entries without target-specific permission metadata. */
+#define CPU_TLB_INVALIDATION_GROUPS 34
+#define CPU_TLB_GROUP_UNKNOWN 0
+#define CPU_TLB_GROUP_DOMAIN_NS 1
+#define CPU_TLB_GROUP_DOMAIN_S 17
+/* Entries proven independent of grouped permission changes. */
+#define CPU_TLB_GROUP_INDEPENDENT 33
+
 /*
  * The full TLB entry, which is not accessed by generated TCG code,
  * so the layout is not as critical as that of CPUTLBEntry. This is
@@ -247,6 +255,12 @@ struct CPUTLBEntryFull {
 
     /* Additional tlb flags requested by tlb_fill. */
     uint8_t tlb_fill_flags;
+
+    /* Target-defined permission group, zero for unclassified translations. */
+    uint8_t invalidation_group;
+
+    /* Proven independent of the target's address-space identifier. */
+    bool context_independent;
 
     /*
      * Additional tlb flags for use by the slow path. If non-zero,
@@ -300,6 +314,10 @@ typedef struct CPUTLBDesc {
     CPUTLBEntry vtable[CPU_VTLB_SIZE];
     CPUTLBEntryFull vfulltlb[CPU_VTLB_SIZE];
     CPUTLBEntryFull *fulltlb;
+    /* Permission-group bitmaps followed by a context-dependent bitmap. */
+    unsigned long *invalidation_groups;
+    /* Conservative summary: set bits may describe an empty main group. */
+    uint64_t invalidation_groups_present;
 } CPUTLBDesc;
 
 /*

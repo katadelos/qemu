@@ -298,7 +298,8 @@ static bool translator_ld(CPUArchState *env, DisasContextBase *db,
     if (host == NULL) {
         tb_page_addr_t page0, old_page1, new_page1;
 
-        new_page1 = get_page_addr_code_hostp(env, base, &db->host_addr[1]);
+        new_page1 = get_page_addr_code_hostp(env, base,
+                                            &db->host_addr[1], NULL);
 
         /*
          * If the second page is MMIO, treat as if the first page

@@ -362,12 +362,68 @@ static CPAccessResult access_tacr(CPUARMState *env, const ARMCPRegInfo *ri,
     return CP_ACCESS_OK;
 }
 
-static void dacr_write(CPUARMState *env, const ARMCPRegInfo *ri, uint64_t value)
+static uint32_t dacr_reduced_domains(uint32_t old_dacr, uint32_t new_dacr)
+{
+    /*
+     * Each domain's low bit enables access; both bits select manager access.
+     * Losing access or manager status can reduce cached permissions.
+     */
+    uint32_t old_access = old_dacr & 0x55555555;
+    uint32_t new_access = new_dacr & 0x55555555;
+    uint32_t old_manager = old_access & (old_dacr >> 1);
+    uint32_t new_manager = new_access & (new_dacr >> 1);
+
+    return (old_access & ~new_access) | (old_manager & ~new_manager);
+}
+
+static bool dacr_write_tb_end(CPUARMState *env, const ARMCPRegInfo *ri,
+                              uint64_t value)
 {
     ARMCPU *cpu = env_archcpu(env);
+    uint64_t old_value = raw_read(env, ri);
+    bool pmsa = arm_feature(env, ARM_FEATURE_PMSA);
+    uint32_t reduced_domains;
+    bool need_exit;
 
+    if (old_value == value) {
+        return pmsa;
+    }
     raw_write(env, ri, value);
-    tlb_flush(CPU(cpu)); /* Flush TLB as domain not tracked in TLB */
+    /*
+     * Widening cannot invalidate successful cached accesses. Missing access
+     * permissions cause a refill under the new DACR. Narrowing invalidates
+     * affected domains in the written bank; untagged entries are unknown.
+     * PMSA uses this register for write-buffer control instead of domains,
+     * so retain its full flushes.
+     */
+    reduced_domains = dacr_reduced_domains(old_value, value);
+    need_exit = pmsa || reduced_domains;
+    if (need_exit) {
+        if (arm_uses_short_descriptor_tlb(env)) {
+            /* DACR32_EL2 aliases DACR_ns, never this secure field. */
+            unsigned base = ri->fieldoffset ==
+                offsetoflow32(CPUARMState, cp15.dacr_s)
+                ? CPU_TLB_GROUP_DOMAIN_S : CPU_TLB_GROUP_DOMAIN_NS;
+            uint64_t groups = BIT_ULL(CPU_TLB_GROUP_UNKNOWN);
+
+            for (uint32_t bits = reduced_domains; bits; bits &= bits - 1) {
+                groups |= BIT_ULL(base + ctz32(bits) / 2);
+            }
+
+            /* Invalidate the affected instruction translation dependencies. */
+            tlb_flush_by_mmuidx_groups(CPU(cpu),
+                                      MAKE_64BIT_MASK(0, NB_MMU_MODES),
+                                      groups);
+        } else {
+            tlb_flush(CPU(cpu));
+        }
+    }
+    return need_exit;
+}
+
+static void dacr_write(CPUARMState *env, const ARMCPRegInfo *ri, uint64_t value)
+{
+    dacr_write_tb_end(env, ri, value);
 }
 
 static void fcse_write(CPUARMState *env, const ARMCPRegInfo *ri, uint64_t value)
@@ -393,10 +449,16 @@ static void contextidr_write(CPUARMState *env, const ARMCPRegInfo *ri,
         && !extended_addresses_enabled(env)) {
         /*
          * For VMSA (when not using the LPAE long descriptor page table
-         * format) this register includes the ASID, so do a TLB flush.
+         * format) this register includes the ASID. Global translations
+         * and physical page-table mappings do not depend on that ASID.
          * For PMSA it is purely a process ID and no action is needed.
          */
-        tlb_flush(CPU(cpu));
+        if (arm_uses_short_descriptor_tlb(env)) {
+            tlb_flush_by_mmuidx_context(CPU(cpu),
+                                       MAKE_64BIT_MASK(0, NB_MMU_MODES));
+        } else {
+            tlb_flush(CPU(cpu));
+        }
     }
     raw_write(env, ri, value);
 }
@@ -499,6 +561,7 @@ static const ARMCPRegInfo not_v8_cp_reginfo[] = {
       .cp = 15, .opc1 = CP_ANY, .crn = 3, .crm = CP_ANY, .opc2 = CP_ANY,
       .access = PL1_RW, .accessfn = access_tvm_trvm, .resetvalue = 0,
       .writefn = dacr_write, .raw_writefn = raw_write,
+      .writefn_tb_end = dacr_write_tb_end,
       .bank_fieldoffsets = { offsetoflow32(CPUARMState, cp15.dacr_s),
                              offsetoflow32(CPUARMState, cp15.dacr_ns) } },
     /*
@@ -3762,6 +3825,7 @@ static const ARMCPRegInfo v8_cp_reginfo[] = {
     { .name = "DACR", .cp = 15, .opc1 = 0, .crn = 3, .crm = 0, .opc2 = 0,
       .access = PL1_RW, .accessfn = access_tvm_trvm, .resetvalue = 0,
       .writefn = dacr_write, .raw_writefn = raw_write,
+      .writefn_tb_end = dacr_write_tb_end,
       .bank_fieldoffsets = { offsetoflow32(CPUARMState, cp15.dacr_s),
                              offsetoflow32(CPUARMState, cp15.dacr_ns) } },
     { .name = "ELR_EL1", .state = ARM_CP_STATE_AA64,
@@ -3844,6 +3908,7 @@ static const ARMCPRegInfo v8_aa32_el1_reginfo[] = {
       .opc0 = 3, .opc1 = 4, .crn = 3, .crm = 0, .opc2 = 0,
       .access = PL2_RW, .resetvalue = 0, .type = ARM_CP_EL3_NO_EL2_KEEP,
       .writefn = dacr_write, .raw_writefn = raw_write,
+      .writefn_tb_end = dacr_write_tb_end,
       .fieldoffset = offsetof(CPUARMState, cp15.dacr32_el2) },
     { .name = "IFSR32_EL2", .state = ARM_CP_STATE_AA64,
       .opc0 = 3, .opc1 = 4, .crn = 5, .crm = 0, .opc2 = 1,

@@ -636,6 +636,13 @@ static inline bool extended_addresses_enabled(CPUARMState *env)
            (arm_feature(env, ARM_FEATURE_LPAE) && (tcr & TTBCR_EAE));
 }
 
+/* Cached eligibility of the current AArch32 short-descriptor regime. */
+static inline bool arm_uses_short_descriptor_tlb(CPUARMState *env)
+{
+    return !EX_TBFLAG_ANY(env->hflags, AARCH64_STATE) &&
+           EX_TBFLAG_A32(env->hflags, DACR_ACTIVE);
+}
+
 /* Update a QEMU watchpoint based on the information the guest has set in the
  * DBGWCR<n>_EL1 and DBGWVR<n>_EL1 registers.
  */

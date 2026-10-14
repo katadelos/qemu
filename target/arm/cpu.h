@@ -2441,7 +2441,7 @@ uint64_t arm_sctlr(CPUARMState *env, int el);
  *
  * The flags that are shared between all execution modes, TBFLAG_ANY, are stored
  * in flags. The flags that are specific to a given mode are stored in flags2.
- * flags2 always has 64-bits, even though only 32-bits are used for A32 and M32.
+ * flags2 always has 64-bits. A32 and M32 use only the low 32-bits.
  *
  * The bits for 32-bit A-profile and M-profile partially overlap:
  *
@@ -2493,6 +2493,7 @@ FIELD(TBFLAG_A32, NS, 10, 1)
  * This requires an SME trap from AArch32 mode when using NEON.
  */
 FIELD(TBFLAG_A32, SME_TRAP_NONSTREAMING, 11, 1)
+FIELD(TBFLAG_A32, DACR_ACTIVE, 12, 1)
 
 /*
  * Bit usage when in AArch32 state, for M-profile only.

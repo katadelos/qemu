@@ -815,13 +815,16 @@ void *tlb_vaddr_to_host(CPUArchState *env, vaddr addr,
 }
 
 tb_page_addr_t get_page_addr_code_hostp(CPUArchState *env, vaddr addr,
-                                        void **hostp)
+                                        void **hostp, uint8_t *group)
 {
     int flags;
 
     flags = probe_access_internal(env, addr, 1, MMU_INST_FETCH, false, 0);
     g_assert(flags == 0);
 
+    if (group) {
+        *group = CPU_TLB_GROUP_UNKNOWN;
+    }
     *hostp = g2h_untagged_vaddr(addr);
     return addr;
 }

@@ -1721,7 +1721,9 @@ static void do_coproc_insn(DisasContext *s, int cpnum, int is64,
     uint32_t key = ENCODE_CP_REG(cpnum, is64, s->ns, crn, crm, opc1, opc2);
     const ARMCPRegInfo *ri = get_arm_cp_reginfo(s->cp_regs, key);
     TCGv_ptr tcg_ri = NULL;
+    TCGv_i32 tb_end = NULL;
     bool need_exit_tb = false;
+    bool conditional_tb_end;
     uint32_t syndrome;
 
     /*
@@ -1877,6 +1879,13 @@ static void do_coproc_insn(DisasContext *s, int cpnum, int is64,
         need_exit_tb = translator_io_start(&s->base);
     }
 
+    /* Mid-TB exits must not skip instruction counting, stepping or IT state. */
+    conditional_tb_end = !isread && ri->writefn_tb_end &&
+        !arm_dc_feature(s, ARM_FEATURE_PMSA) &&
+        !s->thumb && !s->ss_active && !s->base.plugin_enabled &&
+        !(ri->type & (ARM_CP_IO | ARM_CP_SUPPRESS_TB_END)) &&
+        !(tb_cflags(s->base.tb) & (CF_USE_ICOUNT | CF_SINGLE_STEP));
+
     if (isread) {
         /* Read */
         if (is64) {
@@ -1939,7 +1948,13 @@ static void do_coproc_insn(DisasContext *s, int cpnum, int is64,
                 if (!tcg_ri) {
                     tcg_ri = gen_lookup_cp_reg(key);
                 }
-                gen_helper_set_cp_reg64(tcg_env, tcg_ri, tmp64);
+                if (conditional_tb_end) {
+                    tb_end = tcg_temp_new_i32();
+                    gen_helper_set_cp_reg_with_tb_end(tb_end, tcg_env,
+                                                      tcg_ri, tmp64);
+                } else {
+                    gen_helper_set_cp_reg64(tcg_env, tcg_ri, tmp64);
+                }
             } else {
                 tcg_gen_st_i64(tmp64, tcg_env, ri->fieldoffset);
             }
@@ -1949,11 +1964,32 @@ static void do_coproc_insn(DisasContext *s, int cpnum, int is64,
                 if (!tcg_ri) {
                     tcg_ri = gen_lookup_cp_reg(key);
                 }
-                gen_helper_set_cp_reg(tcg_env, tcg_ri, tmp);
+                if (conditional_tb_end) {
+                    TCGv_i64 tmp64 = tcg_temp_new_i64();
+
+                    tb_end = tcg_temp_new_i32();
+                    tcg_gen_extu_i32_i64(tmp64, tmp);
+                    gen_helper_set_cp_reg_with_tb_end(tb_end, tcg_env,
+                                                      tcg_ri, tmp64);
+                } else {
+                    gen_helper_set_cp_reg(tcg_env, tcg_ri, tmp);
+                }
             } else {
                 store_cpu_offset(tmp, ri->fieldoffset, 4);
             }
         }
+    }
+
+    if (conditional_tb_end) {
+        TCGLabel *cont = gen_new_label();
+
+        tcg_gen_brcondi_i32(TCG_COND_EQ, tb_end, 0, cont);
+        gen_rebuild_hflags(s, ri->type & ARM_CP_NEWEL);
+        /* Do not change pc_save on the continuing code path. */
+        gen_pc_plus_diff(s, cpu_R[15], curr_insn_len(s));
+        tcg_gen_exit_tb(NULL, 0);
+        gen_set_label(cont);
+        return;
     }
 
     if (!isread && !(ri->type & ARM_CP_SUPPRESS_TB_END)) {

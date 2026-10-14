@@ -131,6 +131,41 @@ void tlb_flush_page_all_cpus_synced(CPUState *src, vaddr addr);
 void tlb_flush(CPUState *cpu);
 
 /**
+ * tlb_flush_by_mmuidx_groups:
+ * @cpu: CPU whose TLB should be flushed
+ * @idxmap: MMU indices to inspect
+ * @groups: permission groups to invalidate, including group zero if unknown
+ *
+ * Invalidate matching main and victim TLB entries on the calling CPU, and
+ * invalidate jump-cache entries depending on those instruction groups even
+ * if their software-TLB entries have already been evicted.
+ */
+void tlb_flush_by_mmuidx_groups(CPUState *cpu, MMUIdxMap idxmap,
+                              uint64_t groups);
+
+/**
+ * tlb_flush_by_mmuidx_context:
+ * @cpu: CPU whose TLB should be flushed
+ * @idxmap: MMU indices to inspect
+ *
+ * Invalidate entries without a proven context-independent translation on the
+ * calling CPU. Instruction dependencies are invalidated even after their
+ * software-TLB entries have been evicted.
+ */
+void tlb_flush_by_mmuidx_context(CPUState *cpu, MMUIdxMap idxmap);
+
+/**
+ * tlb_flush_by_mmuidx_context_all_cpus_synced:
+ * @cpu: Originating CPU of the flush
+ * @idxmap: MMU indices to inspect
+ *
+ * Invalidate context-dependent translations on all CPUs, completing each
+ * owning CPU's instruction-cache invalidation before execution resumes.
+ */
+void tlb_flush_by_mmuidx_context_all_cpus_synced(CPUState *cpu,
+                                               MMUIdxMap idxmap);
+
+/**
  * tlb_flush_all_cpus_synced:
  * @cpu: src CPU of the flush
  *
@@ -238,6 +273,17 @@ static inline void tlb_flush_page_all_cpus_synced(CPUState *src, vaddr addr)
 {
 }
 static inline void tlb_flush(CPUState *cpu)
+{
+}
+static inline void tlb_flush_by_mmuidx_groups(
+    CPUState *cpu, MMUIdxMap idxmap, uint64_t groups)
+{
+}
+static inline void tlb_flush_by_mmuidx_context(CPUState *cpu, MMUIdxMap idxmap)
+{
+}
+static inline void tlb_flush_by_mmuidx_context_all_cpus_synced(
+    CPUState *cpu, MMUIdxMap idxmap)
 {
 }
 static inline void tlb_flush_all_cpus_synced(CPUState *src_cpu)

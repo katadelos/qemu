@@ -1121,6 +1121,22 @@ void HELPER(set_cp_reg64)(CPUARMState *env, const void *rip, uint64_t value)
     }
 }
 
+uint32_t HELPER(set_cp_reg_with_tb_end)(CPUARMState *env, const void *rip,
+                                       uint64_t value)
+{
+    const ARMCPRegInfo *ri = rip;
+    bool need_exit;
+
+    if (ri->type & ARM_CP_IO) {
+        bql_lock();
+        need_exit = ri->writefn_tb_end(env, ri, value);
+        bql_unlock();
+    } else {
+        need_exit = ri->writefn_tb_end(env, ri, value);
+    }
+    return need_exit;
+}
+
 uint64_t HELPER(get_cp_reg64)(CPUARMState *env, const void *rip)
 {
     const ARMCPRegInfo *ri = rip;

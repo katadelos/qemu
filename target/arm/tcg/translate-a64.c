@@ -2769,7 +2769,9 @@ static void handle_sys(DisasContext *s, bool isread,
     bool nv_redirect_reg = false;
     bool skip_fp_access_checks = false;
     bool nv2_mem_redirect = false;
+    bool conditional_tb_end;
     TCGv_ptr tcg_ri = NULL;
+    TCGv_i32 tb_end = NULL;
     TCGv_i64 tcg_rt;
     uint32_t syndrome = syn_aa64_sysregtrap(op0, op1, op2, crn, crm, rt, isread);
 
@@ -3098,6 +3100,13 @@ static void handle_sys(DisasContext *s, bool isread,
         need_exit_tb = translator_io_start(&s->base);
     }
 
+    /* Keep the normal boundary for counting, stepping and plugin callbacks. */
+    conditional_tb_end = !isread && ri->writefn_tb_end &&
+        !arm_dc_feature(s, ARM_FEATURE_PMSA) &&
+        !s->ss_active && !s->base.plugin_enabled &&
+        !(ri->type & (ARM_CP_IO | ARM_CP_SUPPRESS_TB_END)) &&
+        !(tb_cflags(s->base.tb) & (CF_USE_ICOUNT | CF_SINGLE_STEP));
+
     tcg_rt = cpu_reg(s, rt);
 
     if (isread) {
@@ -3119,10 +3128,32 @@ static void handle_sys(DisasContext *s, bool isread,
             if (!tcg_ri) {
                 tcg_ri = gen_lookup_cp_reg(key);
             }
-            gen_helper_set_cp_reg64(tcg_env, tcg_ri, tcg_rt);
+            if (conditional_tb_end) {
+                tb_end = tcg_temp_new_i32();
+                gen_helper_set_cp_reg_with_tb_end(tb_end, tcg_env,
+                                                  tcg_ri, tcg_rt);
+            } else {
+                gen_helper_set_cp_reg64(tcg_env, tcg_ri, tcg_rt);
+            }
         } else {
             tcg_gen_st_i64(tcg_rt, tcg_env, ri->fieldoffset);
         }
+    }
+
+    if (conditional_tb_end) {
+        TCGLabel *cont = gen_new_label();
+
+        tcg_gen_brcondi_i32(TCG_COND_EQ, tb_end, 0, cont);
+        /* The ordinary post-instruction BTYPE reset is skipped by this exit. */
+        if (s->btype != 0) {
+            set_btype_raw(0);
+        }
+        gen_rebuild_hflags(s);
+        /* Do not change pc_save on the continuing code path. */
+        gen_pc_plus_diff(s, cpu_pc, 4);
+        tcg_gen_exit_tb(NULL, 0);
+        gen_set_label(cont);
+        return;
     }
 
     if (!isread && !(ri->type & ARM_CP_SUPPRESS_TB_END)) {
