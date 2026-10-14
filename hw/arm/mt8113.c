@@ -3354,6 +3354,12 @@ static void mt8113_realize(DeviceState *dev, Error **errp)
         MT8113_I2C0_IRQ, MT8113_I2C1_IRQ, MT8113_I2C2_IRQ,
     };
 
+    if (s->iommu_irq >= MT8113_NUM_SPIS) {
+        error_setg(errp, "MT8113 IOMMU interrupt %u exceeds the SPI range",
+                    s->iommu_irq);
+        return;
+    }
+
     for (int cpu = 0; cpu < MT8113_NUM_CPUS; cpu++) {
         Object *cpuobj = OBJECT(&s->cpu[cpu]);
 
@@ -3398,6 +3404,9 @@ static void mt8113_realize(DeviceState *dev, Error **errp)
     serial_mm_init(get_system_memory(), MT8113_UART0_ADDR, 2,
                    qdev_get_gpio_in(gicdev, MT8113_UART0_IRQ), 921600,
                    serial_hd(0), DEVICE_LITTLE_ENDIAN);
+    serial_mm_init(get_system_memory(), MT8113_UART1_ADDR, 2,
+                   qdev_get_gpio_in(gicdev, MT8113_UART1_IRQ), 921600,
+                   serial_hd(1), DEVICE_LITTLE_ENDIAN);
 
     memory_region_init_io(&s->topckgen_iomem, OBJECT(s),
                           &mt8113_topckgen_ops, s,
@@ -3609,7 +3618,7 @@ static void mt8113_realize(DeviceState *dev, Error **errp)
     }
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->iommu), 0, MT8113_IOMMU_ADDR);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->iommu), 0,
-                       qdev_get_gpio_in(gicdev, MT8113_IOMMU_IRQ));
+                       qdev_get_gpio_in(gicdev, s->iommu_irq));
 
     object_property_set_link(OBJECT(&s->hwtcon), "iommu",
                              OBJECT(&s->iommu), &error_abort);
@@ -3659,6 +3668,7 @@ static void mt8113_unrealize(DeviceState *dev)
 
 static const Property mt8113_properties[] = {
     DEFINE_PROP_UINT64("reset-vector", MT8113State, reset_vector, 0),
+    DEFINE_PROP_UINT32("iommu-irq", MT8113State, iommu_irq, MT8113_IOMMU_IRQ),
     DEFINE_NIC_PROPERTIES(MT8113State, usb.nic_conf),
     DEFINE_PROP_NETDEV("wifi-netdev", MT8113State, wifi_conf.peers),
     DEFINE_PROP_MACADDR("wifi-mac", MT8113State, wifi_conf.macaddr),

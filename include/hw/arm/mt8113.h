@@ -32,6 +32,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(MT8113State, MT8113)
 #define MT8113_SRAM_BASE         0x00100000
 #define MT8113_SRAM_SIZE         (1 * MiB)
 #define MT8113_UART0_ADDR        0x11002000
+#define MT8113_UART1_ADDR        0x11003000
 #define MT8113_TOPCKGEN_ADDR     0x10000000
 #define MT8113_INFRASYS_ADDR     0x10001000
 #define MT8113_SCPSYS_ADDR       0x10006000
@@ -73,6 +74,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(MT8113State, MT8113)
 
 #define MT8113_NUM_SPIS          224
 #define MT8113_UART0_IRQ         24
+#define MT8113_UART1_IRQ         25
 #define MT8113_I2C0_IRQ          23
 #define MT8113_I2C1_IRQ          127
 #define MT8113_I2C2_IRQ          117
@@ -141,6 +143,7 @@ struct MT8113State {
     MTKMSDCState msdc0;
     MT8113GCEState gce;
     MT8113IOMMUState iommu;
+    uint32_t iommu_irq;
     MT8113HWTCONState hwtcon;
     MemoryRegion sram;
     MemoryRegion topckgen_iomem;
