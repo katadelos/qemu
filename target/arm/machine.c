@@ -364,7 +364,7 @@ static bool wfxt_timer_needed(void *opaque)
 {
     ARMCPU *cpu = opaque;
 
-    /* We'll only have the timer object if FEAT_WFxT is implemented */
+    /* TCG uses this timer for WFxT timeouts or Generic Timer event streams. */
     return cpu->wfxt_timer;
 }
 
@@ -514,7 +514,7 @@ static bool event_needed(void *opaque)
 {
     ARMCPU *cpu = opaque;
 
-    return cpu->env.event_register;
+    return qatomic_read(&cpu->env.event_register);
 }
 
 static const VMStateDescription vmstate_event = {
@@ -524,6 +524,28 @@ static const VMStateDescription vmstate_event = {
     .needed = event_needed,
     .fields = (const VMStateField[]) {
         VMSTATE_BOOL(env.event_register, ARMCPU),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static bool wfe_needed(void *opaque)
+{
+    ARMCPU *cpu = opaque;
+
+    return qatomic_read(&cpu->env.wfe_waiting) ||
+           cpu->env.event_stream_valid[0] ||
+           cpu->env.event_stream_valid[1];
+}
+
+static const VMStateDescription vmstate_wfe = {
+    .name = "cpu/wfe",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = wfe_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(env.wfe_waiting, ARMCPU),
+        VMSTATE_BOOL_ARRAY(env.event_stream_valid, ARMCPU, 2),
+        VMSTATE_UINT64_ARRAY(env.event_stream_next, ARMCPU, 2),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -1310,6 +1332,7 @@ const VMStateDescription vmstate_arm_cpu = {
         &vmstate_syndrome64,
         &vmstate_pstate64,
         &vmstate_event,
+        &vmstate_wfe,
         NULL
     }
 };

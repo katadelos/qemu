@@ -1904,6 +1904,8 @@ int delete_hw_watchpoint(vaddr addr, vaddr len, int type);
 
 /* Return the current value of the system counter in ticks */
 uint64_t gt_get_countervalue(CPUARMState *env);
+/* Latch elapsed timer events and return the next stream edge in virtual ns. */
+int64_t arm_gt_event_stream_update(CPUARMState *env);
 /*
  * Return the currently applicable offset between the system counter
  * and the counter for the specified timer, as used for direct register

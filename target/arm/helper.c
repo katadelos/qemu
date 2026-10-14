@@ -833,7 +833,13 @@ static void scr_write(CPUARMState *env, const ARMCPRegInfo *ri, uint64_t value)
     /* Clear all-context RES0 bits.  */
     value &= valid_mask;
     changed = env->cp15.scr_el3 ^ value;
+#ifndef CONFIG_USER_ONLY
+    arm_gt_event_stream_update(env);
+#endif
     env->cp15.scr_el3 = value;
+#ifndef CONFIG_USER_ONLY
+    arm_gt_event_stream_update(env);
+#endif
 
     /*
      * If SCR_EL3.{NS,NSE} changes, i.e. change of security state,
@@ -1483,6 +1489,82 @@ uint64_t gt_direct_access_timer_offset(CPUARMState *env, int timeridx)
     }
 }
 
+int64_t arm_gt_event_stream_update(CPUARMState *env)
+{
+    ARMCPU *cpu = env_archcpu(env);
+    uint64_t now, next = UINT64_MAX;
+    uint64_t controls[2], offsets[2];
+    bool enabled[2];
+    unsigned int scale;
+
+    if (!arm_feature(env, ARM_FEATURE_GENERIC_TIMER)) {
+        return -1;
+    }
+
+    controls[0] = env->cp15.c14_cntkctl;
+    controls[1] = env->cp15.cnthctl_el2;
+    if (!((controls[0] | controls[1]) & R_CNTHCTL_EVNTEN_MASK)) {
+        env->event_stream_valid[0] = false;
+        env->event_stream_valid[1] = false;
+        return -1;
+    }
+    now = gt_get_countervalue(env);
+    scale = gt_cntfrq_period_ns(cpu);
+    /* Streams use counter sources, independently of the reading EL. */
+    offsets[0] = env->cp15.cntvoff_el2;
+    offsets[1] = 0;
+    enabled[0] = (arm_hcr_el2_eff(env) & (HCR_E2H | HCR_TGE)) !=
+                 (HCR_E2H | HCR_TGE);
+    enabled[1] = arm_is_el2_enabled(env);
+
+    for (int i = 0; i < 2; i++) {
+        uint64_t control = controls[i];
+        unsigned int bit = FIELD_EX64(control, CNTHCTL, EVNTI);
+        uint64_t period, phase, delta, edge;
+
+        if (!enabled[i] || !FIELD_EX64(control, CNTHCTL, EVNTEN)) {
+            env->event_stream_valid[i] = false;
+            continue;
+        }
+        if (cpu_isar_feature(aa64_ecv_traps, cpu) &&
+            FIELD_EX64(control, CNTHCTL, EVNTIS)) {
+            bit += 8;
+        }
+
+        /* Observe running-time events lazily, retaining the one-bit latch. */
+        if (env->event_stream_valid[i] &&
+            now >= env->event_stream_next[i]) {
+            qatomic_set(&env->event_register, true);
+        }
+
+        period = 1ULL << (bit + 1);
+        phase = FIELD_EX64(control, CNTHCTL, EVNTDIR) ? 0 : 1ULL << bit;
+        delta = (phase - (now - offsets[i])) & (period - 1);
+        if (!delta) {
+            delta = period;
+        }
+        if (uadd64_overflow(now, delta, &edge)) {
+            edge = UINT64_MAX;
+        }
+        env->event_stream_next[i] = edge;
+        env->event_stream_valid[i] = true;
+        next = MIN(next, edge);
+    }
+
+    if (!env->event_stream_valid[0] && !env->event_stream_valid[1]) {
+        return -1;
+    }
+    return next > INT64_MAX / scale ? INT64_MAX : next * scale;
+}
+
+static void gt_cntkctl_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                            uint64_t value)
+{
+    arm_gt_event_stream_update(env);
+    raw_write(env, ri, value);
+    arm_gt_event_stream_update(env);
+}
+
 static void gt_recalc_timer(ARMCPU *cpu, int timeridx)
 {
     ARMGenericTimer *gt = &cpu->env.cp15.c14_timer[timeridx];
@@ -1792,7 +1874,9 @@ static void gt_cnthctl_write(CPUARMState *env, const ARMCPRegInfo *ri,
     /* Clear RES0 bits */
     value &= valid_mask;
 
+    arm_gt_event_stream_update(env);
     raw_write(env, ri, value);
+    arm_gt_event_stream_update(env);
 
     if ((oldval ^ value) & R_CNTHCTL_CNTVMASK_MASK) {
         gt_update_irq(cpu, GTIMER_VIRT);
@@ -1807,7 +1891,9 @@ static void gt_cntvoff_write(CPUARMState *env, const ARMCPRegInfo *ri,
     ARMCPU *cpu = env_archcpu(env);
 
     trace_arm_gt_cntvoff_write(value);
+    arm_gt_event_stream_update(env);
     raw_write(env, ri, value);
+    arm_gt_event_stream_update(env);
     gt_recalc_timer(cpu, GTIMER_VIRT);
 }
 
@@ -2065,6 +2151,8 @@ static const ARMCPRegInfo generic_timer_cp_reginfo[] = {
       .access = PL1_RW,
       .vhe_redir_to_el2 = ENCODE_AA64_CP_REG(3, 4, 14, 1, 0),
       .vhe_redir_to_el01 = ENCODE_AA64_CP_REG(3, 5, 14, 1, 0),
+      .type = ARM_CP_IO,
+      .writefn = gt_cntkctl_write, .raw_writefn = raw_write,
       .fieldoffset = offsetof(CPUARMState, cp15.c14_cntkctl),
       .resetvalue = 0,
     },
@@ -3857,7 +3945,13 @@ static void do_hcr_write(CPUARMState *env, uint64_t value, uint64_t valid_mask)
         (HCR_VM | HCR_PTW | HCR_DC | HCR_DCT | HCR_FWB | HCR_NV | HCR_NV1)) {
         tlb_flush(CPU(cpu));
     }
+#ifndef CONFIG_USER_ONLY
+    arm_gt_event_stream_update(env);
+#endif
     env->cp15.hcr_el2 = value;
+#ifndef CONFIG_USER_ONLY
+    arm_gt_event_stream_update(env);
+#endif
 
     /*
      * Updates to VI and VF require us to update the status of

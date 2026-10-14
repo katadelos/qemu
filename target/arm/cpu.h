@@ -770,9 +770,12 @@ typedef struct CPUArchState {
     /*
      * The event register is shared by all ARM profiles (A/R/M),
      * so it is stored in the top-level CPU state.
-     * WFE/SEV handling is currently implemented only for M-profile.
      */
     bool event_register;
+    bool wfe_waiting;
+    /* K (virtual) and H (physical) stream deadlines in system-counter ticks. */
+    bool event_stream_valid[2];
+    uint64_t event_stream_next[2];
 
     /* Fields up to this point are cleared by a CPU reset */
     struct {} end_reset_fields;
@@ -967,7 +970,7 @@ struct ArchCPU {
      * pmu_op_finish() - it does not need other handling during migration
      */
     QEMUTimer *pmu_timer;
-    /* Timer used for WFxT timeouts */
+    /* Timer used for WFxT timeouts and sleeping WFE event streams */
     QEMUTimer *wfxt_timer;
 
     /* GPIO outputs for generic timer */

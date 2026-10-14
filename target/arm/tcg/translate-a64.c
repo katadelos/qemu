@@ -2015,10 +2015,7 @@ static bool trans_NOP(DisasContext *s, arg_NOP *a)
 static bool trans_YIELD(DisasContext *s, arg_YIELD *a)
 {
     /*
-     * When running in MTTCG we don't generate jumps to the yield and
-     * WFE helpers as it won't affect the scheduling of other vCPUs.
-     * If we wanted to more completely model WFE/SEV so we don't busy
-     * spin unnecessarily we would need to do something more involved.
+     * In MTTCG, yielding to the main loop does not schedule other vCPUs.
      */
     if (!(tb_cflags(s->base.tb) & CF_PARALLEL)) {
         s->base.is_jmp = DISAS_YIELD;
@@ -2034,15 +2031,23 @@ static bool trans_WFI(DisasContext *s, arg_WFI *a)
 
 static bool trans_WFE(DisasContext *s, arg_WFI *a)
 {
-    /*
-     * When running in MTTCG we don't generate jumps to the yield and
-     * WFE helpers as it won't affect the scheduling of other vCPUs.
-     * If we wanted to more completely model WFE/SEV so we don't busy
-     * spin unnecessarily we would need to do something more involved.
-     */
-    if (!(tb_cflags(s->base.tb) & CF_PARALLEL)) {
-        s->base.is_jmp = DISAS_WFE;
-    }
+    s->base.is_jmp = DISAS_WFE;
+    return true;
+}
+
+static bool trans_SEV(DisasContext *s, arg_SEV *a)
+{
+#ifndef CONFIG_USER_ONLY
+    gen_helper_sev(tcg_env);
+#endif
+    return true;
+}
+
+static bool trans_SEVL(DisasContext *s, arg_SEVL *a)
+{
+#ifndef CONFIG_USER_ONLY
+    gen_helper_sevl(tcg_env);
+#endif
     return true;
 }
 
@@ -2076,14 +2081,7 @@ static bool trans_WFET(DisasContext *s, arg_WFET *a)
         return false;
     }
 
-    /*
-     * We rely here on our WFE implementation being a NOP, so we
-     * don't need to do anything different to handle the WFET timeout
-     * from what trans_WFE does.
-     */
-    if (!(tb_cflags(s->base.tb) & CF_PARALLEL)) {
-        s->base.is_jmp = DISAS_WFE;
-    }
+    /* WFET may complete immediately, without entering a timed wait. */
     return true;
 }
 
@@ -10916,7 +10914,8 @@ static void aarch64_tr_tb_stop(DisasContextBase *dcbase, CPUState *cpu)
             break;
         case DISAS_WFE:
             gen_a64_update_pc(dc, 4);
-            gen_helper_wfe(tcg_env);
+            gen_helper_wfe(tcg_env, tcg_constant_i32(4));
+            tcg_gen_exit_tb(NULL, 0);
             break;
         case DISAS_YIELD:
             gen_a64_update_pc(dc, 4);

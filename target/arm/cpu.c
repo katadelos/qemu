@@ -145,14 +145,17 @@ static bool arm_cpu_has_work(CPUState *cs)
 {
     ARMCPU *cpu = ARM_CPU(cs);
 
-    if (arm_feature(&cpu->env, ARM_FEATURE_M)) {
-        if (cpu->env.event_register) {
+    if (cpu->power_state == PSCI_OFF) {
+        return false;
+    }
+    if (arm_feature(&cpu->env, ARM_FEATURE_M) ||
+        qatomic_read(&cpu->env.wfe_waiting)) {
+        if (qatomic_read(&cpu->env.event_register)) {
             return true;
         }
     }
 
-    return (cpu->power_state != PSCI_OFF)
-        && cpu_test_interrupt(cs,
+    return cpu_test_interrupt(cs,
                CPU_INTERRUPT_FIQ | CPU_INTERRUPT_HARD
                | CPU_INTERRUPT_NMI | CPU_INTERRUPT_VINMI | CPU_INTERRUPT_VFNMI
                | CPU_INTERRUPT_VFIQ | CPU_INTERRUPT_VIRQ | CPU_INTERRUPT_VSERR
@@ -241,7 +244,18 @@ static void arm_cpu_reset_hold(Object *obj, ResetType type)
         acc->parent_phases.hold(obj, type);
     }
 
-    memset(env, 0, offsetof(CPUARMState, end_reset_fields));
+    /* SEV can publish ER without BQL while this CPU is being reset. */
+    memset(env, 0, offsetof(CPUARMState, event_register));
+    qatomic_set(&env->wfe_waiting, false);
+    qatomic_set(&env->event_register, false);
+    memset(env->event_stream_valid, 0,
+           offsetof(CPUARMState, end_reset_fields) -
+           offsetof(CPUARMState, event_stream_valid));
+#ifndef CONFIG_USER_ONLY
+    if (cpu->wfxt_timer) {
+        timer_del(cpu->wfxt_timer);
+    }
+#endif
 
     g_hash_table_foreach(cpu->cp_regs, cp_reg_reset, cpu);
     g_hash_table_foreach(cpu->cp_regs, cp_reg_check_reset, cpu);
@@ -840,9 +854,13 @@ bool arm_cpu_exec_halt(CPUState *cs)
             }
             bql_unlock();
         }
+        bql_lock();
         if (cpu->wfxt_timer) {
             timer_del(cpu->wfxt_timer);
         }
+        /* Only execution of WFE consumes the event register. */
+        qatomic_set(&cpu->env.wfe_waiting, false);
+        bql_unlock();
     }
     return leave_halt;
 }
@@ -853,6 +871,17 @@ static void arm_wfxt_timer_cb(void *opaque)
     ARMCPU *cpu = opaque;
     CPUState *cs = CPU(cpu);
 
+    if (qatomic_read(&cpu->env.wfe_waiting)) {
+        int64_t next = arm_gt_event_stream_update(&cpu->env);
+
+        if (qatomic_read(&cpu->env.event_register)) {
+            qemu_cpu_kick(cs);
+        } else if (next >= 0) {
+            timer_mod_ns(cpu->wfxt_timer, next);
+        }
+        return;
+    }
+
     /*
      * We expect the CPU to be halted; this will cause arm_cpu_is_work()
      * to return true (so we will come out of halt even with no other
@@ -860,6 +889,11 @@ static void arm_wfxt_timer_cb(void *opaque)
      * function auto-clears the CPU_INTERRUPT_EXITTB flag for us.
      */
     cpu_interrupt(cs, CPU_INTERRUPT_EXITTB);
+}
+
+static void arm_gt_event_stream_el_change(ARMCPU *cpu, void *opaque)
+{
+    arm_gt_event_stream_update(&cpu->env);
 }
 #endif
 
@@ -2118,9 +2152,16 @@ static void arm_cpu_realizefn(DeviceState *dev, Error **errp)
     }
 
 #ifndef CONFIG_USER_ONLY
-    if (tcg_enabled() && cpu_isar_feature(aa64_wfxt, cpu)) {
+    if (tcg_enabled() && (cpu_isar_feature(aa64_wfxt, cpu) ||
+                         arm_feature(env, ARM_FEATURE_GENERIC_TIMER))) {
         cpu->wfxt_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                        arm_wfxt_timer_cb, cpu);
+    }
+    if (tcg_enabled() && arm_feature(env, ARM_FEATURE_GENERIC_TIMER)) {
+        /* Preserve elapsed old-state events, then prime the new regime. */
+        arm_register_pre_el_change_hook(cpu, arm_gt_event_stream_el_change,
+                                       NULL);
+        arm_register_el_change_hook(cpu, arm_gt_event_stream_el_change, NULL);
     }
 #endif
 

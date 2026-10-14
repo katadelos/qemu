@@ -471,19 +471,56 @@ void HELPER(wfit)(CPUARMState *env, uint64_t timeout)
 
 void HELPER(sev)(CPUARMState *env)
 {
+#ifndef CONFIG_USER_ONLY
     CPUState *cs = env_cpu(env);
+    bool locked = false;
+
+    /* cpu_exec's RCU guard protects the list and target CPU lifetimes. */
     CPU_FOREACH(cs) {
         ARMCPU *target_cpu = ARM_CPU(cs);
+
         if (arm_feature(&target_cpu->env, ARM_FEATURE_M)) {
-            target_cpu->env.event_register = true;
+            /* M-profile also permits ER to wake WFI; retain its locked path. */
+            if (!locked) {
+                bql_lock();
+                locked = true;
+            }
+            qatomic_set(&target_cpu->env.event_register, true);
+            if (!qemu_cpu_is_self(cs)) {
+                qemu_cpu_kick(cs);
+            }
+            continue;
         }
-        if (!qemu_cpu_is_self(cs)) {
-            qemu_cpu_kick(cs);
+
+        /* Pair with WFE's waiting publication and subsequent ER consume. */
+        qatomic_set_mb(&target_cpu->env.event_register, true);
+        if (!qemu_cpu_is_self(cs) &&
+            qatomic_read(&target_cpu->env.wfe_waiting)) {
+            if (!locked) {
+                bql_lock();
+                locked = true;
+            }
+            /* Serialize the kick with the idle predicate and condition wait. */
+            if (qatomic_read(&target_cpu->env.wfe_waiting) &&
+                target_cpu->power_state != PSCI_OFF) {
+                qemu_cpu_kick(cs);
+            }
         }
     }
+    if (locked) {
+        bql_unlock();
+    }
+#endif
 }
 
-void HELPER(wfe)(CPUARMState *env)
+void HELPER(sevl)(CPUARMState *env)
+{
+#ifndef CONFIG_USER_ONLY
+    qatomic_set(&env->event_register, true);
+#endif
+}
+
+void HELPER(wfe)(CPUARMState *env, uint32_t insn_len)
 {
 #ifdef CONFIG_USER_ONLY
     /*
@@ -493,33 +530,66 @@ void HELPER(wfe)(CPUARMState *env)
      */
     return;
 #else
+    CPUState *cs = env_cpu(env);
+    ARMCPU *cpu = env_archcpu(env);
+    uint32_t excp;
+    int target_el;
+    int64_t next;
+
+    bql_lock();
+    next = arm_gt_event_stream_update(env);
+    if (qatomic_xchg(&env->event_register, false)) {
+        bql_unlock();
+        return;
+    }
+
     /*
-     * WFE (Wait For Event) is a hint instruction.
-     * For Cortex-M (M-profile), we implement the strict architectural behavior:
-     * 1. Check the Event Register (set by SEV or SEVONPEND).
-     * 2. If set, clear it and continue (consume the event).
+     * QEMU does not observe ordinary stores clearing a global monitor.
+     * An outstanding exclusive therefore completes this hint immediately,
+     * as permitted architecturally, rather than risking a lost monitor event.
+     * Raw pending interrupts likewise provide an immediate hint completion,
+     * even when delivery is masked; virtual interrupts are included.
      */
-    if (arm_feature(env, ARM_FEATURE_M)) {
-        CPUState *cs = env_cpu(env);
+    if ((!arm_feature(env, ARM_FEATURE_M) && env->exclusive_addr != -1) ||
+        cpu_has_work(cs)) {
+        bql_unlock();
+        return;
+    }
 
-        if (env->event_register) {
-            env->event_register = false;
-            return;
+    target_el = check_wfx_trap(env, true, &excp);
+    if (target_el) {
+        bql_unlock();
+        if (env->aarch64) {
+            env->pc -= insn_len;
+        } else {
+            env->regs[15] -= insn_len;
         }
+        raise_exception(env, excp, syn_wfx(1, 0xe, 1, insn_len == 2),
+                        target_el);
+    }
 
-        cs->exception_index = EXCP_HLT;
-        cs->halted = 1;
-        cpu_loop_exit(cs);
+    if (arm_feature(env, ARM_FEATURE_M)) {
+        qatomic_set(&env->wfe_waiting, true);
     } else {
         /*
-         * For A-profile and others, we rely on the existing "yield" behavior.
-         * Don't actually halt the CPU, just yield back to top
-         * level loop. This is not going into a "low power state"
-         * (ie halting until some event occurs), so we never take
-         * a configurable trap to a different exception level
+         * SEV publishes ER before reading this flag with a full barrier.
+         * We publish the flag before consuming ER with the matching barrier:
+         * either this consume sees SEV, or SEV sees a published waiter.
          */
-        HELPER(yield)(env);
+        qatomic_set_mb(&env->wfe_waiting, true);
+        if (qatomic_xchg(&env->event_register, false)) {
+            qatomic_set(&env->wfe_waiting, false);
+            bql_unlock();
+            return;
+        }
     }
+    if (next >= 0) {
+        timer_mod_ns(cpu->wfxt_timer, next);
+    }
+    cs->exception_index = EXCP_HLT;
+    cs->halted = 1;
+    bql_unlock();
+    cpu_loop_exit(cs);
 #endif
 }
 
@@ -586,10 +656,10 @@ void HELPER(cpsr_write_eret)(CPUARMState *env, uint32_t val)
 
     bql_lock();
     arm_call_pre_el_change_hook(env_archcpu(env));
-    bql_unlock();
 
     mask = aarch32_cpsr_valid_mask(env->features, &env_archcpu(env)->isar);
     cpsr_write(env, val, mask, CPSRWriteExceptionReturn);
+    qatomic_set(&env->event_register, true);
 
     /* Generated code has already stored the new PC value, but
      * without masking out its low bits, because which bits need
@@ -599,7 +669,6 @@ void HELPER(cpsr_write_eret)(CPUARMState *env, uint32_t val)
     env->regs[15] &= (env->thumb ? ~1 : ~3);
     arm_rebuild_hflags(env);
 
-    bql_lock();
     arm_call_el_change_hook(env_archcpu(env));
     bql_unlock();
 }
