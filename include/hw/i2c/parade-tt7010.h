@@ -2,4 +2,5 @@
 #ifndef HW_I2C_PARADE_TT7010_H
 #define HW_I2C_PARADE_TT7010_H
 #define TYPE_PARADE_TT7010 "parade-tt7010"
+#define TYPE_PARADE_TT5 "parade-tt5"
 #endif

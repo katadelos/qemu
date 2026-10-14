@@ -279,6 +279,7 @@ config IMX6SLL_FORMA
 
 config MT8115_PA6_CS8
     bool
+    select PARADE_TT
     select BD72720
     select USB_MTU3
     default y
