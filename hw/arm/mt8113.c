@@ -1650,10 +1650,20 @@ static void mt8113_wifi_runtime_command(MT8113State *s,
         break;
     }
     case MT8113_WIFI_CMD_NIC_CAPABILITY_V2: {
-        uint32_t no_elements = 0;
+        uint8_t capability[20] = { 0 };
 
-        mt8113_wifi_runtime_event(s, 0xec, sequence, &no_elements,
-                                  sizeof(no_elements));
+        /* Connac drivers obtain the embedded MAC through this V2 TLV,
+         * without issuing the V1 capability query. Report the virtual NIC's
+         * address so the guest has a valid permanent hardware identity.
+         * EVENT_NIC_CAPABILITY_V2 + TAG_CAP_MAC_ADDR + CAP_MAC_ADDR.
+         */
+        stw_le_p(capability, 1);
+        stl_le_p(capability + 4, 0x07);
+        stl_le_p(capability + 8, 8);
+        memcpy(capability + 12, s->wifi_conf.macaddr.a,
+               sizeof(s->wifi_conf.macaddr.a));
+        mt8113_wifi_runtime_event(s, 0xec, sequence, capability,
+                                  sizeof(capability));
         break;
     }
     case MT8113_WIFI_CMD_RUNTIME_ACCESS: {
