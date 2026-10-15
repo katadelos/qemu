@@ -4,6 +4,9 @@
 #include "migration/vmstate.h"
 #include "qemu/module.h"
 
+#define CCM_CCSR   0x0c
+#define CCM_CBCDR  0x14
+#define CCM_CBCMR  0x18
 #define CCM_CSCMR1 0x1c
 #define CCM_CS1CDR 0x28
 #define CCM_CS2CDR 0x2c
@@ -117,6 +120,66 @@ static const MemoryRegionOps imx50_pll_ops = {
     .valid = { .min_access_size = 4, .max_access_size = 4 },
 };
 
+static uint32_t imx50_pll_clock(IMX50CCMState *s, unsigned pll)
+{
+    uint32_t ctl = s->pll[pll][PLL_DP_CTL / 4];
+    unsigned op_offset = (ctl & BIT(7)) ? 0x1c : 0x08;
+    uint32_t op = s->pll[pll][op_offset / 4];
+    uint32_t mfd = s->pll[pll][(op_offset + 4) / 4] & 0x07ffffff;
+    int32_t mfn = sextract32(s->pll[pll][(op_offset + 8) / 4], 0, 27);
+    uint32_t mfi = MAX(extract32(op, 4, 4), 5);
+    uint32_t reference = 24000000 * ((ctl & BIT(12)) ? 4 : 2);
+
+    reference /= extract32(op, 0, 4) + 1;
+    return (int64_t)reference * mfi +
+           (int64_t)reference * mfn / (mfd + 1);
+}
+
+static uint32_t imx50_lp_apm_clock(IMX50CCMState *s)
+{
+    return (s->ccm[CCM_CCSR / 4] & BIT(10)) ? 480000000 : 24000000;
+}
+
+static uint32_t imx50_pll_switch_clock(IMX50CCMState *s, unsigned pll)
+{
+    uint32_t ccsr = s->ccm[CCM_CCSR / 4];
+
+    if (!(ccsr & BIT(2 - pll))) {
+        return imx50_pll_clock(s, pll);
+    }
+    if (pll != 0) {
+        return 24000000;
+    }
+    switch (extract32(ccsr, 7, 2)) {
+    case 2:
+        return imx50_pll_switch_clock(s, 1) /
+               (extract32(ccsr, 5, 2) + 1);
+    case 3:
+        return imx50_pll_switch_clock(s, 2) /
+               (extract32(ccsr, 3, 2) + 1);
+    default:
+        return imx50_lp_apm_clock(s);
+    }
+}
+
+static uint32_t imx50_per_clock(IMX50CCMState *s)
+{
+    uint32_t cbcdr = s->ccm[CCM_CBCDR / 4];
+    uint32_t cbcmr = s->ccm[CCM_CBCMR / 4];
+    unsigned parent = extract32(cbcdr, 25, 2);
+    uint32_t main_bus = parent == 3 ? imx50_lp_apm_clock(s) :
+                                   imx50_pll_switch_clock(s, parent);
+
+    if (cbcmr & BIT(0)) {
+        return main_bus / (extract32(cbcdr, 10, 3) + 1) /
+                          (extract32(cbcdr, 8, 2) + 1);
+    }
+    return ((cbcmr & BIT(1)) ? imx50_lp_apm_clock(s) : main_bus) /
+           ((extract32(cbcdr, 6, 2) + 1) *
+            (extract32(cbcdr, 3, 3) + 1) *
+            (extract32(cbcdr, 0, 3) + 1));
+}
+
 static uint32_t imx50_ccm_get_clock(IMXCCMState *ccm, IMXClk clock)
 {
     switch (clock) {
@@ -125,13 +188,8 @@ static uint32_t imx50_ccm_get_clock(IMXCCMState *ccm, IMXClk clock)
     case CLK_32k:
         return 32768;
     case CLK_PER:
-        /*
-         * The reset clock tree used by the i.MX50 boards derives per_root
-         * from the 400 MHz PLL2 through the CBCDR /2 /1 /6 dividers.  Linux
-         * uses this clock directly for the GPT (CLKSRC=ipg_perclk), so the
-         * timer model must run at the same 33 1/3 MHz rate that Linux reports.
-         */
-        return 400000000 / 12;
+        /* GPT and Linux's clocksource must use the programmed perclk tree. */
+        return imx50_per_clock(IMX50_CCM(ccm));
     case CLK_IPG:
         return 66000000;
     case CLK_IPG_HIGH:

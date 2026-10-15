@@ -18,6 +18,7 @@
 #include "hw/misc/imx6sl_pxp.h"
 #include "hw/misc/imx_rngc.h"
 #include "hw/sd/sd.h"
+#include "hw/usb/imx-usb-misc.h"
 #include "net/net.h"
 #include "qemu/error-report.h"
 #include "qemu/units.h"
@@ -194,6 +195,8 @@ static void glohd_init(MachineState *ms)
     object_property_add_child(OBJECT(ms), "soc", OBJECT(s));
     object_property_set_bool(OBJECT(s), "sololite", true, &error_fatal);
     object_property_set_bool(OBJECT(s), "has-el3", false, &error_fatal);
+    object_property_set_uint(OBJECT(&s->usb[0]), "gadget-host-autosuspend-ms",
+                             2000, &error_fatal);
     object_property_set_bool(OBJECT(&s->usdhc[1]), "defer-data-transfer",
                              false, &error_fatal);
     for (int i = 1; i <= 2; i++) {
@@ -214,6 +217,14 @@ static void glohd_init(MachineState *ms)
     object_property_set_uint(OBJECT(&s->gpio[2]), "reset-psr",
                              0xfffffffe, &error_fatal);
     qdev_realize(DEVICE(s), NULL, &error_fatal);
+    dev = qdev_new(TYPE_IMX_USB_MISC);
+    qdev_prop_set_bit(dev, "imx6-layout", true);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+    sysbus_mmio_map_overlap(SYS_BUS_DEVICE(dev), 0, 0x02184800, 2);
+    sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
+                       qdev_get_gpio_in_named(DEVICE(&s->usb[0]), "wakeup", 0));
+    qdev_connect_gpio_out_named(DEVICE(&s->usb[0]), "resume", 0,
+                                qdev_get_gpio_in(dev, 0));
     memory_region_add_subregion(get_system_memory(), GLOHD_RAM_BASE, ms->ram);
 
     f->sdma_irq = qdev_get_gpio_in(DEVICE(&s->a9mpcore), FSL_IMX6_SDMA_IRQ);

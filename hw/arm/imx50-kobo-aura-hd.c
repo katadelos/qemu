@@ -22,6 +22,7 @@
 #include "hw/sd/sd.h"
 #include "hw/ssi/mc13892.h"
 #include "hw/ssi/ssi.h"
+#include "hw/usb/imx-usb-misc.h"
 #include "migration/vmstate.h"
 #include "net/net.h"
 #include "qemu/error-report.h"
@@ -240,12 +241,19 @@ static void aurahd_attach_card(FslIMX50State *soc, unsigned controller,
 
 static void aurahd_create_peripherals(FslIMX50State *soc)
 {
+    DeviceState *usb_misc = qdev_new(TYPE_IMX_USB_MISC);
     I2CSlave *touch;
     I2CSlave *tps65185;
     DeviceState *pmic;
     DeviceState *wifi;
     DeviceState *buttons;
 
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(usb_misc), &error_fatal);
+    sysbus_mmio_map_overlap(SYS_BUS_DEVICE(usb_misc), 0, 0x53f80800, 2);
+    sysbus_connect_irq(SYS_BUS_DEVICE(usb_misc), 0,
+        qdev_get_gpio_in_named(DEVICE(&soc->usb_otg), "wakeup", 0));
+    qdev_connect_gpio_out_named(DEVICE(&soc->usb_otg), "resume", 0,
+                                qdev_get_gpio_in(usb_misc, 0));
     tps65185 = i2c_slave_create_simple(soc->i2c[1].bus, TYPE_TPS65185, 0x68);
     qdev_connect_gpio_out_named(DEVICE(tps65185), "pwrgood", 0,
         qdev_get_gpio_in(DEVICE(&soc->gpio[2]), 28));
@@ -307,6 +315,8 @@ static void aurahd_init(MachineState *machine)
 
     soc = s->soc = FSL_IMX50(object_new(TYPE_FSL_IMX50));
     object_property_add_child(OBJECT(machine), "soc", OBJECT(soc));
+    object_property_set_uint(OBJECT(&soc->usb_otg),
+                             "gadget-host-autosuspend-ms", 2000, &error_fatal);
     /* The skipped ROM plug-in configures 512 MiB of mobile DDR. Linux uses
      * DATAbahn's DDR class to initialize its IRAM idle/frequency routines. */
     object_property_set_uint(OBJECT(soc), "ddr-type", 0x100, &error_fatal);

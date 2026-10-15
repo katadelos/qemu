@@ -16,6 +16,7 @@
 #include "hw/core/irq.h"
 #include "system/address-spaces.h"
 #include "net/net.h"
+#include "qapi/error.h"
 #include "qemu/module.h"
 
 enum {
@@ -27,6 +28,7 @@ enum {
 };
 
 static DeviceRealize chipidea_parent_realize;
+static ResettablePhases chipidea_parent_reset;
 
 enum {
     CI_OTGSC = 0x00,
@@ -45,9 +47,35 @@ enum {
 #define CI_USBSTS_INT BIT(0)
 #define CI_USBSTS_PORT_CHANGE BIT(2)
 #define CI_USBSTS_RESET BIT(6)
+#define CI_USBSTS_SUSPEND BIT(8)
 #define CI_PORTSC_CONNECTED BIT(0)
 #define CI_PORTSC_ENABLED BIT(2)
+#define CI_PORTSC_FORCE_RESUME BIT(6)
+#define CI_PORTSC_SUSPEND BIT(7)
+#define CI_PORTSC_PHY_LOW_POWER BIT(23)
 #define CI_PORTSC_HIGH_SPEED BIT(27)
+
+static void chipidea_process_in(ChipideaState *ci, uint32_t bits);
+
+static bool chipidea_bus_active(ChipideaState *ci)
+{
+    EHCIState *ehci = &SYS_BUS_EHCI(ci)->ehci;
+
+    return ci->gadget_host_connected && !ci->gadget_host_suspended &&
+           !ci->gadget_resuming && (ehci->usbcmd & BIT(0)) &&
+           (ci->dc_mode & 3) == 2 &&
+           !(ehci->portsc[0] & CI_PORTSC_PHY_LOW_POWER);
+}
+
+static void chipidea_host_activity(ChipideaState *ci)
+{
+    if (ci->gadget_autosuspend_ms && ci->gadget_configured &&
+        chipidea_bus_active(ci)) {
+        timer_mod(ci->gadget_idle_timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
+                  ci->gadget_autosuspend_ms);
+    }
+}
 
 static void chipidea_update_irq(ChipideaState *ci)
 {
@@ -55,7 +83,16 @@ static void chipidea_update_irq(ChipideaState *ci)
 
     /* OTG change interrupts remain active while the device engine sleeps. */
     qemu_set_irq(ehci->irq, (ehci->usbsts & ehci->usbintr) != 0 ||
-                 (ci->otgsc & (ci->otgsc >> 8) & 0x007f0000) != 0);
+                 (ci->otgsc & (ci->otgsc >> 8) & 0x007f0000) != 0 ||
+                 ci->wakeup_irq);
+}
+
+static void chipidea_wakeup_irq(void *opaque, int n, int level)
+{
+    ChipideaState *ci = opaque;
+
+    ci->wakeup_irq = level;
+    chipidea_update_irq(ci);
 }
 
 static void chipidea_raise_irq(ChipideaState *ci)
@@ -64,6 +101,77 @@ static void chipidea_raise_irq(ChipideaState *ci)
 
     ehci->usbsts |= CI_USBSTS_INT;
     chipidea_update_irq(ci);
+}
+
+static void chipidea_host_suspend(void *opaque)
+{
+    ChipideaState *ci = opaque;
+    EHCIState *ehci = &SYS_BUS_EHCI(ci)->ehci;
+
+    if (!ci->gadget_configured || !chipidea_bus_active(ci)) {
+        return;
+    }
+    timer_del(ci->gadget_idle_timer);
+    ci->gadget_host_suspended = true;
+    ehci->portsc[0] |= CI_PORTSC_SUSPEND;
+    ehci->usbsts |= CI_USBSTS_SUSPEND;
+    chipidea_update_irq(ci);
+}
+
+static void chipidea_resume_complete(void *opaque)
+{
+    ChipideaState *ci = opaque;
+    EHCIState *ehci = &SYS_BUS_EHCI(ci)->ehci;
+
+    if (ehci->portsc[0] & CI_PORTSC_PHY_LOW_POWER) {
+        /* Keep resume visible until the platform wake handler ungates PHY. */
+        return;
+    }
+    ci->gadget_resuming = false;
+    ci->gadget_host_suspended = false;
+    ehci->portsc[0] &= ~(CI_PORTSC_SUSPEND | CI_PORTSC_FORCE_RESUME);
+    qemu_set_irq(ci->resume, 0);
+    chipidea_raise_irq(ci);
+    chipidea_host_activity(ci);
+    chipidea_process_in(ci, ci->endptstatus & 0xffff0000);
+    if (ci->gadget_nic) {
+        qemu_flush_queued_packets(qemu_get_queue(ci->gadget_nic));
+    }
+}
+
+static void chipidea_host_resume(ChipideaState *ci)
+{
+    EHCIState *ehci = &SYS_BUS_EHCI(ci)->ehci;
+
+    if (!ci->gadget_host_suspended || ci->gadget_resuming) {
+        return;
+    }
+    ci->gadget_resuming = true;
+    ehci->portsc[0] |= CI_PORTSC_FORCE_RESUME;
+    qemu_set_irq(ci->resume, 1);
+    /* The host drives resume for 20 ms before endpoint traffic restarts. */
+    timer_mod(ci->gadget_resume_timer,
+              qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 20);
+}
+
+static bool chipidea_get_host_suspended(Object *obj, Error **errp)
+{
+    return CHIPIDEA(obj)->gadget_host_suspended;
+}
+
+static void chipidea_set_host_suspended(Object *obj, bool value, Error **errp)
+{
+    ChipideaState *ci = CHIPIDEA(obj);
+
+    if (!ci->gadget || !ci->gadget_configured) {
+        error_setg(errp, "USB gadget host is not configured");
+        return;
+    }
+    if (value) {
+        chipidea_host_suspend(ci);
+    } else {
+        chipidea_host_resume(ci);
+    }
 }
 
 static void chipidea_inject_setup(ChipideaState *ci,
@@ -123,6 +231,7 @@ static void chipidea_config_timer(void *opaque)
         ci->gadget_config_phase = 4;
     } else {
         ci->gadget_configured = true;
+        chipidea_host_activity(ci);
         if (ci->gadget_nic) {
             qemu_flush_queued_packets(qemu_get_queue(ci->gadget_nic));
         }
@@ -242,7 +351,7 @@ static void chipidea_process_in(ChipideaState *ci, uint32_t bits)
     uint8_t packet[0x4000];
     unsigned ep;
 
-    if (!ci->gadget_host_connected) {
+    if (!chipidea_bus_active(ci)) {
         return;
     }
     ci->processing_in = true;
@@ -258,6 +367,7 @@ static void chipidea_process_in(ChipideaState *ci, uint32_t bits)
             qemu_send_packet(qemu_get_queue(ci->gadget_nic), packet, length);
         }
         chipidea_complete(ci, ep, true);
+        chipidea_host_activity(ci);
     }
     ci->processing_in = false;
     if (ci->gadget_nic) {
@@ -271,6 +381,14 @@ static bool chipidea_can_receive(NetClientState *nc)
     unsigned ep;
 
     if (!ci->gadget_host_connected || ci->processing_in) {
+        return false;
+    }
+    /* Let an actual host packet reach receive() and initiate bus resume.
+     * Polling this predicate alone must not wake an idle USB device. */
+    if (ci->gadget_host_suspended || ci->gadget_resuming) {
+        return true;
+    }
+    if (!chipidea_bus_active(ci)) {
         return false;
     }
     for (ep = 1; ep < 8; ep++) {
@@ -293,6 +411,10 @@ static ssize_t chipidea_receive(NetClientState *nc, const uint8_t *buf,
     if (!ci->gadget_host_connected) {
         return 0;
     }
+    chipidea_host_resume(ci);
+    if (!chipidea_bus_active(ci)) {
+        return 0; /* Keep the packet queued until resume completes. */
+    }
     for (ep = 1; ep < 8; ep++) {
         size_t length = size;
 
@@ -302,6 +424,7 @@ static ssize_t chipidea_receive(NetClientState *nc, const uint8_t *buf,
             continue;
         }
         chipidea_complete(ci, ep, false);
+        chipidea_host_activity(ci);
         return length;
     }
     return 0;
@@ -316,6 +439,11 @@ static void chipidea_link_changed(NetClientState *nc)
     ci->gadget_configured = false;
     ci->gadget_config_phase = 0;
     timer_del(ci->gadget_config_timer);
+    timer_del(ci->gadget_idle_timer);
+    timer_del(ci->gadget_resume_timer);
+    ci->gadget_host_suspended = false;
+    ci->gadget_resuming = false;
+    qemu_set_irq(ci->resume, 0);
     qemu_purge_queued_packets(nc);
     qemu_set_irq(ci->vbus, ci->gadget_host_connected);
     ci->otgsc |= BIT(19); /* B-session-valid changed */
@@ -344,9 +472,10 @@ static uint64_t chipidea_read(void *opaque, hwaddr offset,
 
     switch (offset) {
     case CI_OTGSC:
-        /* ID stays high in device mode; BSV/BSE reflect the USB cable. */
-        return (ci->otgsc & ~(BIT(11) | BIT(12))) | BIT(8) |
-               (ci->gadget_host_connected ? BIT(11) : BIT(12));
+        /* The powered cable exceeds both A- and B-session thresholds. */
+        return (ci->otgsc & ~(BIT(9) | BIT(10) | BIT(11) | BIT(12))) |
+               BIT(8) | (ci->gadget_host_connected ?
+                         BIT(9) | BIT(10) | BIT(11) : BIT(12));
     case CI_USBMODE: return ci->dc_mode;
     case CI_ENDPTSETUPSTAT: return ci->endptsetupstat;
     case CI_ENDPTPRIME: return ci->endpointprime;
@@ -383,6 +512,9 @@ static void chipidea_write(void *opaque, hwaddr offset,
     case CI_ENDPTPRIME:
         ci->endpointprime |= value;
         ci->endptstatus |= value;
+        if (value & 0xffff0000) {
+            chipidea_host_resume(ci);
+        }
         chipidea_process_in(ci, value);
         for (index = 0; index < ARRAY_SIZE(ci->endptctrl); index++) {
             uint32_t out_bit = BIT(index);
@@ -500,6 +632,12 @@ static void chipidea_command_write(void *opaque, hwaddr offset,
         return;
     }
     if (value & BIT(1)) {
+        timer_del(ci->gadget_idle_timer);
+        timer_del(ci->gadget_resume_timer);
+        ci->gadget_host_suspended = false;
+        ci->gadget_resuming = false;
+        qemu_set_irq(ci->resume, 0);
+        ehci->portsc[0] &= ~(CI_PORTSC_SUSPEND | CI_PORTSC_FORCE_RESUME);
         ci->dc_mode = 0;
         ci->endptsetupstat = 0;
         ci->endpointprime = 0;
@@ -515,6 +653,12 @@ static void chipidea_command_write(void *opaque, hwaddr offset,
         ci->endpoint_commands_ready = true;
     }
     if (!(value & BIT(0))) {
+        timer_del(ci->gadget_idle_timer);
+        timer_del(ci->gadget_resume_timer);
+        ci->gadget_host_suspended = false;
+        ci->gadget_resuming = false;
+        qemu_set_irq(ci->resume, 0);
+        ehci->portsc[0] &= ~(CI_PORTSC_SUSPEND | CI_PORTSC_FORCE_RESUME);
         ci->gadget_configured = false;
         ci->gadget_config_phase = 0;
         if (ci->gadget_host_connected && ci->gadget_config_timer) {
@@ -539,6 +683,50 @@ static const struct MemoryRegionOps chipidea_command_ops = {
         .min_access_size = 4,
         .max_access_size = 4,
         .unaligned = false,
+    },
+};
+
+static uint64_t chipidea_port_read(void *opaque, hwaddr offset, unsigned size)
+{
+    return SYS_BUS_EHCI(opaque)->ehci.portsc[0];
+}
+
+static void chipidea_port_write(void *opaque, hwaddr offset, uint64_t value,
+                                unsigned size)
+{
+    ChipideaState *ci = opaque;
+    EHCIState *ehci = &SYS_BUS_EHCI(ci)->ehci;
+    uint32_t old = ehci->portsc[0];
+    /* In device mode the host controls connection, enable, suspend and
+     * speed. The guest controls the PHY and can request remote resume. */
+    uint32_t ro = CI_PORTSC_CONNECTED | CI_PORTSC_ENABLED |
+                  CI_PORTSC_SUSPEND | (3U << 26);
+    uint32_t w1c = BIT(1) | BIT(3) | BIT(5);
+
+    ehci->portsc[0] = (old & ro) | (old & w1c & ~value) |
+                      (value & ~(ro | w1c));
+    if (value & CI_PORTSC_FORCE_RESUME) {
+        chipidea_host_resume(ci);
+    }
+    if ((old & CI_PORTSC_PHY_LOW_POWER) &&
+        !(value & CI_PORTSC_PHY_LOW_POWER)) {
+        if (ci->gadget_resuming && !timer_pending(ci->gadget_resume_timer)) {
+            chipidea_resume_complete(ci);
+        }
+        chipidea_process_in(ci, ci->endptstatus & 0xffff0000);
+        if (ci->gadget_nic) {
+            qemu_flush_queued_packets(qemu_get_queue(ci->gadget_nic));
+        }
+    }
+}
+
+static const MemoryRegionOps chipidea_port_ops = {
+    .read = chipidea_port_read,
+    .write = chipidea_port_write,
+    .endianness = DEVICE_NATIVE_ENDIAN,
+    .valid = {
+        .min_access_size = 4,
+        .max_access_size = 4,
     },
 };
 
@@ -591,6 +779,11 @@ static void chipidea_init(Object *obj)
     int i;
 
     qdev_init_gpio_out_named(DEVICE(obj), &ci->vbus, "vbus", 1);
+    qdev_init_gpio_out_named(DEVICE(obj), &ci->resume, "resume", 1);
+    qdev_init_gpio_in_named(DEVICE(obj), chipidea_wakeup_irq, "wakeup", 1);
+    object_property_add_bool(obj, "gadget-host-suspended",
+                             chipidea_get_host_suspended,
+                             chipidea_set_host_suspended);
     for (i = 0; i < ARRAY_SIZE(ci->iomem); i++) {
         const struct {
             const char *name;
@@ -661,12 +854,21 @@ static void chipidea_realize(DeviceState *dev, Error **errp)
         }
         ci->gadget_config_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
                                                 chipidea_config_timer, ci);
+        ci->gadget_idle_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
+                                            chipidea_host_suspend, ci);
+        ci->gadget_resume_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
+                                              chipidea_resume_complete, ci);
         memory_region_init_io(&ci->dc_command_iomem, OBJECT(ci),
                               &chipidea_command_ops, ci,
                               TYPE_CHIPIDEA ".dc-command", 12);
         memory_region_add_subregion_overlap(&SYS_BUS_EHCI(ci)->ehci.mem,
                                             0x140,
                                             &ci->dc_command_iomem, 2);
+        memory_region_init_io(&ci->dc_port_iomem, OBJECT(ci),
+                              &chipidea_port_ops, ci,
+                              TYPE_CHIPIDEA ".dc-port", 4);
+        memory_region_add_subregion_overlap(&SYS_BUS_EHCI(ci)->ehci.mem,
+                                            0x184, &ci->dc_port_iomem, 2);
         /* A bound UDC is not an attached USB host. */
         if (ci->gadget_host_connected) {
             timer_mod(ci->gadget_config_timer,
@@ -679,12 +881,51 @@ static const Property chipidea_properties[] = {
     DEFINE_PROP_BOOL("gadget", ChipideaState, gadget, false),
     DEFINE_PROP_BOOL("gadget-host-connected", ChipideaState,
                      gadget_host_connected, true),
+    DEFINE_PROP_UINT32("gadget-host-autosuspend-ms", ChipideaState,
+                       gadget_autosuspend_ms, 0),
     DEFINE_NIC_PROPERTIES(ChipideaState, gadget_nic_conf),
 };
+
+static void chipidea_reset_hold(Object *obj, ResetType type)
+{
+    ChipideaState *ci = CHIPIDEA(obj);
+
+    if (chipidea_parent_reset.hold) {
+        chipidea_parent_reset.hold(obj, type);
+    }
+    if (!ci->gadget) {
+        return;
+    }
+    timer_del(ci->gadget_config_timer);
+    timer_del(ci->gadget_idle_timer);
+    timer_del(ci->gadget_resume_timer);
+    ci->gadget_configured = false;
+    ci->gadget_config_phase = 0;
+    ci->gadget_host_suspended = false;
+    ci->gadget_resuming = false;
+    ci->processing_in = false;
+    ci->endpoint_commands_ready = false;
+    ci->wakeup_irq = false;
+    ci->otgsc = 0;
+    ci->dc_mode = 0;
+    ci->endptsetupstat = 0;
+    ci->endpointprime = 0;
+    ci->endptflush = 0;
+    ci->endptstatus = 0;
+    ci->endptcomplete = 0;
+    memset(ci->endptctrl, 0, sizeof(ci->endptctrl));
+    qemu_set_irq(ci->resume, 0);
+    chipidea_update_irq(ci);
+    if (ci->gadget_host_connected) {
+        timer_mod(ci->gadget_config_timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 30000);
+    }
+}
 
 static void chipidea_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
     SysBusEHCIClass *sec = SYS_BUS_EHCI_CLASS(klass);
 
     /*
@@ -699,6 +940,8 @@ static void chipidea_class_init(ObjectClass *klass, const void *data)
     dc->desc = "Chipidea USB Module";
     device_class_set_parent_realize(dc, chipidea_realize,
                                     &chipidea_parent_realize);
+    resettable_class_set_parent_phases(rc, NULL, chipidea_reset_hold, NULL,
+                                       &chipidea_parent_reset);
     device_class_set_props(dc, chipidea_properties);
 }
 

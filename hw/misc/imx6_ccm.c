@@ -18,6 +18,9 @@
 #include "qemu/module.h"
 #include "trace.h"
 
+#define REG_2P5_ENABLE_LINREG BIT(0)
+#define REG_2P5_OK_VDD2P5 BIT(17)
+
 static const char *imx6_ccm_reg_name(uint32_t reg)
 {
     static char unknown[20];
@@ -523,6 +526,13 @@ static uint64_t imx6_analog_read(void *opaque, hwaddr offset, unsigned size)
     IMX6CCMState *s = (IMX6CCMState *)opaque;
 
     switch (index) {
+    case PMU_REG_2P5:
+        value = s->analog[index] & ~REG_2P5_OK_VDD2P5;
+        /* The regulator settles synchronously after it is enabled. */
+        if (value & REG_2P5_ENABLE_LINREG) {
+            value |= REG_2P5_OK_VDD2P5;
+        }
+        break;
     case CCM_ANALOG_TEMPSENSE0:
     case CCM_ANALOG_TEMPSENSE0_SET:
     case CCM_ANALOG_TEMPSENSE0_CLR:
@@ -678,6 +688,10 @@ static void imx6_analog_write(void *opaque, hwaddr offset, uint64_t value,
     }
 
     switch (index) {
+    case PMU_REG_2P5:
+        /* OK_VDD2P5 reports regulator status and is read-only. */
+        s->analog[index] = value & ~REG_2P5_OK_VDD2P5;
+        break;
     case USB_ANALOG_DIGPROG_SL:
         qemu_log_mask(LOG_GUEST_ERROR,
                       "Guest write to read-only SoloLite DIGPROG register\n");

@@ -12,9 +12,12 @@ struct ChipideaState {
 
     MemoryRegion iomem[3];
     MemoryRegion dc_command_iomem;
+    MemoryRegion dc_port_iomem;
     NICConf gadget_nic_conf;
     NICState *gadget_nic;
     qemu_irq vbus;
+    qemu_irq resume;
+    bool wakeup_irq;
     bool gadget;
     bool gadget_host_connected;
     uint32_t otgsc;
@@ -26,6 +29,11 @@ struct ChipideaState {
     uint32_t endptcomplete;
     uint32_t endptctrl[8];
     QEMUTimer *gadget_config_timer;
+    QEMUTimer *gadget_idle_timer;
+    QEMUTimer *gadget_resume_timer;
+    uint32_t gadget_autosuspend_ms;
+    bool gadget_host_suspended;
+    bool gadget_resuming;
     unsigned gadget_config_phase;
     bool gadget_configured;
     bool processing_in;
