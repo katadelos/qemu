@@ -5,6 +5,8 @@
 #include "qemu/osdep.h"
 #include "hw/i2c/i2c.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
+#include "qapi/error.h"
 #include "qemu/bswap.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
@@ -21,6 +23,9 @@ struct ElanState {
     uint8_t tx[37], rx[67];
     unsigned tx_len, rx_pos;
     int x, y;
+    uint8_t x_traces, y_traces;
+    uint16_t width_mm, height_mm;
+    bool invert_x;
     uint8_t pen_state;
     bool reading, pending, down, reported, dirty;
 };
@@ -66,16 +71,16 @@ static void elan_command(ElanState *s)
             s->rx[7] = 32;
             break;
         case 0xd7: /* physical sensor dimensions, millimetres */
-            stw_be_p(s->rx + 6, 210);
+            stw_be_p(s->rx + 6, s->width_mm);
             break;
         case 0xd8:
-            stw_be_p(s->rx + 6, 158);
+            stw_be_p(s->rx + 6, s->height_mm);
             break;
         }
     } else if (cmd == 0x5b) {
         s->rx[4] = 0x9b;
-        s->rx[6] = 60; /* (60 - 1) * 32 = 1888 sensor units */
-        s->rx[7] = 45; /* (45 - 1) * 32 = 1408 sensor units */
+        s->rx[6] = s->x_traces;
+        s->rx[7] = s->y_traces;
     } else if (cmd == 0x96) {
         s->rx[4] = 0x95;
         s->rx[5] = s->rx[6] = 0x80;
@@ -163,17 +168,18 @@ static void elan_input_sync(DeviceState *dev)
     s->rx[62] = 1; /* contact count in the 0x3f HID report */
     s->rx[3] = 4 | (s->down ? 3 : 0); /* contact ID 1, down/up */
     s->rx[4] = s->down ? 8 : 0;
-    /* Undo Nickel's landscape-sensor to portrait-screen transform. */
-    stw_le_p(s->rx + 8, qemu_input_scale_axis(INPUT_EVENT_ABS_MAX - s->y,
-        INPUT_EVENT_ABS_MIN, INPUT_EVENT_ABS_MAX, 0, 1888));
+    /* Match the board's sensor wiring before the guest display rotation. */
+    stw_le_p(s->rx + 8, qemu_input_scale_axis(
+        s->invert_x ? INPUT_EVENT_ABS_MAX - s->y : s->y,
+        INPUT_EVENT_ABS_MIN, INPUT_EVENT_ABS_MAX, 0, (s->x_traces - 1) * 32));
     stw_le_p(s->rx + 12, qemu_input_scale_axis(s->x,
-        INPUT_EVENT_ABS_MIN, INPUT_EVENT_ABS_MAX, 0, 1408));
+        INPUT_EVENT_ABS_MIN, INPUT_EVENT_ABS_MAX, 0, (s->y_traces - 1) * 32));
     s->reported = s->down;
     elan_queue(s);
 }
 
 static const QemuInputHandler elan_input = {
-    .name = "Kobo Elipsa 2E touchscreen",
+    .name = "Elan EKTH3500 touchscreen",
     .mask = INPUT_EVENT_MASK_BTN | INPUT_EVENT_MASK_ABS,
     .event = elan_input_event,
     .sync = elan_input_sync,
@@ -207,7 +213,12 @@ static void elan_init(Object *obj)
 
 static void elan_realize(DeviceState *dev, Error **errp)
 {
-    ELAN_EKTH3500(dev)->input = qemu_input_handler_register(dev, &elan_input);
+    ElanState *s = ELAN_EKTH3500(dev);
+    if (s->x_traces < 2 || s->y_traces < 2) {
+        error_setg(errp, "Elan sensor requires at least two traces per axis");
+        return;
+    }
+    s->input = qemu_input_handler_register(dev, &elan_input);
 }
 
 static void elan_finalize(Object *obj)
@@ -219,11 +230,20 @@ static void elan_finalize(Object *obj)
     timer_free(s->ready);
 }
 
+static const Property elan_properties[] = {
+    DEFINE_PROP_BOOL("invert-x", ElanState, invert_x, true),
+    DEFINE_PROP_UINT8("x-traces", ElanState, x_traces, 60),
+    DEFINE_PROP_UINT8("y-traces", ElanState, y_traces, 45),
+    DEFINE_PROP_UINT16("width-mm", ElanState, width_mm, 210),
+    DEFINE_PROP_UINT16("height-mm", ElanState, height_mm, 158),
+};
+
 static void elan_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
     I2CSlaveClass *ic = I2C_SLAVE_CLASS(oc);
     dc->realize = elan_realize;
+    device_class_set_props(dc, elan_properties);
     device_class_set_legacy_reset(dc, elan_reset);
     ic->send = elan_send;
     ic->recv = elan_recv;

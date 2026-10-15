@@ -3376,9 +3376,9 @@ static bool mt8113_realize_gic(MT8113State *s, Error **errp)
         [GTIMER_SEC] = ARCH_TIMER_S_EL1_IRQ,
     };
 
-    qdev_prop_set_uint32(gicdev, "num-cpu", MT8113_NUM_CPUS);
+    qdev_prop_set_uint32(gicdev, "num-cpu", s->num_cpus);
     qdev_prop_set_uint32(gicdev, "num-irq", MT8113_NUM_SPIS + GIC_INTERNAL);
-    qlist_append_int(redist_region_count, MT8113_NUM_CPUS);
+    qlist_append_int(redist_region_count, s->num_cpus);
     qdev_prop_set_array(gicdev, "redist-region-count", redist_region_count);
     object_property_set_link(OBJECT(&s->gic), "sysmem",
                              OBJECT(get_system_memory()), &error_abort);
@@ -3388,7 +3388,7 @@ static bool mt8113_realize_gic(MT8113State *s, Error **errp)
     sysbus_mmio_map(gicsbd, 0, MT8113_GIC_DIST_ADDR);
     sysbus_mmio_map(gicsbd, 1, MT8113_GIC_REDIST_ADDR);
 
-    for (int cpu = 0; cpu < MT8113_NUM_CPUS; cpu++) {
+    for (int cpu = 0; cpu < s->num_cpus; cpu++) {
         DeviceState *cpudev = DEVICE(&s->cpu[cpu]);
         int intidbase = MT8113_NUM_SPIS + cpu * GIC_INTERNAL;
 
@@ -3406,11 +3406,11 @@ static bool mt8113_realize_gic(MT8113State *s, Error **errp)
                                         intidbase + VIRTUAL_PMU_IRQ));
         sysbus_connect_irq(gicsbd, cpu,
                            qdev_get_gpio_in(cpudev, ARM_CPU_IRQ));
-        sysbus_connect_irq(gicsbd, cpu + MT8113_NUM_CPUS,
+        sysbus_connect_irq(gicsbd, cpu + s->num_cpus,
                            qdev_get_gpio_in(cpudev, ARM_CPU_FIQ));
-        sysbus_connect_irq(gicsbd, cpu + 2 * MT8113_NUM_CPUS,
+        sysbus_connect_irq(gicsbd, cpu + 2 * s->num_cpus,
                            qdev_get_gpio_in(cpudev, ARM_CPU_VIRQ));
-        sysbus_connect_irq(gicsbd, cpu + 3 * MT8113_NUM_CPUS,
+        sysbus_connect_irq(gicsbd, cpu + 3 * s->num_cpus,
                            qdev_get_gpio_in(cpudev, ARM_CPU_VFIQ));
     }
     return true;
@@ -3431,15 +3431,23 @@ static void mt8113_realize(DeviceState *dev, Error **errp)
         MT8113_I2C0_IRQ, MT8113_I2C1_IRQ, MT8113_I2C2_IRQ,
     };
 
+    if (!s->num_cpus || s->num_cpus > MT8113_NUM_CPUS) {
+        error_setg(errp, "MT8113 supports one or two CPU cores");
+        return;
+    }
     if (s->iommu_irq >= MT8113_NUM_SPIS) {
         error_setg(errp, "MT8113 IOMMU interrupt %u exceeds the SPI range",
                     s->iommu_irq);
         return;
     }
 
-    for (int cpu = 0; cpu < MT8113_NUM_CPUS; cpu++) {
-        Object *cpuobj = OBJECT(&s->cpu[cpu]);
+    for (int cpu = 0; cpu < s->num_cpus; cpu++) {
+        g_autofree char *name = g_strdup_printf("cpu%d", cpu);
+        Object *cpuobj;
 
+        object_initialize_child(OBJECT(s), name, &s->cpu[cpu],
+                                ARM_CPU_TYPE_NAME("cortex-a53"));
+        cpuobj = OBJECT(&s->cpu[cpu]);
         object_property_set_int(cpuobj, "cntfrq", 13000000, &error_abort);
         object_property_set_bool(cpuobj, "has_el2", false, &error_abort);
         object_property_set_bool(cpuobj, "has_el3", true, &error_abort);
@@ -3453,7 +3461,7 @@ static void mt8113_realize(DeviceState *dev, Error **errp)
                                 &error_abort);
         object_property_set_int(cpuobj, "mp-affinity",
                                 arm_build_mp_affinity(cpu,
-                                                      MT8113_NUM_CPUS),
+                                                      s->num_cpus),
                                 &error_abort);
         if (cpu) {
             object_property_set_bool(cpuobj, "start-powered-off", true,
@@ -3746,6 +3754,7 @@ static void mt8113_unrealize(DeviceState *dev)
 }
 
 static const Property mt8113_properties[] = {
+    DEFINE_PROP_UINT32("num-cpus", MT8113State, num_cpus, MT8113_NUM_CPUS),
     DEFINE_PROP_UINT64("reset-vector", MT8113State, reset_vector, 0),
     DEFINE_PROP_UINT32("iommu-irq", MT8113State, iommu_irq, MT8113_IOMMU_IRQ),
     DEFINE_NIC_PROPERTIES(MT8113State, usb.nic_conf),
@@ -3758,12 +3767,6 @@ static void mt8113_init(Object *obj)
     MT8113State *s = MT8113(obj);
 
     qdev_init_gpio_out_named(DEVICE(obj), &s->usb.vbus, "usb-vbus", 1);
-    for (int cpu = 0; cpu < MT8113_NUM_CPUS; cpu++) {
-        g_autofree char *name = g_strdup_printf("cpu%d", cpu);
-
-        object_initialize_child(obj, name, &s->cpu[cpu],
-                                ARM_CPU_TYPE_NAME("cortex-a53"));
-    }
     object_initialize_child(obj, "gic", &s->gic, TYPE_ARM_GICV3);
     object_initialize_child(obj, "gpio", &s->gpio, TYPE_MT8113_GPIO);
     for (int i = 0; i < ARRAY_SIZE(s->i2c); i++) {

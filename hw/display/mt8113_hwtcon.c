@@ -392,6 +392,44 @@ static bool mt8113_hwtcon_publish_pending_frame(MT8113HWTCONState *s)
     return true;
 }
 
+static uint32_t mt8113_hwtcon_cfa_pixel(MT8113HWTCONState *s,
+                                      unsigned x, unsigned y)
+{
+    /*
+     * Kobo's MT8113 cfa_ntx.c describes the panel filter in controller
+     * coordinates as RBG / GRB / BGR.  The HWTCON image contains the drive
+     * level for each filtered subpixel, after the guest's color conversion.
+     * Retain the measured channel and interpolate its two missing channels
+     * from neighboring samples.  This represents the physical color filter;
+     * it does not reproduce the panel's optical response or calibration.
+     */
+    static const unsigned channel[3][3] = {
+        { 0, 2, 1 }, { 1, 0, 2 }, { 2, 1, 0 },
+    };
+    unsigned own_channel = channel[y % 3][x % 3];
+    unsigned sums[3] = { 0 };
+    unsigned counts[3] = { 0 };
+    unsigned rgb[3];
+
+    for (unsigned sy = y ? y - 1 : 0;
+         sy <= MIN(y + 1, s->fb_source_height - 1); sy++) {
+        for (unsigned sx = x ? x - 1 : 0;
+             sx <= MIN(x + 1, s->fb_source_width - 1); sx++) {
+            unsigned c = channel[sy % 3][sx % 3];
+
+            /* MDP's Y4_M0 output carries its four-bit level in bits 7:4. */
+            sums[c] += (s->fb_buffer[(size_t)sy * s->fb_pitch + sx] >> 4) * 17;
+            counts[c]++;
+        }
+    }
+    for (unsigned c = 0; c < ARRAY_SIZE(rgb); c++) {
+        rgb[c] = counts[c] ? (sums[c] + counts[c] / 2) / counts[c] : 0;
+    }
+    rgb[own_channel] =
+        (s->fb_buffer[(size_t)y * s->fb_pitch + x] >> 4) * 17;
+    return 0xff000000U | rgb[0] << 16 | rgb[1] << 8 | rgb[2];
+}
+
 static void mt8113_hwtcon_render_framebuffer(MT8113HWTCONState *s)
 {
     DisplaySurface *surface;
@@ -493,6 +531,11 @@ static void mt8113_hwtcon_render_framebuffer(MT8113HWTCONState *s)
             }
             if (s->fb_flip_x) {
                 source_x = s->fb_source_width - 1 - source_x;
+            }
+            if (s->cfa_panel && s->image_scanout_active &&
+                s->fb_format == MDP_RDMA_FORMAT_Y8) {
+                pixels[x] = mt8113_hwtcon_cfa_pixel(s, source_x, source_y);
+                continue;
             }
             source = s->fb_buffer + (size_t)source_y * s->fb_pitch +
                      (size_t)source_x * bytes_per_pixel;
@@ -1597,6 +1640,7 @@ static const Property mt8113_hwtcon_properties[] = {
                      TYPE_MT8113_IOMMU, MT8113IOMMUState *),
     DEFINE_PROP_BOOL("scanout-image-buffer", MT8113HWTCONState,
                      scanout_image_buffer, false),
+    DEFINE_PROP_BOOL("cfa-panel", MT8113HWTCONState, cfa_panel, false),
     DEFINE_PROP_BOOL("retain-boot-splash", MT8113HWTCONState,
                      retain_boot_splash, false),
 };

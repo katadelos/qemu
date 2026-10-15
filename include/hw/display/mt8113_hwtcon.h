@@ -89,6 +89,7 @@ struct MT8113HWTCONState {
     bool cfa_active;
     bool scanout_dirty;
     bool scanout_image_buffer;
+    bool cfa_panel;
     bool retain_boot_splash;
     bool image_scanout_active;
     bool boot_handoff_active;

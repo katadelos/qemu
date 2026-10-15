@@ -341,6 +341,16 @@ config MT8113_ELIPSA2E
     select MT8110_BELLATRIX
     select SPLIT_IRQ
 
+config MT8113_KOBO
+    bool
+    select CYTTSP5
+    select LM3697
+    default y
+    depends on TCG && AARCH64
+    select MT8113_ELIPSA2E
+    select LM3630A
+    select KOBO_NTX_BUTTONS
+
 config MT8110_BELLATRIX
     bool
     select PARADE_TT

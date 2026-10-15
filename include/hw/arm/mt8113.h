@@ -137,6 +137,7 @@ struct MT8113State {
     DeviceState parent_obj;
 
     ARMCPU cpu[MT8113_NUM_CPUS];
+    uint32_t num_cpus;
     GICv3State gic;
     MT8113GPIOState gpio;
     MTKI2CState i2c[3];
