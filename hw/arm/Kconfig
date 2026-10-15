@@ -370,6 +370,16 @@ config IMX50_KOBOTOUCH
     select BCM4343W_SDIO
     select KOBO_MSP430
 
+config IMX50_KOBO_GLO
+    bool
+    default y
+    depends on TCG && ARM
+    select FSL_IMX50
+    select NEONODE_ZFORCE
+    select SD
+    select BCM4343W_SDIO
+    select KOBO_MSP430
+
 config IMX50_KOBO_AURA_HD
     bool
     default y

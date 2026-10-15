@@ -33,6 +33,7 @@ arm_common_ss.add(when: 'CONFIG_MT8110_BELLATRIX', if_true: files('mt8110-bellat
 arm_common_ss.add(when: 'CONFIG_MT8113_BELLATRIX4', if_true: files('mt8113-bellatrix4.c'))
 arm_common_ss.add(when: 'CONFIG_IMX50_YOSHI', if_true: files('imx50-yoshi.c'))
 arm_common_ss.add(when: 'CONFIG_IMX50_KOBOTOUCH', if_true: files('imx50-kobotouch.c'))
+arm_common_ss.add(when: 'CONFIG_IMX50_KOBO_GLO', if_true: files('imx50-kobo-glo.c'))
 arm_common_ss.add(when: 'CONFIG_IMX50_KOBO_AURA_HD', if_true: files('imx50-kobo-aura-hd.c'))
 
 arm_common_ss.add(when: 'CONFIG_ARM_V7M', if_true: files('armv7m.c'))
