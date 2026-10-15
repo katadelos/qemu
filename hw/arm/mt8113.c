@@ -12,6 +12,7 @@
 #include "hw/core/irq.h"
 #include "qapi/error.h"
 #include "qemu/guest-random.h"
+#include "qemu/host-utils.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
@@ -31,6 +32,8 @@
 #define MT8113_SCPSYS_PWR_ON             BIT(2)
 #define MT8113_SCPSYS_PWR_ON_2ND         BIT(3)
 #define MT8113_SCPSYS_PWR_RST_B          BIT(0)
+#define MT8113_SCPSYS_PWR_ISO            BIT(1)
+#define MT8113_SCPSYS_PWR_CLK_DIS        BIT(4)
 #define MT8113_SCPSYS_PWR_ACK            BIT(30)
 #define MT8113_SCPSYS_PWR_ACK_2ND        BIT(31)
 #define MT8113_SCPSYS_CONSYS_TOP2_ACK    BIT(30)
@@ -369,7 +372,10 @@ static void mt8113_infrasys_write(void *opaque, hwaddr offset,
         uint32_t *control = &s->infrasys_regs[prot->control / 4];
         uint32_t *status = &s->infrasys_regs[prot->status / 4];
 
-        if (offset == prot->control) {
+        if (offset == prot->status) {
+            /* Protection acknowledgments are read-only. */
+            return;
+        } else if (offset == prot->control) {
             *control = value;
             *status = value;
             return;
@@ -1939,21 +1945,56 @@ typedef struct MT8113PowerDomain {
     uint32_t status;
     uint32_t sram_power_down;
     uint32_t sram_ack;
+    uint32_t bus_protection[ARRAY_SIZE(mt8113_bus_protection)];
 } MT8113PowerDomain;
 
+/* MT8512 scp_domain_data_mt8512 and the WMT CONSYS power sequence. */
 static const MT8113PowerDomain mt8113_power_domains[] = {
     { MT8113_SCPSYS_CONSYS_PWR_CTRL,
-             BIT(1),  BIT(8),       BIT(12) }, /* CONSYS */
-    { 0x374, BIT(15), BIT(8),       BIT(12) }, /* MM */
-    { 0x38c, BIT(16), BIT(8),       BIT(12) }, /* IMG */
-    { 0x39c, BIT(25), BIT(8),       BIT(12) }, /* IP0 */
-    { 0x384, BIT(26), BIT(8),       BIT(12) }, /* IP1 */
-    { 0x388, BIT(27), BIT(8),       BIT(12) }, /* IP2 */
-    { 0x37c, BIT(17), 0x00000f00, 0x0000f000 }, /* DSP */
-    { 0x314, BIT(24), 0x00000f00, 0x0001e000 }, /* AUDAFE */
-    { 0x328, BIT(23), BIT(8),       BIT(12) }, /* AUDSRC */
-    { 0x3a4, BIT(20), BIT(8),       BIT(12) }, /* USB */
+             BIT(1), BIT(8), BIT(12),
+             { BIT(13) | BIT(14), BIT(18) | BIT(21), 0 } }, /* CONSYS */
+    { 0x374, BIT(15), BIT(8), BIT(12),
+             { 0, BIT(16) | BIT(17),
+               BIT(8) | BIT(9) | BIT(10) | BIT(11) } }, /* MM */
+    { 0x38c, BIT(16), BIT(8), BIT(12), { 0 } }, /* IMG */
+    { 0x39c, BIT(25), BIT(8), BIT(12),
+             { 0, 0, BIT(5) | BIT(6) | BIT(7) | BIT(12) |
+                     BIT(14) | BIT(16) | BIT(18) } }, /* IP0 */
+    { 0x384, BIT(26), BIT(8), BIT(12), { BIT(2) | BIT(4), 0, 0 } }, /* IP1 */
+    { 0x388, BIT(27), BIT(8), BIT(12), { BIT(3) | BIT(5), 0, 0 } }, /* IP2 */
+    { 0x37c, BIT(17), 0x00000f00, 0x0000f000,
+             { BIT(1) | BIT(7) | BIT(10) | BIT(11) | BIT(24), 0, 0 } }, /* DSP */
+    { 0x314, BIT(24), 0x00000f00, 0x0001e000,
+             { BIT(22) | BIT(28), 0, 0 } }, /* AUDAFE */
+    { 0x328, BIT(23), BIT(8), BIT(12), { BIT(21), 0, 0 } }, /* AUDSRC */
+    { 0x3a4, BIT(20), BIT(8), BIT(12), { 0, 0, BIT(0) | BIT(1) } }, /* USB */
 };
+
+static void mt8113_power_reset(MT8113State *s)
+{
+    /*
+     * The switchable domains start off, so their bus ports must be protected.
+     * Starting EN/STA at zero leaves powered-down IP, DSP and audio ports
+     * exposed. Firmware and the OS release each domain's protection explicitly
+     * through the SET/CLR registers after its power-on sequence.
+     */
+    for (size_t i = 0; i < ARRAY_SIZE(mt8113_power_domains); i++) {
+        const MT8113PowerDomain *domain = &mt8113_power_domains[i];
+        uint32_t control = MT8113_SCPSYS_PWR_ISO | MT8113_SCPSYS_PWR_CLK_DIS;
+
+        /* CONSYS manages its SRAM internally, outside the AP power sequence. */
+        if (domain->control != MT8113_SCPSYS_CONSYS_PWR_CTRL) {
+            control |= domain->sram_power_down | domain->sram_ack;
+        }
+        s->scpsys_regs[domain->control / 4] = control;
+        for (size_t bank = 0; bank < ARRAY_SIZE(mt8113_bus_protection); bank++) {
+            const MT8113BusProtection *prot = &mt8113_bus_protection[bank];
+
+            s->infrasys_regs[prot->control / 4] |= domain->bus_protection[bank];
+            s->infrasys_regs[prot->status / 4] |= domain->bus_protection[bank];
+        }
+    }
+}
 
 static const MT8113PowerDomain *mt8113_power_domain(hwaddr offset)
 {
@@ -1980,6 +2021,10 @@ static void mt8113_scpsys_write(void *opaque, hwaddr offset, uint64_t value,
     const MT8113PowerDomain *domain = mt8113_power_domain(offset);
     uint32_t control = value;
 
+    if (offset == MT8113_SCPSYS_PWR_STATUS ||
+        offset == MT8113_SCPSYS_PWR_STATUS_2ND) {
+        return;
+    }
     if (domain) {
         uint32_t *status = &s->scpsys_regs[MT8113_SCPSYS_PWR_STATUS / 4];
         uint32_t *status_2nd =
@@ -2000,12 +2045,10 @@ static void mt8113_scpsys_write(void *opaque, hwaddr offset, uint64_t value,
             control &= ~MT8113_SCPSYS_PWR_ACK_2ND;
         }
 
-        if ((control & domain->sram_power_down) ==
-            domain->sram_power_down) {
-            control |= domain->sram_ack;
-        } else if (!(control & domain->sram_power_down)) {
-            control &= ~domain->sram_ack;
-        }
+        /* Each SRAM bank acknowledges independently, including staged wakes. */
+        control &= ~domain->sram_ack;
+        control |= (control & domain->sram_power_down) <<
+            (ctz32(domain->sram_ack) - ctz32(domain->sram_power_down));
 
         /* CONSYS has a second, top-off domain acknowledged after reset. */
         if (offset == MT8113_SCPSYS_CONSYS_PWR_CTRL) {
@@ -3227,10 +3270,8 @@ static void mt8113_usb_reset(MT8113USBState *usb)
                  !qemu_get_queue(usb->nic)->link_down);
 }
 
-static void mt8113_wifi_system_reset(void *opaque)
+static void mt8113_wifi_reset(MT8113State *s)
 {
-    MT8113State *s = opaque;
-
     if (s->wifi_timer) {
         timer_del(s->wifi_timer);
     }
@@ -3247,13 +3288,6 @@ static void mt8113_wifi_system_reset(void *opaque)
     qemu_set_irq(s->wifi_irq, 0);
 }
 
-static void mt8113_usb_system_reset(void *opaque)
-{
-    MT8113State *s = opaque;
-
-    mt8113_usb_reset(&s->usb);
-}
-
 static void mt8113_reset(DeviceState *dev)
 {
     MT8113State *s = MT8113(dev);
@@ -3262,17 +3296,12 @@ static void mt8113_reset(DeviceState *dev)
     s->gpt_start_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     s->gpt_irq_status = 0;
     s->rng_ctrl = 0;
-    s->wifi_firmware_ready = false;
-    s->wifi_associated = false;
-    s->wifi_scan_pending = 0;
-    s->wifi_management_length = 0;
-    if (s->wifi_timer) {
-        timer_del(s->wifi_timer);
-    }
+    mt8113_wifi_reset(s);
 
     memset(s->topckgen_regs, 0, sizeof(s->topckgen_regs));
     memset(s->infrasys_regs, 0, sizeof(s->infrasys_regs));
     memset(s->scpsys_regs, 0, sizeof(s->scpsys_regs));
+    mt8113_power_reset(s);
     memset(s->toprgu_regs, 0, sizeof(s->toprgu_regs));
     memset(s->timer_regs, 0, sizeof(s->timer_regs));
     memset(s->apmixedsys_regs, 0, sizeof(s->apmixedsys_regs));
@@ -3282,7 +3311,6 @@ static void mt8113_reset(DeviceState *dev)
     memset(s->btif_regs, 0, sizeof(s->btif_regs));
     memset(s->btif_tx_dma_regs, 0, sizeof(s->btif_tx_dma_regs));
     memset(s->btif_rx_dma_regs, 0, sizeof(s->btif_rx_dma_regs));
-    memset(s->wifi_regs, 0, sizeof(s->wifi_regs));
     for (int i = 0; i < ARRAY_SIZE(s->usbphy); i++) {
         memset(s->usbphy[i].regs, 0, sizeof(s->usbphy[i].regs));
     }
@@ -3319,7 +3347,11 @@ static void mt8113_reset(DeviceState *dev)
     qemu_set_irq(s->timer_irq, 0);
     qemu_set_irq(s->svs_irq, 0);
     qemu_set_irq(s->btif_irq, 0);
-    qemu_set_irq(s->wifi_irq, 0);
+}
+
+static void mt8113_system_reset(void *opaque)
+{
+    mt8113_reset(DEVICE(opaque));
 }
 
 static bool mt8113_realize_gic(MT8113State *s, Error **errp)
@@ -3682,17 +3714,19 @@ static void mt8113_realize(DeviceState *dev, Error **errp)
                            qdev_get_gpio_in(gicdev, hwtcon_irq[i]));
     }
 
-    /* The busless SoC is not otherwise reached by the system reset tree. */
-    qemu_register_reset(mt8113_usb_system_reset, s);
-    qemu_register_reset(mt8113_wifi_system_reset, s);
+    /* The busless SoC is not otherwise reached by the system reset tree.
+     * Reset its own registers here and on system reset; CPU and sysbus child
+     * resets remain owned by the board and their respective buses.
+     */
+    mt8113_reset(dev);
+    qemu_register_reset(mt8113_system_reset, s);
 }
 
 static void mt8113_unrealize(DeviceState *dev)
 {
     MT8113State *s = MT8113(dev);
 
-    qemu_unregister_reset(mt8113_usb_system_reset, s);
-    qemu_unregister_reset(mt8113_wifi_system_reset, s);
+    qemu_unregister_reset(mt8113_system_reset, s);
     if (s->wifi_timer) {
         timer_free(s->wifi_timer);
     }
