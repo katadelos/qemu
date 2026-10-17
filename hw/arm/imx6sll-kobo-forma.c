@@ -196,6 +196,11 @@ static void forma_init(MachineState *ms)
     object_property_set_bool(OBJECT(s), "has-el3", false, &error_fatal);
     object_property_set_bool(OBJECT(&s->usdhc[0]), "defer-data-transfer",
                              false, &error_fatal);
+    for (int i = 0; i < 3; i++) {
+        object_property_set_bool(OBJECT(&s->usdhc[i]),
+                                 "preserve-interrupt-enables-on-reset",
+                                 true, &error_fatal);
+    }
     object_property_set_uint(OBJECT(&s->src), "sbmr1", 0x60, &error_fatal);
     /* I2C pull-ups, released keys and open cover; EPDC power good. */
     for (int i = 0; i < FSL_IMX6_NUM_GPIOS; i++) {
