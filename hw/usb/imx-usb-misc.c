@@ -6,17 +6,20 @@
 #include "hw/usb/imx-usb-misc.h"
 #include "migration/vmstate.h"
 #include "qemu/module.h"
+#include "trace.h"
 
 #define IMX5_USBCTRL_OWIE BIT(27)
 #define IMX6_USBCTRL_OWIE BIT(10)
 #define USBCTRL_OWIR BIT(31)
+#define IMX5_USBCTRL_H1WIE BIT(11)
+#define IMX5_USBCTRL_H1WIR BIT(15)
 
 OBJECT_DECLARE_SIMPLE_TYPE(IMXUSBMiscState, IMX_USB_MISC)
 
 struct IMXUSBMiscState {
     SysBusDevice parent_obj;
     MemoryRegion iomem;
-    qemu_irq irq;
+    qemu_irq irq[2];
     uint32_t ctrl;
     bool imx6_layout;
 };
@@ -30,21 +33,28 @@ static void imx_usb_misc_update_irq(IMXUSBMiscState *s)
 {
     uint32_t mask = imx_usb_misc_wakeup_enable(s) | USBCTRL_OWIR;
 
-    qemu_set_irq(s->irq, (s->ctrl & mask) == mask);
+    qemu_set_irq(s->irq[0], (s->ctrl & mask) == mask);
+    mask = IMX5_USBCTRL_H1WIE | IMX5_USBCTRL_H1WIR;
+    qemu_set_irq(s->irq[1], !s->imx6_layout && (s->ctrl & mask) == mask);
 }
 
 static void imx_usb_misc_resume(void *opaque, int n, int level)
 {
     IMXUSBMiscState *s = opaque;
 
-    if (level && (s->ctrl & imx_usb_misc_wakeup_enable(s))) {
-        s->ctrl |= USBCTRL_OWIR;
+    uint32_t enable = n ? IMX5_USBCTRL_H1WIE : imx_usb_misc_wakeup_enable(s);
+    uint32_t request = n ? IMX5_USBCTRL_H1WIR : USBCTRL_OWIR;
+
+    trace_imx_usb_misc_resume(n, level, s->ctrl);
+    if (level && (s->ctrl & enable)) {
+        s->ctrl |= request;
         imx_usb_misc_update_irq(s);
     }
 }
 
 static uint64_t imx_usb_misc_read(void *opaque, hwaddr addr, unsigned size)
 {
+    trace_imx_usb_misc_ctrl(false, IMX_USB_MISC(opaque)->ctrl);
     return IMX_USB_MISC(opaque)->ctrl;
 }
 
@@ -54,9 +64,16 @@ static void imx_usb_misc_write(void *opaque, hwaddr addr, uint64_t value,
     IMXUSBMiscState *s = opaque;
 
     /* The read-only request latch clears when wakeup interrupts are disabled. */
-    s->ctrl = (value & ~USBCTRL_OWIR) | (s->ctrl & USBCTRL_OWIR);
+    uint32_t requests = USBCTRL_OWIR |
+        (s->imx6_layout ? 0 : IMX5_USBCTRL_H1WIR);
+
+    s->ctrl = (value & ~requests) | (s->ctrl & requests);
+    trace_imx_usb_misc_ctrl(true, value);
     if (!(s->ctrl & imx_usb_misc_wakeup_enable(s))) {
         s->ctrl &= ~USBCTRL_OWIR;
+    }
+    if (!(s->ctrl & IMX5_USBCTRL_H1WIE) && !s->imx6_layout) {
+        s->ctrl &= ~IMX5_USBCTRL_H1WIR;
     }
     imx_usb_misc_update_irq(s);
 }
@@ -97,8 +114,9 @@ static void imx_usb_misc_init(Object *obj)
     memory_region_init_io(&s->iomem, obj, &imx_usb_misc_ops, s,
                           TYPE_IMX_USB_MISC, 4);
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
-    sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
-    qdev_init_gpio_in(DEVICE(obj), imx_usb_misc_resume, 1);
+    sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq[0]);
+    sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq[1]);
+    qdev_init_gpio_in(DEVICE(obj), imx_usb_misc_resume, 2);
 }
 
 static void imx_usb_misc_class_init(ObjectClass *klass, const void *data)

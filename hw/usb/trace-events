@@ -373,3 +373,7 @@ canokey_unrealize(void)
 rtl8188eu_power(bool powered) "powered=%d"
 rtl8188eu_register(bool read, unsigned address, unsigned length, uint32_t value) "read=%d address=0x%04x length=%u value=0x%08x"
 rtl8188eu_frame(bool transmit, unsigned length, uint16_t control) "transmit=%d length=%u control=0x%04x"
+
+# imx-usb-misc.c
+imx_usb_misc_ctrl(bool write, uint32_t value) "write=%d value=0x%08x"
+imx_usb_misc_resume(int line, int level, uint32_t value) "line=%d level=%d ctrl=0x%08x"
