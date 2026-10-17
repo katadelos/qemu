@@ -18,6 +18,7 @@
 #include "net/net.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
+#include "migration/vmstate.h"
 
 enum {
     CHIPIDEA_USBx_DCIVERSION   = 0x000,
@@ -922,6 +923,66 @@ static void chipidea_reset_hold(Object *obj, ResetType type)
     }
 }
 
+static bool chipidea_gadget_needed(void *opaque)
+{
+    ChipideaState *ci = opaque;
+
+    return ci->gadget;
+}
+
+static int chipidea_gadget_post_load(void *opaque, int version_id)
+{
+    ChipideaState *ci = opaque;
+
+    ci->processing_in = false;
+    qemu_set_irq(ci->resume, ci->gadget_resuming);
+    chipidea_update_irq(ci);
+    return 0;
+}
+
+static const VMStateDescription vmstate_chipidea_gadget = {
+    .name = "usb-chipidea/gadget",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = chipidea_gadget_needed,
+    .post_load = chipidea_gadget_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(wakeup_irq, ChipideaState),
+        VMSTATE_UINT32(otgsc, ChipideaState),
+        VMSTATE_UINT32(dc_mode, ChipideaState),
+        VMSTATE_UINT32(endptsetupstat, ChipideaState),
+        VMSTATE_UINT32(endpointprime, ChipideaState),
+        VMSTATE_UINT32(endptflush, ChipideaState),
+        VMSTATE_UINT32(endptstatus, ChipideaState),
+        VMSTATE_UINT32(endptcomplete, ChipideaState),
+        VMSTATE_UINT32_ARRAY(endptctrl, ChipideaState, 8),
+        VMSTATE_TIMER_PTR(gadget_config_timer, ChipideaState),
+        VMSTATE_TIMER_PTR(gadget_idle_timer, ChipideaState),
+        VMSTATE_TIMER_PTR(gadget_resume_timer, ChipideaState),
+        VMSTATE_BOOL(gadget_host_suspended, ChipideaState),
+        VMSTATE_BOOL(gadget_resuming, ChipideaState),
+        VMSTATE_UINT32(gadget_config_phase, ChipideaState),
+        VMSTATE_BOOL(gadget_configured, ChipideaState),
+        VMSTATE_BOOL(endpoint_commands_ready, ChipideaState),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static const VMStateDescription vmstate_chipidea = {
+    .name = "usb-chipidea",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_STRUCT(parent_obj.ehci, ChipideaState, 0,
+                       vmstate_ehci, EHCIState),
+        VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_chipidea_gadget,
+        NULL
+    },
+};
+
 static void chipidea_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -938,6 +999,7 @@ static void chipidea_class_init(ObjectClass *klass, const void *data)
 
     set_bit(DEVICE_CATEGORY_USB, dc->categories);
     dc->desc = "Chipidea USB Module";
+    dc->vmsd = &vmstate_chipidea;
     device_class_set_parent_realize(dc, chipidea_realize,
                                     &chipidea_parent_realize);
     resettable_class_set_parent_phases(rc, NULL, chipidea_reset_hold, NULL,
