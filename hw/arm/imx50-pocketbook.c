@@ -1,5 +1,6 @@
 /*
- * PocketBook i.MX50 boards.
+ * PocketBook 360 Plus New 512, Basic 611/613, Touch 622, Touch Lux 623
+ * and Color Lux 801.
  *
  * Board wiring follows the matching pocketbook-free kernel/U-Boot trees;
  * the Netronix 512/611 wiring is recovered from their original kernels and BSP.
@@ -794,6 +795,18 @@ static const PBProfile pb611_profile = {
     .wifi = true,
 };
 
+static const PBProfile pb512_profile = {
+    .description = "PocketBook 360 Plus New 512 (i.MX50 Netronix E50602)",
+    .ram_id = "pocketbook-512.ram",
+    .ram_size = PB_RAM_SIZE,
+    .hwid_straps = BIT(15), /* E50602: HWID 2 */
+    /* Align host directions with the stock 512 key/orientation transform. */
+    .matrix_contacts = { 8, 0, 1, 3, 2, 9, 10 },
+    .netronix = true,
+    .wifi = true,
+    .accelerometer = true,
+};
+
 static const PBProfile pb622_profile = {
     .description = "PocketBook Touch 622 (i.MX50 EP7)",
     .ram_id = "pocketbook-622.ram",
@@ -851,6 +864,11 @@ static const TypeInfo pb_types[] = {
         .class_size = sizeof(PBMachineClass),
         .abstract = true,
         .interfaces = arm_machine_interfaces,
+    }, {
+        .name = MACHINE_TYPE_NAME("imx50-pocketbook-512"),
+        .parent = TYPE_PB_MACHINE,
+        .class_init = pb_machine_class_init,
+        .class_data = &pb512_profile,
     }, {
         .name = MACHINE_TYPE_NAME("imx50-pocketbook-611"),
         .parent = TYPE_PB_MACHINE,
