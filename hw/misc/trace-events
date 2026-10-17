@@ -422,3 +422,6 @@ iommu_testdev_dma_read(uint64_t gva, uint32_t len) "gva=0x%" PRIx64 " len=%u"
 iommu_testdev_dma_verify(uint32_t expected, uint32_t actual) "expected=0x%x actual=0x%x"
 iommu_testdev_dma_result(uint32_t result) "DMA completed result=0x%x"
 iommu_testdev_dma_armed(bool armed) "armed=%d"
+
+# allwinner-b300-power.c
+allwinner_b300_scp_request(unsigned type, unsigned channel, uint32_t p0, uint32_t p1, uint32_t p2) "type=0x%02x channel=%u params=0x%x,0x%x,0x%x"

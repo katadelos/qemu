@@ -253,6 +253,9 @@ config AXP2XX_PMU
     bool
     depends on I2C
 
+config ALLWINNER_B300_POWER
+    bool
+
 config DJMEMC
     bool
 
