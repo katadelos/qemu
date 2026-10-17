@@ -168,6 +168,9 @@ struct SDState {
     BlockBackend *blk;
     uint8_t boot_config;
     bool boot_parts_in_memory;
+    bool rpmb_in_memory;
+    uint8_t *rpmb_data;
+    uint32_t rpmb_data_size;
     bool discard_writes;
     bool emmc_trim;
     uint64_t trim_commands;
@@ -1934,14 +1937,15 @@ static uint32_t sd_part_offset(SDState *sd)
                                  & EXT_CSD_PART_CONFIG_ACC_MASK;
     switch (partition_access) {
     case EXT_CSD_PART_CONFIG_ACC_DEFAULT:
-        return sd->boot_parts_in_memory ? sd->rpmb_part_size :
-               sd->boot_part_size * 2 + sd->rpmb_part_size;
+        return (sd->boot_parts_in_memory ? 0 : sd->boot_part_size * 2) +
+               (sd->rpmb_in_memory ? 0 : sd->rpmb_part_size);
     case EXT_CSD_PART_CONFIG_ACC_BOOT1:
         return 0;
     case EXT_CSD_PART_CONFIG_ACC_BOOT2:
         return sd->boot_part_size * 1;
     case EXT_CSD_PART_CONFIG_ACC_RPMB:
-        return sd->boot_parts_in_memory ? 0 : sd->boot_part_size * 2;
+        return sd->rpmb_in_memory || sd->boot_parts_in_memory ?
+               0 : sd->boot_part_size * 2;
     default:
          g_assert_not_reached();
     }
@@ -1979,10 +1983,9 @@ static void sd_reset(DeviceState *dev)
         sect = 0;
     }
     size = sect << HWBLOCK_SHIFT;
-    if (sd_is_emmc(sd) && !sd->boot_parts_in_memory) {
-        size -= sd->boot_part_size * 2 + sd->rpmb_part_size;
-    } else if (sd_is_emmc(sd)) {
-        size -= sd->rpmb_part_size;
+    if (sd_is_emmc(sd)) {
+        size -= (sd->boot_parts_in_memory ? 0 : sd->boot_part_size * 2) +
+                (sd->rpmb_in_memory ? 0 : sd->rpmb_part_size);
     }
     sd->backing_size = size;
     if (sd->reported_capacity) {
@@ -2127,6 +2130,18 @@ static bool vmstate_needed_for_emmc_boot_parts(void *opaque)
 
     return sd->boot_parts_in_memory;
 }
+static bool vmstate_needed_for_rpmb_data(void *opaque)
+{
+    return SDMMC_COMMON(opaque)->rpmb_in_memory;
+}
+static const VMStateDescription emmc_rpmb_data_vmstate = {
+    .name = "sd-card/rpmb-data", .version_id = 1, .minimum_version_id = 1,
+    .needed = vmstate_needed_for_rpmb_data,
+    .fields = (const VMStateField[]) {
+        VMSTATE_VBUFFER_UINT32(rpmb_data, SDState, 1, NULL, rpmb_data_size),
+        VMSTATE_END_OF_LIST()
+    },
+};
 
 static const VMStateDescription emmc_boot_parts_vmstate = {
     .name = "sd-card/boot-partitions",
@@ -2189,6 +2204,7 @@ static const VMStateDescription sd_vmstate = {
         &sd_ocr_vmstate,
         &emmc_extcsd_vmstate,
         &emmc_rpmb_vmstate,
+        &emmc_rpmb_data_vmstate,
         &emmc_boot_parts_vmstate,
         NULL
     },
@@ -2278,6 +2294,18 @@ static void sd_blk_write(SDState *sd, uint64_t addr, uint32_t len)
     sd_blk_write_buffer(sd, addr, len, sd->data);
 }
 
+static int rpmb_read_data(SDState *sd, uint64_t offset, void *buffer)
+{
+    if (!sd->rpmb_in_memory) {
+        return blk_pread(sd->blk, offset, RPMB_DATA_LEN, buffer, 0);
+    }
+    if (offset > sd->rpmb_data_size || RPMB_DATA_LEN > sd->rpmb_data_size - offset) {
+        return -EINVAL;
+    }
+    memcpy(buffer, sd->rpmb_data + offset, RPMB_DATA_LEN);
+    return 0;
+}
+
 static bool rpmb_calc_hmac(SDState *sd, const RPMBDataFrame *frame,
                            unsigned int num_blocks, uint8_t *mac)
 {
@@ -2318,7 +2346,7 @@ static bool rpmb_calc_hmac(SDState *sd, const RPMBDataFrame *frame,
 
         offset = lduw_be_p(&frame->address) * RPMB_DATA_LEN + sd_part_offset(sd);
         do {
-            if (blk_pread(sd->blk, offset, RPMB_DATA_LEN, buf, 0) < 0) {
+            if (rpmb_read_data(sd, offset, buf) < 0) {
                 error_report("sd_blk_read: read error on host side");
                 success = false;
                 break;
@@ -2360,8 +2388,7 @@ static void emmc_rpmb_blk_read(SDState *sd, uint64_t addr, uint32_t len)
             curr_block -= sd->multi_blk_cnt;
         }
         addr = curr_block * RPMB_DATA_LEN + sd_part_offset(sd);
-        if (blk_pread(sd->blk, addr, RPMB_DATA_LEN,
-                      sd->rpmb.result.data, 0) < 0) {
+        if (rpmb_read_data(sd, addr, sd->rpmb.result.data) < 0) {
             error_report("sd_blk_read: read error on host side");
             memset(sd->rpmb.result.data, 0, sizeof(sd->rpmb.result.data));
             stw_be_p(&sd->rpmb.result.result,
@@ -2439,7 +2466,17 @@ static void emmc_rpmb_blk_write(SDState *sd, uint64_t addr, uint32_t len)
         }
         sd->rpmb.result.address = frame->address;
         addr = lduw_be_p(&frame->address) * RPMB_DATA_LEN + sd_part_offset(sd);
-        if (blk_pwrite(sd->blk, addr, RPMB_DATA_LEN, frame->data, 0) < 0) {
+        int write_result;
+        if (sd->rpmb_in_memory) {
+            write_result = -EINVAL;
+            if (addr <= sd->rpmb_data_size && RPMB_DATA_LEN <= sd->rpmb_data_size - addr) {
+                memcpy(sd->rpmb_data + addr, frame->data, RPMB_DATA_LEN);
+                write_result = 0;
+            }
+        } else {
+            write_result = blk_pwrite(sd->blk, addr, RPMB_DATA_LEN, frame->data, 0);
+        }
+        if (write_result < 0) {
             error_report("sd_blk_write: write error on host side");
             stw_be_p(&sd->rpmb.result.result, RPMB_RESULT_WRITE_FAILURE);
         } else {
@@ -4576,6 +4613,7 @@ static void sd_instance_finalize(Object *obj)
         timer_free(sd->sdio_credit_timer);
     }
     g_free(sd->boot_parts);
+    g_free(sd->rpmb_data);
     g_free(sd->boot_parts_file);
 }
 
@@ -4620,11 +4658,8 @@ static void sd_realize(DeviceState *dev, Error **errp)
         blk_size = blk_getlength(sd->blk);
     }
     if (blk_size >= 0) {
-        if (sd->boot_parts_in_memory) {
-            blk_size -= sd->rpmb_part_size;
-        } else {
-            blk_size -= sd->boot_part_size * 2 + sd->rpmb_part_size;
-        }
+        blk_size -= (sd->boot_parts_in_memory ? 0 : sd->boot_part_size * 2) +
+                    (sd->rpmb_in_memory ? 0 : sd->rpmb_part_size);
         if (blk_size > SDSC_MAX_CAPACITY) {
             if (sd_is_emmc(sd) &&
                 !QEMU_IS_ALIGNED(blk_size, 1 << HWBLOCK_SHIFT)) {
@@ -4718,6 +4753,10 @@ static void sd_realize(DeviceState *dev, Error **errp)
             memcpy(sd->boot_parts, contents, length);
         }
     }
+    if (sd->rpmb_in_memory) {
+        sd->rpmb_data_size = sd->rpmb_part_size;
+        sd->rpmb_data = g_malloc0(sd->rpmb_data_size);
+    }
 }
 
 void emmc_boot_partition_write(DeviceState *dev, unsigned int partition,
@@ -4787,6 +4826,7 @@ static const Property emmc_properties[] = {
     DEFINE_PROP_STRING("boot-partitions-file", SDState, boot_parts_file),
     DEFINE_PROP_UINT8("boot-config", SDState, boot_config, 0x0),
     DEFINE_PROP_UINT64("rpmb-partition-size", SDState, rpmb_part_size, 0),
+    DEFINE_PROP_BOOL("rpmb-in-memory", SDState, rpmb_in_memory, false),
 };
 
 static void sdmmc_common_class_init(ObjectClass *klass, const void *data)
