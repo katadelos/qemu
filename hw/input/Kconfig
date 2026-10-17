@@ -1,6 +1,9 @@
 config ADB
     bool
 
+config IMX_KEYPAD
+    bool
+
 config PCKBD
     bool
     select PS2

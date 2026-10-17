@@ -1,3 +1,4 @@
+system_ss.add(when: 'CONFIG_IMX_KEYPAD', if_true: files('imx_keypad.c'))
 system_ss.add(files('hid.c'))
 system_ss.add(when: 'CONFIG_WARIO_KEYBOARD', if_true: files('wario-keyboard.c'))
 system_ss.add(when: 'CONFIG_KOBO_NTX_BUTTONS', if_true: files('forma-buttons.c'))
