@@ -41,7 +41,7 @@
 
 OBJECT_DECLARE_TYPE(AXP2xxI2CState, AXP2xxClass, AXP2XX)
 
-#define NR_REGS                            (0xff)
+#define NR_REGS                            (0x100)
 
 /* A simple I2C slave which returns values of ID or CNT register. */
 typedef struct AXP2xxI2CState {
@@ -196,13 +196,10 @@ static int axp2xx_event(I2CSlave *i2c, enum i2c_event event)
 static uint8_t axp2xx_rx(I2CSlave *i2c)
 {
     AXP2xxI2CState *s = AXP2XX(i2c);
-    uint8_t ret = 0xff;
+    uint8_t index = s->ptr++;
+    uint8_t ret = s->regs[index];
 
-    if (s->ptr < NR_REGS) {
-        ret = s->regs[s->ptr++];
-    }
-
-    trace_axp2xx_rx(s->ptr - 1, ret);
+    trace_axp2xx_rx(index, ret);
 
     return ret;
 }
