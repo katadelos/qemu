@@ -389,6 +389,21 @@ static const B288PBProfile pb632_profile = {
     .touch_invert_y = true,
 };
 
+static const B288PBProfile pb633_profile = {
+    .description = "PocketBook Color (633, Allwinner B288)",
+    .ram_id = "pb633.ram",
+    .ram_size = 1 * GiB,
+    .width = 1448, .height = 1072, .rotation = 90,
+    .color_filter = 1,
+    .touch_width = 1448, .touch_height = 1072,
+    .touch_swap_axes = true,
+    .touch_invert_y = true,
+    .pmic_wakeup = 3 * 32 + 7, .pmic_powerup = 3 * 32 + 6,
+    .pmic_powergood = 3 * 32 + 26, .pmic_irq = 3 * 32 + 25,
+    .page_next = 32 + 14, .page_previous = 32 + 11,
+    .home_mv = 240,
+};
+
 static const B288PBProfile pb634_profile = {
     .description = "PocketBook Verse Pro (634, Allwinner B288)",
     .ram_id = "pb634.ram",
@@ -498,6 +513,11 @@ static const TypeInfo b288_pb_types[] = {
         .parent = TYPE_B288PB_MACHINE,
         .class_init = b288_pb_class_init,
         .class_data = &pb632_profile,
+    }, {
+        .name = MACHINE_TYPE_NAME("allwinner-b288-pocketbook-633"),
+        .parent = TYPE_B288PB_MACHINE,
+        .class_init = b288_pb_class_init,
+        .class_data = &pb633_profile,
     }, {
         .name = MACHINE_TYPE_NAME("allwinner-b288-pocketbook-634"),
         .parent = TYPE_B288PB_MACHINE,
