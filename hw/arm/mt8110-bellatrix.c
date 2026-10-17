@@ -660,6 +660,7 @@ static void bellatrix_init(MachineState *machine)
     BellatrixMachineState *bms = BELLATRIX_MACHINE(machine);
     const BellatrixBoard *board = bellatrix_find_board(bms->board);
     bool malbec = !strcmp(board->name, "malbec");
+    bool rossini = !strcmp(board->name, "rossini");
     bool button_support = board->scribe || board->prosecco;
     MT8113State *soc;
     I2CSlave *fp9930 = NULL;
@@ -701,9 +702,13 @@ static void bellatrix_init(MachineState *machine)
     bms->usb_vbus_input = qemu_allocate_irq(bellatrix_usb_vbus, bms, 0);
     qdev_connect_gpio_out_named(DEVICE(soc), "usb-vbus", 0,
                                 bms->usb_vbus_input);
-    if (board->scribe || malbec || board->prosecco) {
+    if (board->scribe || malbec || rossini || board->prosecco) {
         DeviceState *adc = qdev_new(TYPE_MT6577_AUXADC);
         object_property_add_child(OBJECT(machine), "auxadc", OBJECT(adc));
+        if (rossini) {
+            /* Rossini channel 1 uses a 47k pull-up and 100k NTC at 25 C. */
+            qdev_prop_set_uint32(adc, "channel1-millivolts", 1224);
+        }
         sysbus_realize_and_unref(SYS_BUS_DEVICE(adc), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(adc), 0, 0x11001000);
     }
