@@ -465,6 +465,13 @@ static uint64_t allwinner_sdhost_read(void *opaque, hwaddr offset,
     bool out_of_bounds = false;
     uint32_t res = 0;
 
+    if (size == 2) {
+        /* The sunxi BSP updates IMASK's low half without changing SDIO IRQs. */
+        res = extract32(s->irq_mask, (offset & 2) * 8, 16);
+        trace_allwinner_sdhost_read(offset, res, size);
+        return res;
+    }
+
     switch (offset) {
     case REG_SD_GCTL:      /* Global Control */
         res = s->global_ctl;
@@ -633,6 +640,12 @@ static void allwinner_sdhost_write(void *opaque, hwaddr offset,
 
     trace_allwinner_sdhost_write(offset, value, size);
 
+    if (size == 2) {
+        s->irq_mask = deposit32(s->irq_mask, (offset & 2) * 8, 16, value);
+        allwinner_sdhost_update_irq(s);
+        return;
+    }
+
     switch (offset) {
     case REG_SD_GCTL:      /* Global Control */
         s->global_ctl = value;
@@ -796,15 +809,22 @@ static void allwinner_sdhost_write(void *opaque, hwaddr offset,
     }
 }
 
+static bool allwinner_sdhost_accepts(void *opaque, hwaddr addr, unsigned size,
+                                    bool is_write, MemTxAttrs attrs)
+{
+    return size == 4 || (size == 2 && (addr & ~3) == REG_SD_IMKR);
+}
+
 static const MemoryRegionOps allwinner_sdhost_ops = {
     .read = allwinner_sdhost_read,
     .write = allwinner_sdhost_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = {
-        .min_access_size = 4,
+        .min_access_size = 2,
         .max_access_size = 4,
+        .accepts = allwinner_sdhost_accepts,
     },
-    .impl.min_access_size = 4,
+    .impl.min_access_size = 2,
 };
 
 static const VMStateDescription vmstate_allwinner_sdhost = {
