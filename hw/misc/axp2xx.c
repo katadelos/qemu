@@ -31,6 +31,7 @@
 #include "qemu/log.h"
 #include "qom/object.h"
 #include "trace.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/i2c/i2c.h"
 #include "migration/vmstate.h"
 
@@ -51,6 +52,7 @@ typedef struct AXP2xxI2CState {
     uint8_t regs[NR_REGS];  /* peripheral registers */
     uint8_t ptr;            /* current register index */
     uint8_t count;          /* counter used for tx/rx */
+    bool battery_present;
 } AXP2xxI2CState;
 
 typedef struct AXP2xxClass {
@@ -97,6 +99,17 @@ static void axp209_reset_enter(AXP2xxI2CState *s, ResetType type)
     s->regs[0x91] = 0xa0;
     s->regs[0x92] = 0x07;
     s->regs[0x93] = 0x07;
+
+    if (s->battery_present) {
+        s->regs[0x00] = BIT(7) | BIT(6); /* AC input present and valid. */
+        s->regs[0x01] = BIT(5);          /* Battery present, not charging. */
+        s->regs[0x05] = 0x80 | 85;      /* Saved, valid battery percentage. */
+        s->regs[0x78] = 0xe3;           /* Battery ADC: 4.0 V, 1.1 mV/LSB. */
+        s->regs[0x79] = 4;
+        s->regs[0xb9] = 85;             /* Fuel gauge enabled, 85%. */
+        s->regs[0xbc] = 0xe3;           /* Open-circuit battery voltage. */
+        s->regs[0xbd] = 4;
+    }
 }
 
 #define AXP221_PWR_STATUS_ACIN_PRESENT          BIT(7)
@@ -261,8 +274,12 @@ static const TypeInfo axp2xx_info = {
 static void axp209_class_init(ObjectClass *oc, const void *data)
 {
     AXP2xxClass *sc = AXP2XX_CLASS(oc);
+    static const Property properties[] = {
+        DEFINE_PROP_BOOL("battery-present", AXP2xxI2CState, battery_present, false),
+    };
 
     sc->reset_enter = axp209_reset_enter;
+    device_class_set_props(DEVICE_CLASS(oc), properties);
 }
 
 static const TypeInfo axp209_info = {
