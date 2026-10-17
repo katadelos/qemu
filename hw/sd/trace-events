@@ -95,3 +95,10 @@ rtl8192es_register(bool write, unsigned reg, uint8_t value) "write=%d reg=0x%x v
 rtl8192es_frame(bool tx, uint16_t fc, unsigned size) "tx=%d fc=0x%04x size=%u"
 rtl8192es_command(unsigned cmd, uint32_t arg) "CMD%u arg=0x%08x"
 rtl8192es_power(bool on) "on=%d"
+
+# xradio-sdio.c
+xradio_command(unsigned cmd, uint32_t arg) "CMD%u arg=0x%08x"
+xradio_hif(bool write, unsigned reg, uint32_t base, unsigned length, uint32_t value) "write=%d reg=0x%x base=0x%08x len=%u value=0x%08x"
+xradio_wsm(bool tx, unsigned id, unsigned length) "tx=%d id=0x%04x len=%u"
+xradio_frame(bool tx, uint16_t fc, unsigned length) "tx=%d fc=0x%04x len=%u"
+xradio_power(bool on) "on=%d"
