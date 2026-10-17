@@ -1557,7 +1557,9 @@ static const uint8_t sd_csd_rw_mask[16] = {
 
 static void emmc_set_ext_csd(SDState *sd, uint64_t size)
 {
-    uint32_t sectcount = size >> HWBLOCK_SHIFT;
+    /* Byte-addressed eMMC describes capacity in CSD, with SEC_COUNT zero.
+     * The extended sector count belongs to devices larger than 2 GiB. */
+    uint32_t sectcount = size > 2 * GiB ? size >> HWBLOCK_SHIFT : 0;
 
     memset(sd->ext_csd, 0, sizeof(sd->ext_csd)); /* FIXME only RW at reset */
 
@@ -1617,13 +1619,14 @@ static void emmc_set_csd(SDState *sd, uint64_t size)
         sd->csd[5] = 0x5a;
         sd->csd[6] = 0x80 | ((csize1k >> 10) & 0xf);
         sd->csd[7] = (csize1k >> 2) & 0xff;
+        sd->csd[8] = 0x3f | ((csize1k & 3) << 6);
     } else { /* >= 2GB : size stored in ext CSD, block addressing */
         sd->csd[5] = 0x59;
         sd->csd[6] = 0x8f;
         sd->csd[7] = 0xff;
+        sd->csd[8] = 0xff;
         sd->ocr = FIELD_DP32(sd->ocr, OCR, CARD_CAPACITY, 1);
     }
-    sd->csd[8] = 0xff;
     sd->csd[9] = 0xfc |     /* Max. write current */
         ((CMULT_SHIFT - 2) >> 1);
     sd->csd[10] = 0x40 |    /* Erase sector size */
@@ -4637,7 +4640,17 @@ static void sd_realize(DeviceState *dev, Error **errp)
                                   "multiples of 512K", errp);
                 return;
             }
-        } else if (blk_size > 0 && !is_power_of_2(blk_size)) {
+        } else if (sd_is_emmc(sd) && blk_size > 0 &&
+                   !QEMU_IS_ALIGNED(blk_size, 512 * KiB)) {
+            /* The byte-addressed eMMC CSD encodes capacity in 512 KiB
+             * units; its C_SIZE field need not describe a power of two. */
+            int64_t blk_size_aligned = QEMU_ALIGN_UP(blk_size, 512 * KiB);
+
+            sd_blk_size_error(sd, blk_size, blk_size_aligned,
+                              "multiples of 512K", errp);
+            return;
+        } else if (!sd_is_emmc(sd) && blk_size > 0 &&
+                   !is_power_of_2(blk_size)) {
             sd_blk_size_error(sd, blk_size, pow2ceil(blk_size), "a power of 2",
                               errp);
             return;
