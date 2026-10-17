@@ -151,6 +151,30 @@ static bool imx50_epdc_render_direct(IMX50EPDCState *s,
     return true;
 }
 
+static void imx50_epdc_render_rgb(IMX50EPDCState *s, unsigned left,
+                                  unsigned top, unsigned width,
+                                  unsigned height)
+{
+    DisplaySurface *surface = imx50_epdc_prepare_surface(s,
+                                IMX50_EPDC_RGB_WIDTH / 3,
+                                IMX50_EPDC_RGB_HEIGHT);
+    unsigned first = left / 3;
+    unsigned end = DIV_ROUND_UP(left + width, 3);
+    unsigned x, y;
+
+    for (y = top; y < top + height; y++) {
+        uint32_t *pixels = (uint32_t *)((uint8_t *)surface_data(surface) +
+                                       (size_t)y * surface_stride(surface));
+        const uint8_t *row = s->rgb_buffer + (size_t)y * IMX50_EPDC_RGB_WIDTH;
+
+        for (x = first; x < end; x++) {
+            pixels[x] = 0xff000000U | row[x * 3] << 16 |
+                         row[x * 3 + 1] << 8 | row[x * 3 + 2];
+        }
+    }
+    dpy_gfx_update(s->console, first, top, end - first, height);
+}
+
 static void imx50_epdc_render_update(IMX50EPDCState *s,
                                      uint32_t source, uint32_t cord,
                                      uint32_t size)
@@ -203,6 +227,21 @@ static void imx50_epdc_render_update(IMX50EPDCState *s,
         qemu_log_mask(LOG_GUEST_ERROR,
                       "%s: cannot read update buffer at 0x%08x\n",
                       TYPE_IMX50_EPDC, source);
+        return;
+    }
+
+    if (s->rgb_stripe) {
+        if (panel_width != IMX50_EPDC_RGB_WIDTH ||
+            panel_height != IMX50_EPDC_RGB_HEIGHT) {
+            return;
+        }
+        /* EC080SC1 has consecutive R/G/B subpixels along each scan line.
+         * Retain untouched channels when an update cuts through a triplet. */
+        for (y = 0; y < height; y++) {
+            memcpy(s->rgb_buffer + (size_t)(top + y) * panel_width + left,
+                   update + (size_t)y * stride, width);
+        }
+        imx50_epdc_render_rgb(s, left, top, width, height);
         return;
     }
 
@@ -486,12 +525,45 @@ static void imx50_epdc_reset(DeviceState *dev)
     IMX50EPDCState *s = IMX50_EPDC(dev);
 
     imx50_epdc_reset_registers(s);
+    if (s->rgb_stripe) {
+        memset(s->rgb_buffer, 0xff, sizeof(s->rgb_buffer));
+        if (s->console) {
+            imx50_epdc_render_rgb(s, 0, 0, IMX50_EPDC_RGB_WIDTH,
+                                  IMX50_EPDC_RGB_HEIGHT);
+        }
+    }
     if (s->direct_fb && s->scanout_timer) {
         timer_mod(s->scanout_timer,
                   qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
                   EPDC_SCANOUT_REFRESH_MS);
     }
 }
+
+static bool imx50_epdc_rgb_needed(void *opaque)
+{
+    return IMX50_EPDC(opaque)->rgb_stripe;
+}
+
+static int imx50_epdc_rgb_post_load(void *opaque, int version_id)
+{
+    IMX50EPDCState *s = opaque;
+
+    imx50_epdc_render_rgb(s, 0, 0, IMX50_EPDC_RGB_WIDTH,
+                          IMX50_EPDC_RGB_HEIGHT);
+    return 0;
+}
+
+static const VMStateDescription vmstate_imx50_epdc_rgb = {
+    .name = TYPE_IMX50_EPDC "/rgb",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = imx50_epdc_rgb_needed,
+    .post_load = imx50_epdc_rgb_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BUFFER(rgb_buffer, IMX50EPDCState),
+        VMSTATE_END_OF_LIST()
+    },
+};
 
 static int imx50_epdc_post_load(void *opaque, int version_id)
 {
@@ -515,6 +587,10 @@ static const VMStateDescription vmstate_imx50_epdc = {
         VMSTATE_TIMER_PTR(wb_timer, IMX50EPDCState),
         VMSTATE_TIMER_PTR(lut_timer, IMX50EPDCState),
         VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const[]) {
+        &vmstate_imx50_epdc_rgb,
+        NULL
     },
 };
 
@@ -569,6 +645,7 @@ static const Property imx50_epdc_properties[] = {
     DEFINE_PROP_UINT64("scanout-refreshes", IMX50EPDCState,
                        scanout_refreshes, 0),
     DEFINE_PROP_BOOL("rotate-ccw", IMX50EPDCState, rotate_ccw, true),
+    DEFINE_PROP_BOOL("rgb-stripe", IMX50EPDCState, rgb_stripe, false),
 };
 
 static void imx50_epdc_class_init(ObjectClass *klass, const void *data)

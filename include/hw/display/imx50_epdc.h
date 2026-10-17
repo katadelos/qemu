@@ -15,6 +15,8 @@
 OBJECT_DECLARE_SIMPLE_TYPE(IMX50EPDCState, IMX50_EPDC)
 
 #define IMX50_EPDC_MMIO_SIZE 0x1000
+#define IMX50_EPDC_RGB_WIDTH 1800
+#define IMX50_EPDC_RGB_HEIGHT 800
 
 struct IMX50EPDCState {
     SysBusDevice parent_obj;
@@ -36,6 +38,8 @@ struct IMX50EPDCState {
     uint64_t scanout_refreshes;
     bool direct_fb;
     bool rotate_ccw;
+    bool rgb_stripe;
+    uint8_t rgb_buffer[IMX50_EPDC_RGB_WIDTH * IMX50_EPDC_RGB_HEIGHT];
 };
 
 #endif
