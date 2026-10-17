@@ -760,6 +760,13 @@ static const PBKeyPin pb613_keys[] = {
     { 6, 1, 9 },  /* forward */
 };
 
+static const PBKeyPin pb622_keys[] = {
+    { 0, 3, 4 }, /* home */
+    { 1, 3, 3 }, /* menu */
+    { 5, 3, 6 }, /* backward */
+    { 6, 3, 1 }, /* forward */
+};
+
 static const PBProfile pb613_profile = {
     .description = "PocketBook Basic 613 (i.MX50 EP8)",
     .ram_id = "pocketbook-613.ram",
@@ -767,6 +774,16 @@ static const PBProfile pb613_profile = {
     .num_keys = ARRAY_SIZE(pb613_keys),
     .ram_size = PB_RAM_SIZE,
     .rotate_ccw = true,
+};
+
+static const PBProfile pb622_profile = {
+    .description = "PocketBook Touch 622 (i.MX50 EP7)",
+    .ram_id = "pocketbook-622.ram",
+    .keys = pb622_keys,
+    .num_keys = ARRAY_SIZE(pb622_keys),
+    .ram_size = PB_RAM_SIZE,
+    .touch = true,
+    .wifi = true,
 };
 
 static const TypeInfo pb_types[] = {
@@ -799,6 +816,11 @@ static const TypeInfo pb_types[] = {
         .parent = TYPE_PB_MACHINE,
         .class_init = pb_machine_class_init,
         .class_data = &pb613_profile,
+    }, {
+        .name = MACHINE_TYPE_NAME("imx50-pocketbook-622"),
+        .parent = TYPE_PB_MACHINE,
+        .class_init = pb_machine_class_init,
+        .class_data = &pb622_profile,
     },
 };
 
