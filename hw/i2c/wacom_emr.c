@@ -1,13 +1,14 @@
 /*
- * W9021 EMR command transport fitted to Barolo/Pisco.
- * Protocol: stock Linux 4.9 drivers/input/touchscreen/wacom_i2c.c.
- * Descriptor/capabilities: original w9021_fw_1827.bin, 0x19009/0x1902b.
+ * W9013/W9021 EMR controller transport fitted to reMarkable 1 and Barolo/Pisco.
+ * Protocol: vendor drivers/input/touchscreen/wacom_i2c.c.
+ * Descriptors/capabilities: original W9013_0736.hex and w9021_fw_1827.bin.
  * This is a controller protocol model, not execution of the MCU firmware.
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "qemu/osdep.h"
 #include "hw/i2c/wacom_emr.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
@@ -93,6 +94,57 @@ static const uint8_t wacom_report_descriptor[799] = {
     0x00, 0x65, 0x00, 0x55, 0x00, 0xc0, 0xc0,
 };
 
+/* W9013 descriptors and query data from the stock W9013_0736.hex. */
+static const uint8_t w9013_descriptor[30] = {
+    0x1e, 0x00, 0x00, 0x01, 0x7e, 0x01, 0x02, 0x00, 0x03, 0x00, 0x0f, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x05, 0x00, 0x1f, 0x2d, 0x25, 0x00,
+    0x36, 0x07, 0x00, 0x00, 0x00, 0x00,
+};
+static const uint8_t w9013_report_descriptor[382] = {
+    0x05, 0x0d, 0x09, 0x02, 0xa1, 0x01, 0x85, 0x02, 0x09, 0x20, 0xa1, 0x00,
+    0x09, 0x42, 0x09, 0x44, 0x09, 0x45, 0x09, 0x3c, 0x09, 0x5a, 0x09, 0x32,
+    0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x06, 0x81, 0x02, 0x95, 0x02,
+    0x81, 0x03, 0x05, 0x01, 0x09, 0x30, 0x26, 0xe7, 0x51, 0x46, 0xe7, 0x51,
+    0x65, 0x11, 0x55, 0x0d, 0x75, 0x10, 0x95, 0x01, 0x81, 0x02, 0x09, 0x31,
+    0x26, 0x6d, 0x3d, 0x46, 0x6d, 0x3d, 0x81, 0x02, 0x45, 0x00, 0x65, 0x00,
+    0x55, 0x00, 0x05, 0x0d, 0x09, 0x30, 0x26, 0xff, 0x0f, 0x81, 0x02, 0x06,
+    0x00, 0xff, 0x09, 0x04, 0x75, 0x08, 0x26, 0xff, 0x00, 0x46, 0xff, 0x00,
+    0x65, 0x11, 0x55, 0x0e, 0x81, 0x02, 0x05, 0x0d, 0x09, 0x3d, 0x75, 0x10,
+    0x16, 0xd8, 0xdc, 0x26, 0x28, 0x23, 0x36, 0xd8, 0xdc, 0x46, 0x28, 0x23,
+    0x65, 0x14, 0x81, 0x02, 0x09, 0x3e, 0x81, 0x02, 0x65, 0x00, 0x55, 0x00,
+    0x15, 0x00, 0x35, 0x00, 0x45, 0x00, 0xc0, 0x09, 0x00, 0x75, 0x08, 0x26,
+    0xff, 0x00, 0xb1, 0x12, 0x85, 0x03, 0x09, 0x00, 0x95, 0x12, 0xb1, 0x12,
+    0x85, 0x04, 0x09, 0x00, 0xb1, 0x02, 0x85, 0x05, 0x09, 0x00, 0x95, 0x04,
+    0xb1, 0x02, 0x85, 0x06, 0x09, 0x00, 0x95, 0x24, 0xb1, 0x02, 0x85, 0x16,
+    0x09, 0x00, 0x15, 0x00, 0x26, 0xff, 0x00, 0x95, 0x06, 0xb1, 0x02, 0x85,
+    0x17, 0x09, 0x00, 0x95, 0x0c, 0xb1, 0x02, 0xc0, 0x06, 0x00, 0xff, 0x09,
+    0x00, 0xa1, 0x01, 0x85, 0x09, 0x05, 0x0d, 0x09, 0x20, 0xa1, 0x00, 0x09,
+    0x42, 0x09, 0x44, 0x09, 0x45, 0x09, 0x3c, 0x09, 0x00, 0x09, 0x32, 0x15,
+    0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x06, 0x81, 0x02, 0x95, 0x02, 0x81,
+    0x03, 0x05, 0x01, 0x09, 0x30, 0x26, 0xe7, 0x51, 0x46, 0xe7, 0x51, 0x65,
+    0x11, 0x55, 0x0d, 0x75, 0x10, 0x95, 0x01, 0x81, 0x02, 0x09, 0x31, 0x26,
+    0x6d, 0x3d, 0x46, 0x6d, 0x3d, 0x81, 0x02, 0x45, 0x00, 0x65, 0x00, 0x55,
+    0x00, 0x05, 0x0d, 0x09, 0x30, 0x26, 0xff, 0x0f, 0x81, 0x02, 0x06, 0x00,
+    0xff, 0x09, 0x04, 0x75, 0x08, 0x26, 0xff, 0x00, 0x46, 0xff, 0x00, 0x65,
+    0x11, 0x55, 0x0e, 0x81, 0x02, 0x05, 0x0d, 0x09, 0x3d, 0x75, 0x10, 0x16,
+    0xd8, 0xdc, 0x26, 0x28, 0x23, 0x36, 0xd8, 0xdc, 0x46, 0x28, 0x23, 0x65,
+    0x14, 0x81, 0x02, 0x09, 0x3e, 0x81, 0x02, 0x65, 0x00, 0x55, 0x00, 0x15,
+    0x00, 0x35, 0x00, 0x45, 0x00, 0xc0, 0x09, 0x00, 0x75, 0x08, 0x95, 0x03,
+    0x26, 0xff, 0x00, 0xb1, 0x12, 0xc0, 0x06, 0x00, 0xff, 0x09, 0x02, 0xa1,
+    0x01, 0x85, 0x07, 0x09, 0x00, 0x95, 0x49, 0xb1, 0x02, 0x85, 0x08, 0x09,
+    0x00, 0x95, 0x03, 0x81, 0x02, 0x09, 0x00, 0xb1, 0x02, 0xc0,
+};
+static const uint8_t w9013_features[21] = {
+    0x15, 0x00, 0x03, 0xe7, 0x51, 0x6d, 0x3d, 0xe7, 0x51, 0x6d, 0x3d, 0xff,
+    0x0f, 0x36, 0x07, 0xff, 0xff, 0x28, 0x23, 0x28, 0x23,
+};
+
+#define WACOM_PEN_QUEUE 64
+typedef struct WacomPenSample {
+    uint16_t x, y, pressure;
+    uint8_t flags;
+} WacomPenSample;
+
 struct WacomEMRState {
     I2CSlave parent_obj;
     uint8_t command[32];
@@ -100,8 +152,11 @@ struct WacomEMRState {
     uint8_t response[1024];
     uint16_t response_len;
     uint16_t response_pos;
+    uint16_t max_x, max_y, product, firmware;
     uint8_t report_rate;
-    bool sending;
+    bool sending, reading, response_input;
+    WacomPenSample samples[WACOM_PEN_QUEUE];
+    uint8_t sample_head, sample_count, input_flags;
     bool reset_level;
     bool asleep;
     qemu_irq irq;
@@ -113,9 +168,75 @@ struct WacomEMRState {
     uint64_t unsupported_commands;
 };
 
+static void wacom_deliver_input(WacomEMRState *s)
+{
+    WacomPenSample *sample;
+    if (!s->sample_count || s->asleep || !s->reset_level ||
+        s->response_input || s->response_pos < s->response_len) {
+        return;
+    }
+    sample = &s->samples[s->sample_head];
+    memset(s->response, 0, sizeof(s->response));
+    s->response_len = 17;
+    s->response_pos = 0;
+    s->response_input = true;
+    stw_le_p(s->response, 17);
+    s->response[2] = 2;
+    s->response[3] = sample->flags;
+    stw_le_p(s->response + 4, sample->x);
+    stw_le_p(s->response + 6, sample->y);
+    stw_le_p(s->response + 8, sample->pressure);
+    qemu_set_irq(s->pen_detect, !(sample->flags & 0x20));
+    qemu_set_irq(s->irq, 0);
+}
+
+static void wacom_queue_input(WacomEMRState *s, uint16_t x, uint16_t y,
+                               uint16_t pressure, uint8_t flags)
+{
+    unsigned tail;
+    if (s->asleep || !s->reset_level) {
+        return;
+    }
+    if (s->sample_count > 1) {
+        tail = (s->sample_head + s->sample_count - 1) % WACOM_PEN_QUEUE;
+        if (s->samples[tail].flags == flags) {
+            s->samples[tail] = (WacomPenSample) { x, y, pressure, flags };
+            return;
+        }
+    }
+    if (s->sample_count == WACOM_PEN_QUEUE) {
+        s->sample_count = 1;
+    }
+    tail = (s->sample_head + s->sample_count++) % WACOM_PEN_QUEUE;
+    s->samples[tail] = (WacomPenSample) { x, y, pressure, flags };
+    wacom_deliver_input(s);
+}
+
+void wacom_emr_set_input(DeviceState *dev, uint16_t x, uint16_t y,
+                         uint16_t pressure, bool proximity, bool eraser)
+{
+    WacomEMRState *s = WACOM_EMR(dev);
+    uint8_t flags = (proximity ? 0x20 : 0) |
+                    (pressure ? (eraser ? 4 : 1) : 0) | (eraser ? 8 : 0);
+    bool entering = proximity && !(s->input_flags & 0x20);
+    /* Tool identity is latched by the Linux driver on proximity entry. */
+    if ((s->input_flags & 0x20) && ((s->input_flags ^ flags) & 8)) {
+        wacom_queue_input(s, x, y, 0, 0);
+        entering = proximity;
+    }
+    if (pressure && (entering || !(s->input_flags & 5))) {
+        /* Report the current position in hover before contact. */
+        wacom_queue_input(s, x, y, 0, flags & ~5);
+    }
+    s->input_flags = flags;
+    wacom_queue_input(s, x, y, pressure, flags);
+}
+
 static void wacom_response(WacomEMRState *s, const uint8_t *data, size_t len)
 {
     assert(len <= sizeof(s->response));
+    s->response_input = false;
+    qemu_set_irq(s->irq, 1);
     memcpy(s->response, data, len);
     s->response_len = len;
     s->response_pos = 0;
@@ -125,22 +246,48 @@ static void wacom_execute(WacomEMRState *s)
 {
     const uint8_t *c = s->command;
     unsigned len = s->command_len;
+    bool w9013 = object_dynamic_cast(OBJECT(s), TYPE_WACOM_W9013);
 
     s->sending = false;
     if (!len) {
         return;
     }
     if (len == 2 && c[0] == 1 && c[1] == 0) {
-        wacom_response(s, wacom_descriptor, sizeof(wacom_descriptor));
+        wacom_response(s, w9013 ? w9013_descriptor : wacom_descriptor,
+                        sizeof(wacom_descriptor));
+        if (!w9013) {
+            stw_le_p(s->response + 22, s->product);
+            stw_le_p(s->response + 24, s->firmware);
+        }
         s->descriptor_reads++;
     } else if (len == 2 && c[0] == 2 && c[1] == 0) {
-        wacom_response(s, wacom_report_descriptor, sizeof(wacom_report_descriptor));
+        wacom_response(s, w9013 ? w9013_report_descriptor : wacom_report_descriptor,
+                        w9013 ? sizeof(w9013_report_descriptor) : sizeof(wacom_report_descriptor));
+        if (!w9013) {
+            /* Logical and physical extents in the four pen collections. */
+            static const unsigned x_fields[] = { 0x2b, 0x2e, 0x11c, 0x11f,
+                                                  0x1df, 0x1e2, 0x296, 0x299 };
+            static const unsigned y_fields[] = { 0x3d, 0x40, 0x12e, 0x131,
+                                                  0x1f1, 0x1f4, 0x2a8, 0x2ab };
+            for (unsigned i = 0; i < ARRAY_SIZE(x_fields); i++) {
+                stw_le_p(s->response + x_fields[i], s->max_x);
+                stw_le_p(s->response + y_fields[i], s->max_y);
+            }
+        }
     } else if (len == 2 && c[0] == 5 && c[1] == 0) {
         /* The query's second I2C write selects the prepared data register. */
         s->response_pos = 0;
-    } else if (len == 4 && c[0] == 4 && c[1] == 0 &&
-               c[2] == 0x33 && c[3] == 2) {
-        wacom_response(s, wacom_features, sizeof(wacom_features));
+    } else if ((len == 4 || (len == 6 && c[4] == 5 && c[5] == 0)) &&
+               c[0] == 4 && c[1] == 0 && c[2] == 0x33 && c[3] == 2) {
+        wacom_response(s, w9013 ? w9013_features : wacom_features,
+                        sizeof(wacom_features));
+        if (!w9013) {
+            stw_le_p(s->response + 3, s->max_x);
+            stw_le_p(s->response + 5, s->max_y);
+            stw_le_p(s->response + 7, s->max_x);
+            stw_le_p(s->response + 9, s->max_y);
+            stw_le_p(s->response + 13, s->firmware);
+        }
         s->queries++;
     } else if (len == 4 && c[0] == 4 && c[1] == 0 &&
                c[2] == 0 && c[3] == 1) {
@@ -153,6 +300,10 @@ static void wacom_execute(WacomEMRState *s)
                c[2] <= 1 && c[3] == 8) {
         s->asleep = c[2];
         s->response_len = s->response_pos = 0;
+        s->response_input = false;
+        s->sample_head = s->sample_count = s->input_flags = 0;
+        qemu_set_irq(s->irq, 1);
+        qemu_set_irq(s->pen_detect, 1);
         s->sleep_commands++;
     } else if (len == 7 && !memcmp(c, "\x04\x00\x3f\x02\x19\x05\x00", 7)) {
         const uint8_t rate[4] = { 4, 0, 25, s->report_rate };
@@ -195,11 +346,23 @@ static int wacom_event(I2CSlave *i2c, enum i2c_event event)
         wacom_execute(s);
     }
     if (event == I2C_START_SEND) {
+        s->reading = false;
         memset(s->command, 0, sizeof(s->command));
         s->command_len = 0;
         s->sending = true;
     } else if (event == I2C_START_RECV) {
+        s->reading = true;
         s->response_pos = 0;
+    } else if (event == I2C_FINISH && s->reading &&
+               s->response_pos >= s->response_len) {
+        qemu_set_irq(s->irq, 1);
+        if (s->response_input && s->sample_count) {
+            s->sample_head = (s->sample_head + 1) % WACOM_PEN_QUEUE;
+            s->sample_count--;
+        }
+        s->response_input = false;
+        s->response_len = s->response_pos = 0;
+        wacom_deliver_input(s);
     }
     return 0;
 }
@@ -208,7 +371,8 @@ static void wacom_reset(DeviceState *dev)
 {
     WacomEMRState *s = WACOM_EMR(dev);
     s->command_len = s->response_len = s->response_pos = 0;
-    s->sending = s->asleep = false;
+    s->sending = s->reading = s->response_input = s->asleep = false;
+    s->sample_head = s->sample_count = s->input_flags = 0;
     s->report_rate = 3;
     qemu_set_irq(s->irq, 1);
     qemu_set_irq(s->pen_detect, 1);
@@ -229,16 +393,28 @@ static int wacom_post_load(void *opaque, int version)
     WacomEMRState *s = opaque;
     if (s->command_len > sizeof(s->command) ||
         s->response_len > sizeof(s->response) ||
-        s->response_pos > s->response_len) {
+        s->response_pos > s->response_len ||
+        s->sample_head >= WACOM_PEN_QUEUE || s->sample_count > WACOM_PEN_QUEUE) {
         return -EINVAL;
     }
-    qemu_set_irq(s->irq, 1);
-    qemu_set_irq(s->pen_detect, 1);
+    qemu_set_irq(s->irq, !s->response_input);
+    qemu_set_irq(s->pen_detect, !(s->response_input && (s->response[3] & 0x20)));
     return 0;
 }
 
+static const VMStateDescription wacom_sample_vmstate = {
+    .name = "wacom-emr/sample", .version_id = 1, .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT16(x, WacomPenSample),
+        VMSTATE_UINT16(y, WacomPenSample),
+        VMSTATE_UINT16(pressure, WacomPenSample),
+        VMSTATE_UINT8(flags, WacomPenSample),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static const VMStateDescription wacom_vmstate = {
-    .name = TYPE_WACOM_EMR, .version_id = 1, .minimum_version_id = 1,
+    .name = TYPE_WACOM_EMR, .version_id = 2, .minimum_version_id = 2,
     .post_load = wacom_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_I2C_SLAVE(parent_obj, WacomEMRState),
@@ -249,6 +425,13 @@ static const VMStateDescription wacom_vmstate = {
         VMSTATE_UINT16(response_pos, WacomEMRState),
         VMSTATE_UINT8(report_rate, WacomEMRState),
         VMSTATE_BOOL(sending, WacomEMRState),
+        VMSTATE_BOOL(reading, WacomEMRState),
+        VMSTATE_BOOL(response_input, WacomEMRState),
+        VMSTATE_UINT8(sample_head, WacomEMRState),
+        VMSTATE_UINT8(sample_count, WacomEMRState),
+        VMSTATE_UINT8(input_flags, WacomEMRState),
+        VMSTATE_STRUCT_ARRAY(samples, WacomEMRState, WACOM_PEN_QUEUE, 0,
+                             wacom_sample_vmstate, WacomPenSample),
         VMSTATE_BOOL(reset_level, WacomEMRState),
         VMSTATE_BOOL(asleep, WacomEMRState),
         VMSTATE_UINT64(queries, WacomEMRState),
@@ -274,11 +457,18 @@ static void wacom_init(Object *obj)
     object_property_add_uint64_ptr(obj, "unsupported-commands", &s->unsupported_commands, OBJ_PROP_FLAG_READ);
 }
 
+static const Property wacom_properties[] = {
+    DEFINE_PROP_UINT16("max-x", WacomEMRState, max_x, 0x3d08),
+    DEFINE_PROP_UINT16("max-y", WacomEMRState, max_y, 0x5160),
+    DEFINE_PROP_UINT16("product-id", WacomEMRState, product, 0x158),
+    DEFINE_PROP_UINT16("firmware-version", WacomEMRState, firmware, 0x1827),
+};
 static void wacom_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
     I2CSlaveClass *sc = I2C_SLAVE_CLASS(oc);
     dc->vmsd = &wacom_vmstate;
+    device_class_set_props(dc, wacom_properties);
     device_class_set_legacy_reset(dc, wacom_reset);
     sc->send = wacom_send;
     sc->recv = wacom_recv;
@@ -289,5 +479,12 @@ static const TypeInfo wacom_info = {
     .instance_size = sizeof(WacomEMRState), .instance_init = wacom_init,
     .class_init = wacom_class_init,
 };
-static void wacom_register_types(void) { type_register_static(&wacom_info); }
+static const TypeInfo w9013_info = {
+    .name = TYPE_WACOM_W9013, .parent = TYPE_WACOM_EMR,
+};
+static void wacom_register_types(void)
+{
+    type_register_static(&wacom_info);
+    type_register_static(&w9013_info);
+}
 type_init(wacom_register_types)
