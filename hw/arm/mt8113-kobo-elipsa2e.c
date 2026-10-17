@@ -13,6 +13,7 @@
 #include "hw/core/loader.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/split-irq.h"
+#include "hw/i2c/aw99703.h"
 #include "hw/i2c/bd71828.h"
 #include "hw/i2c/fp9935.h"
 #include "hw/i2c/max20342.h"
@@ -148,6 +149,20 @@ static void elipsa2e_init(MachineState *machine)
         qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in", 20));
     qdev_connect_gpio_out_named(DEVICE(&soc->gpio), "gpio-out", 14,
         qdev_get_gpio_in_named(DEVICE(touch), "reset", 0));
+
+    DeviceState *light_enable = qdev_new(TYPE_SPLIT_IRQ);
+    object_property_add_child(OBJECT(machine), "frontlight-enable",
+                              OBJECT(light_enable));
+    qdev_prop_set_uint16(light_enable, "num-lines", 2);
+    qdev_realize_and_unref(light_enable, NULL, &error_fatal);
+    for (int i = 0; i < 2; i++) {
+        I2CSlave *light = i2c_slave_create_simple(soc->i2c[i + 1].bus,
+                                                 TYPE_AW99703, 0x36);
+        qdev_connect_gpio_out(light_enable, i,
+            qdev_get_gpio_in_named(DEVICE(light), "enable", 0));
+    }
+    qdev_connect_gpio_out_named(DEVICE(&soc->gpio), "gpio-out", 15,
+        qdev_get_gpio_in(light_enable, 0));
 
     qdev_prop_set_uint64(card, "boot-partition-size", 4 * MiB);
     qdev_prop_set_bit(card, "boot-partitions-in-memory", true);
