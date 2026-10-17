@@ -36,7 +36,6 @@
 #define BCM_HOST_INT 0x80
 #define BCM_SSID "Kindle-QEMU"
 #define BCM_SSID_LEN (sizeof(BCM_SSID) - 1)
-#define BCM_CHANSPEC 0x1001 /* 2.4GHz, 20MHz, channel 1 (ioctl v2). */
 
 static const uint8_t bcm_bssid[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x02 };
 static const uint8_t bcm_rates[] = { 0x82, 0x84, 0x8b, 0x96, 12, 18, 24, 36,
@@ -53,7 +52,7 @@ struct BCM4343WState {
     NICState *nic;
     qemu_irq irq, oob_irq;
     bool powered, selected, firmware_running, associated, up, software_oob;
-    bool wlfc;
+    bool wlfc, wlfc_ready;
     bool bcm43362;
     uint8_t cccr[0x300];
     uint8_t f1[0x100];
@@ -65,6 +64,7 @@ struct BCM4343WState {
     unsigned fn, address, length, position;
     bool writing, increment;
     uint8_t tx[BCM_FRAME_MAX];
+    unsigned tx_position;
     GQueue rx;
     unsigned rx_position;
     GHashTable *iovars;
@@ -149,8 +149,14 @@ static void bcm_event(BCM4343WState *s, uint32_t event, uint32_t status,
     bcm_enqueue(s, 1, packet, 78 + len);
 }
 
+static uint16_t bcm_chanspec(const BCM4343WState *s)
+{
+    /* BCM43362 uses the original ioctl channel layout. */
+    return s->bcm43362 ? 0x2b01 : 0x1001;
+}
+
 /* wl_bss_info version 109; byte offsets preserve the ARM ABI's alignment. */
-static unsigned bcm_bss_info(uint8_t *bss)
+static unsigned bcm_bss_info(const BCM4343WState *s, uint8_t *bss)
 {
     static const uint8_t ies[] = {
         0, BCM_SSID_LEN, 'K', 'i', 'n', 'd', 'l', 'e', '-', 'Q', 'E', 'M', 'U',
@@ -170,7 +176,7 @@ static unsigned bcm_bss_info(uint8_t *bss)
     memcpy(bss + 19, BCM_SSID, BCM_SSID_LEN);
     stl_le_p(bss + 52, sizeof(bcm_rates));
     memcpy(bss + 56, bcm_rates, sizeof(bcm_rates));
-    stw_le_p(bss + 72, BCM_CHANSPEC);
+    stw_le_p(bss + 72, bcm_chanspec(s));
     bss[76] = 1;
     stw_le_p(bss + 78, (uint16_t)-35);
     bss[80] = (uint8_t)-95;
@@ -194,7 +200,7 @@ static void bcm_scan_done(void *opaque)
         stl_le_p(result + 4, 1);
         stw_le_p(result + 8, s->scan_sync);
         if (!qemu_get_queue(s->nic)->link_down) {
-            len = 12 + bcm_bss_info(result + 12);
+            len = 12 + bcm_bss_info(s, result + 12);
             stl_le_p(result, len);
             stw_le_p(result + 10, 1);
             bcm_event(s, 69, 8, 0, result, len); /* ESCAN_RESULT, PARTIAL */
@@ -218,13 +224,17 @@ static void bcm_join_done(void *opaque)
         return;
     }
     s->associated = true;
-    if (s->wlfc) {
+    if (s->wlfc && !s->wlfc_ready) {
         uint8_t credits[BCM_WLFC_FIFO_COUNT + 1] = { 0 };
+        const uint8_t sta_interface[] = { 0, 1, 0, 0, 0 };
 
         /* Establish the firmware's five transmit FIFOs before link-up. */
         memset(credits, BCM_WLFC_FIFO_CREDITS, BCM_WLFC_FIFO_COUNT);
         bcm_event(s, 74, 0, 0, credits, sizeof(credits));
+        /* WLC_E_IF ADD opens interface 0's unicast queues in DHD. */
+        bcm_event(s, 54, 0, 0, sta_interface, sizeof(sta_interface));
         bcm_event(s, 127, 0, 0, NULL, 0); /* BCMC_CREDIT_SUPPORT */
+        s->wlfc_ready = true;
     }
     bcm_event(s, 3, 0, 0, NULL, 0); /* AUTH */
     bcm_event(s, 7, 0, 0, NULL, 0); /* ASSOC */
@@ -302,7 +312,8 @@ static int bcm_iovar(BCM4343WState *s, const char *name, bool set,
         } else if (!strcmp(name, "join")) {
             return bcm_start_join(s, in, inlen);
         } else if (!strcmp(name, "cur_etheraddr")) {
-            if (inlen != 6) {
+            /* DHD can pass the entire padded iovar buffer for this setter. */
+            if (inlen < 6) {
                 return -2;
             }
             memcpy(s->conf.macaddr.a, in, 6);
@@ -311,11 +322,13 @@ static int bcm_iovar(BCM4343WState *s, const char *name, bool set,
                 return -2;
             }
             s->wlfc = (ldl_le_p(in) & 8) != 0;
+            s->wlfc_ready = false;
         } else if (!strcmp(name, "proptxstatus")) {
             if (inlen < 4) {
                 return -2;
             }
             s->wlfc = ldl_le_p(in) != 0;
+            s->wlfc_ready = false;
         } else if (!strcmp(name, "wlfc_mode")) {
             /* Firmware queues packet IDs, without sequence reuse. */
             if (inlen < 4 || ldl_le_p(in) != 4) {
@@ -348,9 +361,13 @@ static int bcm_iovar(BCM4343WState *s, const char *name, bool set,
         const char capabilities[] = "sta escan proptxstatus";
         memcpy(out, capabilities, sizeof(capabilities));
         *outlen = sizeof(capabilities);
+    } else if (!strcmp(name, "p2p")) {
+        /* The BCM43362 driver uses this to initialize its scan context. */
+        stl_le_p(out, s->bcm43362);
+        *outlen = 4;
     } else if (!strcmp(name, "iscanresults")) {
         bool available = !qemu_get_queue(s->nic)->link_down;
-        unsigned len = 12 + (available ? bcm_bss_info(out + 16) : 0);
+        unsigned len = 12 + (available ? bcm_bss_info(s, out + 16) : 0);
 
         stl_le_p(out, 0); /* WL_SCAN_RESULTS_SUCCESS */
         stl_le_p(out + 4, len);
@@ -371,11 +388,11 @@ static int bcm_iovar(BCM4343WState *s, const char *name, bool set,
     } else if (!strcmp(name, "chanspecs")) {
         stl_le_p(out, 11);
         for (unsigned i = 0; i < 11; i++) {
-            stl_le_p(out + 4 + i * 4, 0x1001 + i);
+            stl_le_p(out + 4 + i * 4, bcm_chanspec(s) + i);
         }
         *outlen = 48;
     } else if (!strcmp(name, "chanspec")) {
-        stl_le_p(out, BCM_CHANSPEC);
+        stl_le_p(out, bcm_chanspec(s));
         *outlen = 4;
     } else if (!strcmp(name, "per_chan_info")) {
         stl_le_p(out, 3); /* valid hardware and software channel */
@@ -404,7 +421,7 @@ static int bcm_iovar(BCM4343WState *s, const char *name, bool set,
                !strcmp(name, "roam_off") || !strcmp(name, "apsta") ||
                !strcmp(name, "mpc") || !strcmp(name, "wsec") ||
                !strcmp(name, "wpa_auth") || !strcmp(name, "auth") ||
-               !strcmp(name, "p2p") || !strcmp(name, "arpoe") ||
+               !strcmp(name, "arpoe") ||
                !strcmp(name, "bus:rxglom")) {
         stl_le_p(out, 0);
         *outlen = 4;
@@ -446,12 +463,28 @@ static void bcm_control(BCM4343WState *s, const uint8_t *in, unsigned len)
         outlen = set ? 0 : 4;
         switch (cmd) {
         case 0: stl_le_p(out, 0x14e46c77); break;
-        case 1: stl_le_p(out, 2); break;
+        case 1:
+            stl_le_p(out, s->bcm43362 ? 1 : 2);
+            break;
         case 2: s->up = true; break;
         case 3: s->up = s->associated = false; break;
         case 12: stl_le_p(out, 108); break;
         case 19: stl_le_p(out, 1); break;
         case 20: break; /* WLC_SET_INFRA */
+        case 21:  /* WLC_GET_AUTH */
+        case 133: /* WLC_GET_WSEC */
+            status = bcm_iovar(s, cmd == 21 ? "auth" : "wsec", false,
+                               arg, inlen, out, &outlen);
+            break;
+        case 22:  /* WLC_SET_AUTH */
+        case 134: /* WLC_SET_WSEC */
+            if (inlen < 4) {
+                status = -2;
+            } else {
+                status = bcm_iovar(s, cmd == 22 ? "auth" : "wsec", true,
+                                   arg, 4, out, &outlen);
+            }
+            break;
         case 23:
             if (s->associated) {
                 memcpy(out, bcm_bssid, 6);
@@ -467,7 +500,7 @@ static void bcm_control(BCM4343WState *s, const uint8_t *in, unsigned len)
         case 29:
             stl_le_p(out, 1);
             stl_le_p(out + 4, 1);
-            stl_le_p(out + 8, 1);
+            stl_le_p(out + 8, timer_pending(s->scan_timer) ? 1 : 0);
             outlen = 12;
             break;
         case 39: stl_le_p(out, 4); break; /* N PHY */
@@ -478,7 +511,7 @@ static void bcm_control(BCM4343WState *s, const uint8_t *in, unsigned len)
             break;
         case 51:
             outlen = 12 + (qemu_get_queue(s->nic)->link_down ? 0 :
-                           bcm_bss_info(out + 12));
+                           bcm_bss_info(s, out + 12));
             stl_le_p(out, outlen);
             stl_le_p(out + 4, 109);
             stl_le_p(out + 8, outlen > 12);
@@ -521,7 +554,7 @@ static void bcm_control(BCM4343WState *s, const uint8_t *in, unsigned len)
         case 118: break; /* WLC_SET_AP */
         case 135: stl_le_p(out, -95); break;
         case 136:
-            outlen = 4 + bcm_bss_info(out + 4);
+            outlen = 4 + bcm_bss_info(s, out + 4);
             stl_le_p(out, outlen);
             break;
         case 137: /* get_pktcnt_t used by cfg80211's station query */
@@ -547,6 +580,19 @@ static void bcm_control(BCM4343WState *s, const uint8_t *in, unsigned len)
                 stl_le_p(out + 4 + 4 * i, i + 1);
             }
             outlen = 48;
+            break;
+        case 235: /* WLC_GET_KEY_PRIMARY: no WEP keys on the open AP. */
+            if (inlen < 4 || ldl_le_p(arg) >= 4) {
+                status = -2;
+            } else {
+                stl_le_p(out, 0);
+            }
+            break;
+        case 236: /* WLC_SET_KEY_PRIMARY */
+            if (inlen < 4 || ldl_le_p(arg) >= 4) {
+                status = -2;
+            }
+            outlen = 0;
             break;
         default:
             if (!set) {
@@ -783,6 +829,9 @@ static void bcm_write(BCM4343WState *s, unsigned fn, unsigned addr, uint8_t valu
                 break;
             case 6:
                 s->length = s->position = 0;
+                if ((value & 7) == 2 || (value & 8)) {
+                    s->tx_position = 0;
+                }
                 break;
             default:
                 break;
@@ -799,6 +848,9 @@ static void bcm_write(BCM4343WState *s, unsigned fn, unsigned addr, uint8_t valu
                             ((uint32_t)(s->f1[0x0a] & 0x80) << 8);
                 break;
             case 0x1000d:
+                if (value & 2) {
+                    s->tx_position = 0;
+                }
                 if ((value & 1) && !g_queue_is_empty(&s->rx)) {
                     g_free(g_queue_pop_head(&s->rx));
                     s->rx_position = 0;
@@ -830,6 +882,7 @@ static size_t bcm_command(SDState *card, SDRequest *req,
     switch (req->cmd) {
     case 0:
         s->selected = false;
+        s->tx_position = 0;
         s->cccr[2] = s->cccr[4] = 0;
         bcm_update_irq(s);
         return 0;
@@ -872,9 +925,6 @@ static size_t bcm_command(SDState *card, SDRequest *req,
             s->length *= blocksize ? blocksize : 512;
         }
         s->position = 0;
-        if (write && fn == 2) {
-            memset(s->tx, 0, sizeof(s->tx));
-        }
         return 4;
     default:
         return 0;
@@ -918,11 +968,22 @@ static void bcm_write_byte(SDState *card, uint8_t value)
         return;
     }
     if (s->fn == 2) {
-        if (s->position < sizeof(s->tx)) {
-            s->tx[s->position] = value;
+        if (s->tx_position < sizeof(s->tx)) {
+            s->tx[s->tx_position++] = value;
         }
-        if (++s->position == s->length && s->length <= sizeof(s->tx)) {
-            bcm_tx_frame(s, s->tx, s->length);
+        if (++s->position == s->length && s->tx_position >= 4) {
+            unsigned length = lduw_le_p(s->tx);
+
+            /* The SDIO host can split a FIFO write across several CMD53s.
+             * Preserve incomplete SDPCM frames and discard transfer padding
+             * only after the full declared frame has arrived. */
+            if (length < 12 || length > sizeof(s->tx) ||
+                (uint16_t)(length ^ lduw_le_p(s->tx + 2)) != 0xffff) {
+                s->tx_position = 0;
+            } else if (s->tx_position >= length) {
+                bcm_tx_frame(s, s->tx, s->tx_position);
+                s->tx_position = 0;
+            }
         }
     } else {
         bcm_write(s, s->fn, s->address + (s->increment ? s->position : 0), value);
@@ -999,10 +1060,11 @@ static void bcm_reset(DeviceState *dev)
     s->f1[0x1f] = 3;
     s->intstatus = s->hostintmask = s->mailbox = 0;
     s->length = s->position = s->rx_position = 0;
+    s->tx_position = 0;
     s->rx_seq = s->tx_seq = 0;
     s->rx_packets = s->tx_packets = s->power_mode = 0;
     s->selected = s->firmware_running = s->associated = s->up = false;
-    s->software_oob = s->wlfc = false;
+    s->software_oob = s->wlfc = s->wlfc_ready = false;
     s->cccr[0] = 0x32;
     s->cccr[1] = 3;
     s->cccr[8] = 0x1e;
