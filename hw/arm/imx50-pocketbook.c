@@ -783,6 +783,17 @@ static const PBProfile pb613_profile = {
     .rotate_ccw = true,
 };
 
+static const PBProfile pb611_profile = {
+    .description = "PocketBook Basic 611 (i.MX50 Netronix E60630)",
+    .ram_id = "pocketbook-611.ram",
+    .ram_size = PB_RAM_SIZE,
+    .hwid_straps = BIT(15) | BIT(17), /* E60630: HWID 6 */
+    .matrix_contacts = { 8, 3, 2, 1, 0, 9, 10 },
+    .rotate_ccw = true,
+    .netronix = true,
+    .wifi = true,
+};
+
 static const PBProfile pb622_profile = {
     .description = "PocketBook Touch 622 (i.MX50 EP7)",
     .ram_id = "pocketbook-622.ram",
@@ -840,6 +851,11 @@ static const TypeInfo pb_types[] = {
         .class_size = sizeof(PBMachineClass),
         .abstract = true,
         .interfaces = arm_machine_interfaces,
+    }, {
+        .name = MACHINE_TYPE_NAME("imx50-pocketbook-611"),
+        .parent = TYPE_PB_MACHINE,
+        .class_init = pb_machine_class_init,
+        .class_data = &pb611_profile,
     }, {
         .name = MACHINE_TYPE_NAME("imx50-pocketbook-613"),
         .parent = TYPE_PB_MACHINE,
