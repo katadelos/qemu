@@ -107,6 +107,7 @@ struct SDHCIState {
     bool auto_cmd23_block_count; /* i.MX6SL/7D ADMA uses BLK_ATT for CMD23 */
     bool timeout_command_complete; /* Legacy hosts poll CMD_COMPLETE on timeout */
     bool preserve_interrupt_enables_on_reset; /* Vendor uSDHC RSTA sequence */
+    bool busy_completion_irq;
     uint32_t quirks;
     uint8_t sd_spec_version;
     uint8_t uhs_mode;

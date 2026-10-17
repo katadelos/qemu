@@ -431,7 +431,7 @@ static void sdhci_send_command(SDHCIState *s)
             }
         }
 
-        if (!(s->quirks & SDHCI_QUIRK_NO_BUSY_IRQ) &&
+        if ((!(s->quirks & SDHCI_QUIRK_NO_BUSY_IRQ) || s->busy_completion_irq) &&
             (s->norintstsen & SDHC_NISEN_TRSCMP) &&
             (s->cmdreg & SDHC_CMD_RESPONSE) == SDHC_CMD_RSP_WITH_BUSY) {
             s->norintsts |= SDHC_NIS_TRSCMP;
@@ -1615,7 +1615,8 @@ void sdhci_common_realize(SDHCIState *s, Error **errp)
     s->fifo_buffer = g_malloc0(s->buf_maxsz);
 
     memory_region_init_io(&s->iomem, OBJECT(s), s->io_ops, s, "sdhci",
-                          SDHC_REGISTERS_MAP_SIZE);
+                          object_dynamic_cast(OBJECT(s), TYPE_IMX_USDHC) ?
+                          0x200 : SDHC_REGISTERS_MAP_SIZE);
 }
 
 void sdhci_common_unrealize(SDHCIState *s)
@@ -1839,6 +1840,12 @@ static uint64_t esdhc_read(void *opaque, hwaddr offset, unsigned size)
     uint32_t ret;
     uint16_t hostctl1;
 
+    /* This controller exposes no command-queue capability. Its eMMC model
+     * also advertises CMDQ_SUPPORT=0, so the driver uses ordinary ADMA. */
+    if (offset >= 0x100) {
+        return 0;
+    }
+
     switch (offset) {
     default:
         if (object_dynamic_cast(OBJECT(s), TYPE_IMX_USDHC) &&
@@ -1910,6 +1917,10 @@ esdhc_write(void *opaque, hwaddr offset, uint64_t val, unsigned size)
     SDHCIState *s = SYSBUS_SDHCI(opaque);
     uint8_t hostctl1;
     uint32_t value = (uint32_t)val;
+
+    if (offset >= 0x100) {
+        return;
+    }
 
     switch (offset) {
     case ESDHC_DLL_CTRL:
@@ -2170,6 +2181,7 @@ static void imx_usdhc_init(Object *obj)
 }
 
 static const Property imx_usdhc_properties[] = {
+    DEFINE_PROP_BOOL("busy-completion-irq", SDHCIState, busy_completion_irq, false),
     DEFINE_PROP_BOOL("preserve-interrupt-enables-on-reset", SDHCIState,
                      preserve_interrupt_enables_on_reset, false),
 };
