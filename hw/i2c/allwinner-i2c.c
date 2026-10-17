@@ -187,6 +187,7 @@ static void allwinner_i2c_reset_hold(Object *obj, ResetType type)
     s->srst  = TWI_SRST_RESET;
     s->efr   = TWI_EFR_RESET;
     s->lcr   = TWI_LCR_RESET;
+    qemu_irq_lower(s->irq);
 }
 
 static inline void allwinner_i2c_raise_interrupt(AWI2CState *s)
@@ -308,6 +309,7 @@ static void allwinner_i2c_write(void *opaque, hwaddr offset,
                                 extract32(s->data, 0, 1))) {
                 /* If non zero is returned, the address is not valid */
                 s->stat = STAT_FROM_STA(STAT_M_ADDR_WR_NACK);
+                allwinner_i2c_raise_interrupt(s);
             } else {
                 /* Determine if read of write */
                 if (extract32(s->data, 0, 1)) {
@@ -324,6 +326,7 @@ static void allwinner_i2c_write(void *opaque, hwaddr offset,
                 /* If the target return non zero then end the transfer */
                 s->stat = STAT_FROM_STA(STAT_M_DATA_TX_NACK);
                 i2c_end_transfer(s->bus);
+                allwinner_i2c_raise_interrupt(s);
             } else {
                 s->stat = STAT_FROM_STA(STAT_M_DATA_TX_ACK);
                 allwinner_i2c_raise_interrupt(s);
@@ -384,10 +387,16 @@ static void allwinner_i2c_write(void *opaque, hwaddr offset,
         s->ccr = value & TWI_CCR_MASK;
         break;
     case TWI_SRST_REG:
-        if (((value & TWI_SRST_MASK) == 0) && (s->srst & TWI_SRST_MASK)) {
-            device_cold_reset(DEVICE(s));
+        if (value & TWI_SRST_MASK) {
+            uint8_t bus_enable = s->cntr & TWI_CNTR_BUS_EN;
+            uint8_t clock = s->ccr;
+            /* An FSM reset does not reset devices attached to the bus. */
+            allwinner_i2c_reset_hold(OBJECT(s), RESET_TYPE_COLD);
+            /* The controller FSM reset preserves bus/clock configuration. */
+            s->cntr = bus_enable;
+            s->ccr = clock;
         }
-        s->srst = value & TWI_SRST_MASK;
+        s->srst = 0;
         break;
     case TWI_EFR_REG:
         s->efr = value & TWI_EFR_MASK;
@@ -419,6 +428,7 @@ static const VMStateDescription allwinner_i2c_vmstate = {
         VMSTATE_UINT8(xaddr, AWI2CState),
         VMSTATE_UINT8(data, AWI2CState),
         VMSTATE_UINT8(cntr, AWI2CState),
+        VMSTATE_UINT8(stat, AWI2CState),
         VMSTATE_UINT8(ccr, AWI2CState),
         VMSTATE_UINT8(srst, AWI2CState),
         VMSTATE_UINT8(efr, AWI2CState),
