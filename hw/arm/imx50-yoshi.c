@@ -670,6 +670,9 @@ static DeviceState *whitney_attach_pmic(FslIMX50State *soc)
         pmic, "irq", 0,
         qdev_get_gpio_in(DEVICE(&soc->gpio[5]), 8));
 
+    qdev_connect_gpio_out(DEVICE(&soc->gpio[5]), 28,
+        qdev_get_gpio_in_named(pmic, "watchdog", 0));
+
     return pmic;
 }
 

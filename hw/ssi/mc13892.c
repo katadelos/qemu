@@ -22,6 +22,8 @@
 #define MC13892_REG_INT_MASK1   4
 #define MC13892_REG_INT_SENSE1  5
 #define MC13892_REG_IDENT       7
+#define MC13892_REG_POWER_CTL2  15
+#define MC13892_WDIRESET        BIT(12)
 #define MC13892_REG_RTCTOD      20
 #define MC13892_REG_RTCTODA     21
 #define MC13892_REG_RTCDAY      22
@@ -167,6 +169,15 @@ static void mc13892_vbus_input(void *opaque, int line, int level)
     mc13892_update_irq(s);
 }
 
+static void mc13892_watchdog_input(void *opaque, int line, int level)
+{
+    MC13892State *s = opaque;
+
+    if (!level && !(s->regs[MC13892_REG_POWER_CTL2] & MC13892_WDIRESET)) {
+        qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+    }
+}
+
 static void mc13892_write_register(MC13892State *s, uint8_t reg,
                                    uint32_t value)
 {
@@ -283,6 +294,8 @@ static void mc13892_realize(SSIPeripheral *peripheral, Error **errp)
                            "power-button", 1);
     qdev_init_gpio_in_named(DEVICE(peripheral), mc13892_vbus_input,
                            "vbus", 1);
+    qdev_init_gpio_in_named(DEVICE(peripheral), mc13892_watchdog_input,
+                           "watchdog", 1);
     s->rtc_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                 mc13892_rtc_alarm, s);
 }
