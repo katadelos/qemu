@@ -138,6 +138,8 @@ typedef struct B288PBProfile {
     uint16_t home_mv;
     bool touch_swap_axes, touch_invert_x, touch_invert_y;
     bool elan_touch;
+    bool touch_only;
+    const char *focaltech_touch;
 } B288PBProfile;
 
 struct B288PBMachineClass {
@@ -166,6 +168,8 @@ static void b288_pb_reset(void *opaque)
     }
     if (p->elan_touch) {
         qemu_set_irq(qdev_get_gpio_in_named(s->touch, "power", 0), 1);
+        qemu_set_irq(qdev_get_gpio_in_named(s->touch, "reset", 0), 1);
+    } else if (p->focaltech_touch) {
         qemu_set_irq(qdev_get_gpio_in_named(s->touch, "reset", 0), 1);
     } else {
         qemu_set_irq(qdev_get_gpio_in(s->touch, 0), 1);
@@ -250,16 +254,18 @@ static void b288_pb_init(MachineState *machine)
     sysbus_realize(SYS_BUS_DEVICE(s->soc), &error_fatal);
     memory_region_add_subregion(get_system_memory(), AW_B288_SDRAM_BASE,
                                  machine->ram);
-    DeviceState *buttons = qdev_new(TYPE_B288PB_BUTTONS);
-    object_property_add_child(OBJECT(s), "buttons", OBJECT(buttons));
-    qdev_prop_set_uint16(buttons, "home-millivolts", p->home_mv);
-    qdev_realize_and_unref(buttons, NULL, &error_fatal);
-    qdev_connect_gpio_out(buttons, 0,
-        qdev_get_gpio_in_named(DEVICE(s->soc), "gpio-in", p->page_next));
-    qdev_connect_gpio_out(buttons, 1,
-        qdev_get_gpio_in_named(DEVICE(s->soc), "gpio-in", p->page_previous));
-    qdev_connect_gpio_out(buttons, 2,
-        qdev_get_gpio_in_named(DEVICE(s->soc), "lradc-in", 0));
+    if (!p->touch_only) {
+        DeviceState *buttons = qdev_new(TYPE_B288PB_BUTTONS);
+        object_property_add_child(OBJECT(s), "buttons", OBJECT(buttons));
+        qdev_prop_set_uint16(buttons, "home-millivolts", p->home_mv);
+        qdev_realize_and_unref(buttons, NULL, &error_fatal);
+        qdev_connect_gpio_out(buttons, 0,
+            qdev_get_gpio_in_named(DEVICE(s->soc), "gpio-in", p->page_next));
+        qdev_connect_gpio_out(buttons, 1,
+            qdev_get_gpio_in_named(DEVICE(s->soc), "gpio-in", p->page_previous));
+        qdev_connect_gpio_out(buttons, 2,
+            qdev_get_gpio_in_named(DEVICE(s->soc), "lradc-in", 0));
+    }
     for (unsigned i = 0; i < AW_B288_NUM_MMC; i++) {
         DriveInfo *di = drive_get(IF_SD, 0, i);
         if (di) {
@@ -294,7 +300,8 @@ static void b288_pb_init(MachineState *machine)
     qdev_connect_gpio_out_named(DEVICE(s->soc), "gpio-out", p->pmic_powerup,
         qdev_get_gpio_in_named(DEVICE(pmic), "power-enable", 0));
     s->frontlight = DEVICE(i2c_slave_create_simple(s->soc->i2c[1].bus, "lm3630a", 0x36));
-    s->touch = qdev_new(p->elan_touch ? TYPE_ELAN_KTF2K : "cyttsp5");
+    s->touch = qdev_new(p->elan_touch ? TYPE_ELAN_KTF2K :
+                       p->focaltech_touch ? p->focaltech_touch : "cyttsp5");
     object_property_add_child(OBJECT(s), "touchscreen", OBJECT(s->touch));
     qdev_prop_set_uint16(s->touch, p->elan_touch ? "x-resolution" : "width",
                          p->touch_width);
@@ -303,14 +310,15 @@ static void b288_pb_init(MachineState *machine)
     qdev_prop_set_bit(s->touch, "invert-x", p->touch_invert_x);
     qdev_prop_set_bit(s->touch, "invert-y", p->touch_invert_y);
     qdev_prop_set_bit(s->touch, "swap-axes", p->touch_swap_axes);
-    qdev_prop_set_uint8(s->touch, "address", p->elan_touch ? 0x15 : 0x24);
+    qdev_prop_set_uint8(s->touch, "address", p->elan_touch ? 0x15 :
+                        p->focaltech_touch ? 0x38 : 0x24);
     if (p->elan_touch) {
         /* The original XCD2 updater checks firmware version 0x12f8. */
         qdev_prop_set_uint8(s->touch, "contact-mask", 1);
         qdev_prop_set_uint16(s->touch, "firmware-version", 0x12f8);
     }
     qdev_realize_and_unref(s->touch, BUS(s->soc->i2c[2].bus), &error_fatal);
-    if (p->elan_touch) {
+    if (p->elan_touch || p->focaltech_touch) {
         qdev_connect_gpio_out_named(s->touch, "irq", 0,
             qdev_get_gpio_in_named(DEVICE(s->soc), "gpio-in", 32 + 15));
         qdev_connect_gpio_out_named(DEVICE(s->soc), "gpio-out", 32 + 16,
