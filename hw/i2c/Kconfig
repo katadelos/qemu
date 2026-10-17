@@ -74,6 +74,10 @@ config CYTTSP5
     bool
     select I2C
 
+config FOCALTECH_FT5X
+    bool
+    select I2C
+
 config PARADE_TT
     bool
     select I2C

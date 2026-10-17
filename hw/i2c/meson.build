@@ -53,6 +53,7 @@ i2c_ss.add(when: 'CONFIG_MT8110_BELLATRIX', if_true: files(
 i2c_ss.add(when: 'CONFIG_WACOM_EMR', if_true: files('wacom_emr.c'))
 i2c_ss.add(when: 'CONFIG_MPC_I2C', if_true: files('mpc_i2c.c'))
 i2c_ss.add(when: 'CONFIG_ALLWINNER_I2C', if_true: files('allwinner-i2c.c'))
+i2c_ss.add(when: 'CONFIG_FOCALTECH_FT5X', if_true: files('ft5436.c'))
 i2c_ss.add(when: 'CONFIG_NRF51_SOC', if_true: files('microbit_i2c.c'))
 i2c_ss.add(when: 'CONFIG_NPCM7XX', if_true: files('npcm7xx_smbus.c'))
 i2c_ss.add(when: 'CONFIG_SMBUS_EEPROM', if_true: files('smbus_eeprom.c'))
