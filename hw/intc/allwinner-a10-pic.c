@@ -20,6 +20,7 @@
 #include "migration/vmstate.h"
 #include "hw/intc/allwinner-a10-pic.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 
@@ -31,11 +32,15 @@ static void aw_a10_pic_update(AwA10PICState *s)
     s->vector = 0;
 
     for (i = 0; i < AW_A10_PIC_REG_NUM; i++) {
-        irq |= s->irq_pending[i] & ~s->mask[i];
-        fiq |= s->select[i] & s->irq_pending[i] & ~s->mask[i];
+        uint32_t pending = s->irq_pending[i] & ~s->mask[i];
+        if (s->filtered_pending) {
+            pending &= s->enable[i];
+        }
+        irq |= pending;
+        fiq |= s->select[i] & pending;
 
         if (!s->vector) {
-            zeroes = ctz32(s->irq_pending[i] & ~s->mask[i]);
+            zeroes = ctz32(pending);
             if (zeroes != 32) {
                 s->vector = (i * 32 + zeroes) * 4;
             }
@@ -70,7 +75,9 @@ static uint64_t aw_a10_pic_read(void *opaque, hwaddr offset, unsigned size)
     case AW_A10_PIC_NMI:
         return s->nmi;
     case AW_A10_PIC_IRQ_PENDING ... AW_A10_PIC_IRQ_PENDING + 8:
-        return s->irq_pending[index];
+        return s->filtered_pending ?
+            s->irq_pending[index] & s->enable[index] & ~s->mask[index] :
+            s->irq_pending[index];
     case AW_A10_PIC_FIQ_PENDING ... AW_A10_PIC_FIQ_PENDING + 8:
         return s->fiq_pending[index];
     case AW_A10_PIC_SELECT ... AW_A10_PIC_SELECT + 8:
@@ -189,8 +196,13 @@ static void aw_a10_pic_reset(DeviceState *d)
 
 static void aw_a10_pic_class_init(ObjectClass *klass, const void *data)
 {
+    static const Property properties[] = {
+        DEFINE_PROP_BOOL("filtered-pending", AwA10PICState,
+                         filtered_pending, false),
+    };
     DeviceClass *dc = DEVICE_CLASS(klass);
 
+    device_class_set_props(dc, properties);
     device_class_set_legacy_reset(dc, aw_a10_pic_reset);
     dc->desc = "allwinner a10 pic";
     dc->vmsd = &vmstate_aw_a10_pic;

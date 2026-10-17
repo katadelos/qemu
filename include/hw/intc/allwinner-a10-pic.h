@@ -37,6 +37,7 @@ struct AwA10PICState {
     uint32_t select[AW_A10_PIC_REG_NUM];
     uint32_t enable[AW_A10_PIC_REG_NUM];
     uint32_t mask[AW_A10_PIC_REG_NUM];
+    bool filtered_pending;
     /*priority setting here*/
 };
 
