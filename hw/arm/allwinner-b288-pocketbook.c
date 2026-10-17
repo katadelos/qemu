@@ -38,13 +38,14 @@ struct B288PBButtonsState {
     QemuInputHandlerState *input;
     qemu_irq output[3];
     uint8_t pressed;
+    uint16_t home_mv;
 };
 
 static void b288_pb_buttons_update(B288PBButtonsState *s)
 {
     qemu_set_irq(s->output[0], !(s->pressed & BIT(0)));
     qemu_set_irq(s->output[1], !(s->pressed & BIT(1)));
-    qemu_set_irq(s->output[2], (s->pressed & BIT(2)) ? 700 :
+    qemu_set_irq(s->output[2], (s->pressed & BIT(2)) ? s->home_mv :
                               (s->pressed & BIT(3)) ? 1100 : 2000);
 }
 
@@ -115,10 +116,14 @@ static void b288_pb_buttons_init(Object *obj)
 
 static void b288_pb_buttons_class_init(ObjectClass *oc, const void *data)
 {
+    static const Property props[] = {
+        DEFINE_PROP_UINT16("home-millivolts", B288PBButtonsState, home_mv, 700),
+    };
     DeviceClass *dc = DEVICE_CLASS(oc);
     dc->realize = b288_pb_buttons_realize;
     dc->unrealize = b288_pb_buttons_unrealize;
     dc->vmsd = &b288_pb_buttons_vmstate;
+    device_class_set_props(dc, props);
     device_class_set_legacy_reset(dc, b288_pb_buttons_reset);
 }
 
@@ -130,6 +135,7 @@ typedef struct B288PBProfile {
     uint16_t touch_width, touch_height;
     unsigned pmic_wakeup, pmic_powerup, pmic_powergood, pmic_irq;
     unsigned page_next, page_previous;
+    uint16_t home_mv;
     bool touch_swap_axes, touch_invert_x, touch_invert_y;
     bool elan_touch;
 } B288PBProfile;
@@ -246,6 +252,7 @@ static void b288_pb_init(MachineState *machine)
                                  machine->ram);
     DeviceState *buttons = qdev_new(TYPE_B288PB_BUTTONS);
     object_property_add_child(OBJECT(s), "buttons", OBJECT(buttons));
+    qdev_prop_set_uint16(buttons, "home-millivolts", p->home_mv);
     qdev_realize_and_unref(buttons, NULL, &error_fatal);
     qdev_connect_gpio_out(buttons, 0,
         qdev_get_gpio_in_named(DEVICE(s->soc), "gpio-in", p->page_next));
@@ -356,6 +363,7 @@ static const B288PBProfile pb628_profile = {
     .pmic_wakeup = 3 * 32 + 7, .pmic_powerup = 3 * 32 + 6,
     .pmic_powergood = 3 * 32 + 26, .pmic_irq = 3 * 32 + 25,
     .page_next = 32 + 11, .page_previous = 32 + 14,
+    .home_mv = 700,
 };
 
 static const B288PBProfile pb632_profile = {
@@ -367,6 +375,7 @@ static const B288PBProfile pb632_profile = {
     .pmic_wakeup = 3 * 32 + 7, .pmic_powerup = 3 * 32 + 6,
     .pmic_powergood = 3 * 32 + 26, .pmic_irq = 3 * 32 + 25,
     .page_next = 32 + 14, .page_previous = 32 + 11,
+    .home_mv = 700,
     .touch_swap_axes = true,
     .touch_invert_y = true,
 };
@@ -380,6 +389,7 @@ static const B288PBProfile pb740_profile = {
     .pmic_wakeup = 32 + 1, .pmic_powerup = 32,
     .pmic_powergood = 32 + 3, .pmic_irq = 32 + 2,
     .page_next = 32 + 11, .page_previous = 32 + 14,
+    .home_mv = 700,
     .touch_swap_axes = true,
     .touch_invert_x = true,
 };
@@ -394,6 +404,7 @@ static const B288PBProfile pb740_2_profile = {
     .pmic_wakeup = 3 * 32 + 7, .pmic_powerup = 3 * 32 + 6,
     .pmic_powergood = 3 * 32 + 26, .pmic_irq = 3 * 32 + 25,
     .page_next = 32 + 11, .page_previous = 32 + 14,
+    .home_mv = 700,
     .touch_swap_axes = true,
     .touch_invert_x = true,
 };
@@ -408,6 +419,7 @@ static const B288PBProfile pb1040_profile = {
     .pmic_wakeup = 3 * 32 + 7, .pmic_powerup = 3 * 32 + 6,
     .pmic_powergood = 3 * 32 + 26, .pmic_irq = 3 * 32 + 25,
     .page_next = 32 + 11, .page_previous = 32 + 14,
+    .home_mv = 700,
 };
 
 static const TypeInfo b288_pb_types[] = {
