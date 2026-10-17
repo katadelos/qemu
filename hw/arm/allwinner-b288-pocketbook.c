@@ -375,6 +375,20 @@ static const B288PBProfile pb740_profile = {
     .touch_invert_x = true,
 };
 
+static const B288PBProfile pb740_2_profile = {
+    .description = "PocketBook InkPad 3 Pro (740-2, Allwinner B288)",
+    .ram_id = "pb740-2.ram",
+    .ram_size = 1 * GiB,
+    .width = 1872, .height = 1404, .rotation = 90,
+    .touch_width = 1872, .touch_height = 1404,
+    /* UART2 uses the original 740's PB0/PB1 EPD power pins. */
+    .pmic_wakeup = 3 * 32 + 7, .pmic_powerup = 3 * 32 + 6,
+    .pmic_powergood = 3 * 32 + 26, .pmic_irq = 3 * 32 + 25,
+    .page_next = 32 + 11, .page_previous = 32 + 14,
+    .touch_swap_axes = true,
+    .touch_invert_x = true,
+};
+
 static const TypeInfo b288_pb_types[] = {
     {
         .name = TYPE_B288PB_BUTTONS,
@@ -404,6 +418,11 @@ static const TypeInfo b288_pb_types[] = {
         .parent = TYPE_B288PB_MACHINE,
         .class_init = b288_pb_class_init,
         .class_data = &pb740_profile,
+    }, {
+        .name = MACHINE_TYPE_NAME("allwinner-b288-pocketbook-740-2"),
+        .parent = TYPE_B288PB_MACHINE,
+        .class_init = b288_pb_class_init,
+        .class_data = &pb740_2_profile,
     },
 };
 
