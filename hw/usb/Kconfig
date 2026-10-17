@@ -110,6 +110,10 @@ config USB_NETWORK
     default y
     depends on USB
 
+config USB_RTL8188EU
+    bool
+    depends on USB
+
 config USB_SMARTCARD
     bool
     default y

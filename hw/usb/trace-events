@@ -368,3 +368,8 @@ canokey_handle_data_out(uint8_t ep_out, uint32_t out_len) "ep %d len %d"
 canokey_handle_data_in(uint8_t ep_in, uint32_t in_len) "ep %d len %d"
 canokey_realize(void)
 canokey_unrealize(void)
+
+# dev-rtl8188eu.c
+rtl8188eu_power(bool powered) "powered=%d"
+rtl8188eu_register(bool read, unsigned address, unsigned length, uint32_t value) "read=%d address=0x%04x length=%u value=0x%08x"
+rtl8188eu_frame(bool transmit, unsigned length, uint16_t control) "transmit=%d length=%u control=0x%04x"
