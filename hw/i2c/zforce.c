@@ -762,17 +762,15 @@ struct TPS65185State {
     bool have_pointer;
     bool powerup;
     bool power_enable;
+    bool gpio_rails;
 };
 
 static void tps65185_update_pwrgood(TPS65185State *s)
 {
-    /*
-     * Trilogy enables the six rails with ENABLE=0x3f.  Its PWR0 and PWR2
-     * board controls gate the PMIC's rail sequencer and therefore PWR_GOOD.
-     */
+    /* VCOM and V3P3 do not participate in the four-rail power-good check. */
     qemu_set_irq(s->pwrgood,
                  s->powerup && s->power_enable &&
-                 (s->regs[1] & 0x3f) == 0x3f);
+                 (s->gpio_rails || (s->regs[1] & 0x0f) == 0x0f));
 }
 
 static int tps65185_send(I2CSlave *i2c, uint8_t data)
@@ -797,6 +795,9 @@ static int tps65185_send(I2CSlave *i2c, uint8_t data)
             s->regs[4] &= ~0x40;
             s->regs[7] |= 0x01;
             qemu_set_irq(s->irq, 0);
+        } else if (reg == 13) {
+            /* READ_THERM self-clears when acquisition completes. */
+            s->regs[13] = (data & ~0x80) | 0x20;
         }
     }
     return 0;
@@ -879,10 +880,15 @@ static void tps65185_init(Object *obj)
 
 static void tps65185_class_init(ObjectClass *oc, const void *data)
 {
+    static const Property properties[] = {
+        /* POWERUP directly sequences the rails on GPIO-controlled boards. */
+        DEFINE_PROP_BOOL("gpio-rails", TPS65185State, gpio_rails, false),
+    };
     DeviceClass *dc = DEVICE_CLASS(oc);
     I2CSlaveClass *sc = I2C_SLAVE_CLASS(oc);
 
     device_class_set_legacy_reset(dc, tps65185_reset);
+    device_class_set_props(dc, properties);
     sc->send = tps65185_send;
     sc->recv = tps65185_recv;
     sc->event = tps65185_event;
