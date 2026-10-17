@@ -38,6 +38,10 @@ config ELAN_KTF2K
     bool
     select I2C
 
+config GOODIX_GT813
+    bool
+    select I2C
+
 config KOBO_MSP430
     bool
     select I2C
