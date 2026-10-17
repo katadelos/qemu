@@ -71,7 +71,7 @@ static void imx_i2c_reset(DeviceState *dev)
 {
     IMXI2CState *s = IMX_I2C(dev);
 
-    if (s->address != ADDR_RESET) {
+    if (i2c_bus_busy(s->bus)) {
         i2c_end_transfer(s->bus);
     }
 
@@ -193,19 +193,22 @@ static void imx_i2c_write(void *opaque, hwaddr offset,
                  * if we unset the master mode then it ends the ongoing
                  * transfer if any
                  */
-                if (s->address != ADDR_RESET) {
+                if (i2c_bus_busy(s->bus)) {
                     i2c_end_transfer(s->bus);
-                    s->address = ADDR_RESET;
                 }
+                s->address = ADDR_RESET;
             }
 
             if (s->i2cr & I2CR_RSTA) { /* Restart */
-                /* if this is a restart then it ends the ongoing transfer */
-                if (s->address != ADDR_RESET) {
-                    i2c_end_transfer(s->bus);
+                /*
+                 * Re-enter the address phase without STOP. The next
+                 * i2c_start_transfer() delivers the repeated START to the
+                 * selected slave, preserving its transaction state.
+                 */
+                if (imx_i2c_is_master(s)) {
                     s->address = ADDR_RESET;
-                    s->i2cr &= ~I2CR_RSTA;
                 }
+                s->i2cr &= ~I2CR_RSTA;
             }
         }
         break;
