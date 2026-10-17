@@ -22,6 +22,7 @@
 #include "hw/cpu/a15mpcore.h"
 #include "hw/intc/imx_gpcv2.h"
 #include "hw/misc/imx7_ccm.h"
+#include "hw/display/imx_lcdif.h"
 #include "hw/misc/imx7_snvs.h"
 #include "hw/misc/imx7_gpr.h"
 #include "hw/misc/imx7_dap.h"
@@ -77,6 +78,7 @@ struct FslIMX7State {
     IMX7CCMState       ccm;
     IMX7AnalogState    analog;
     IMX7SNVSState      snvs;
+    IMXLCDIFState      lcdif;
     IMX7SRCState       src;
     IMXGPCv2State      gpcv2;
     IMXSPIState        spi[FSL_IMX7_NUM_ECSPIS];

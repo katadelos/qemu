@@ -126,6 +126,7 @@ static void fsl_imx7_init(Object *obj)
      * SNVS
      */
     object_initialize_child(obj, "snvs", &s->snvs, TYPE_IMX7_SNVS);
+    object_initialize_child(obj, "lcdif", &s->lcdif, TYPE_IMX_LCDIF);
 
     /*
      * Watchdogs
@@ -332,6 +333,17 @@ static void fsl_imx7_realize(DeviceState *dev, Error **errp)
                                 FSL_IMX7_IOMUXC_SIZE);
     create_unimplemented_device("iomuxc_lspr", FSL_IMX7_IOMUXC_LPSR_ADDR,
                                 FSL_IMX7_IOMUXC_LPSR_SIZE);
+    create_unimplemented_device("aips1-config", FSL_IMX7_AIPS1_CONF_ADDR,
+                                FSL_IMX7_AIPS1_CONF_SIZE);
+    create_unimplemented_device("aips2-config", FSL_IMX7_AIPS2_CONF_ADDR,
+                                FSL_IMX7_AIPS2_CONF_SIZE);
+    create_unimplemented_device("aips3-config", FSL_IMX7_AIPS3_CONF_ADDR,
+                                FSL_IMX7_AIPS3_CONF_SIZE);
+    create_unimplemented_device("lpsr", FSL_IMX7_IOMUXC_LPSR_GPR_ADDR, 0x10000);
+    create_unimplemented_device("system-counter-cmp", FSL_IMX7_SYSCNT_CMP_ADDR, 0x1000);
+    create_unimplemented_device("qosc", 0x307f0000, 0x10000);
+    create_unimplemented_device("axi-monitor", 0x307e0000, 0x10000);
+    create_unimplemented_device("rdc", FSL_IMX7_RDC_ADDR, 0x10000);
 
     /*
      * CCM
@@ -678,8 +690,9 @@ static void fsl_imx7_realize(DeviceState *dev, Error **errp)
     /*
      * LCD
      */
-    create_unimplemented_device("lcdif", FSL_IMX7_LCDIF_ADDR,
-                                FSL_IMX7_LCDIF_SIZE);
+    sysbus_realize(SYS_BUS_DEVICE(&s->lcdif), &error_abort);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->lcdif), 0, FSL_IMX7_LCDIF_ADDR);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->lcdif), 0, qdev_get_gpio_in(gic, 5));
 
     /*
      * DMA APBH
