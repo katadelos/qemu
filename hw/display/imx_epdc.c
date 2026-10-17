@@ -595,10 +595,24 @@ static void imx_epdc_reset(DeviceState *dev)
     qemu_set_irq(s->irq, 0);
 }
 
+static int imx_epdc_post_load(void *opaque, int version_id)
+{
+    IMXEPDCState *s = opaque;
+
+    s->fb_previous_valid = false;
+    if (s->update_pending) {
+        qemu_bh_schedule(s->complete_bh);
+    }
+    imx_epdc_update_irq(s);
+    timer_mod(s->refresh_timer, qemu_clock_get_ms(QEMU_CLOCK_REALTIME));
+    return 0;
+}
+
 static const VMStateDescription vmstate_imx_epdc = {
     .name = TYPE_IMX_EPDC,
     .version_id = 3,
     .minimum_version_id = 3,
+    .post_load = imx_epdc_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IMXEPDCState,
                              IMX_EPDC_MMIO_SIZE / sizeof(uint32_t)),
