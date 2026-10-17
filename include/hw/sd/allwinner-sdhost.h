@@ -37,6 +37,7 @@
 
 /** Allwinner sun5i family and newer (A13, H2+, H3, etc) */
 #define TYPE_AW_SDHOST_SUN5I TYPE_AW_SDHOST "-sun5i"
+#define TYPE_AW_SDHOST_B288 TYPE_AW_SDHOST "-b288"
 
 /** Allwinner sun50i-a64 */
 #define TYPE_AW_SDHOST_SUN50I_A64 TYPE_AW_SDHOST "-sun50i-a64"
@@ -117,6 +118,8 @@ struct AwSdHostState {
     uint32_t response_crc;      /**< Response CRC */
     uint32_t data_crc[8];       /**< Data CRC */
     uint32_t sample_delay;      /**< Sample delay control */
+    uint32_t drive_delay;
+    uint32_t strobe_delay;
     uint32_t status_crc;        /**< Status CRC */
 
     /** @} */
@@ -141,6 +144,7 @@ struct AwSdHostClass {
 
     /** does the IP block support autocalibration? */
     bool can_calibrate;
+    bool b288_calibration;
 };
 
 #endif /* HW_SD_ALLWINNER_SDHOST_H */

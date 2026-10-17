@@ -77,7 +77,9 @@ enum {
     REG_SD_DATA1_CRC  = 0x12C, /* CRC Data 1 from card/eMMC */
     REG_SD_DATA0_CRC  = 0x130, /* CRC Data 0 from card/eMMC */
     REG_SD_CRC_STA    = 0x134, /* CRC status from card/eMMC during write */
+    REG_SD_DRV_DL     = 0x140, /* Output drive delay */
     REG_SD_SAMP_DL    = 0x144, /* Sample Delay Control (sun50i-a64) */
+    REG_SD_DS_DL      = 0x148, /* eMMC data strobe delay */
     REG_SD_FIFO       = 0x200, /* Read/Write FIFO */
 };
 
@@ -577,6 +579,12 @@ static uint64_t allwinner_sdhost_read(void *opaque, hwaddr offset,
     case REG_SD_FIFO:      /* Read/Write FIFO */
         res = allwinner_sdhost_fifo_read(s);
         break;
+    case REG_SD_DRV_DL:
+        res = s->drive_delay;
+        break;
+    case REG_SD_DS_DL:
+        res = s->strobe_delay;
+        break;
     case REG_SD_SAMP_DL: /* Sample Delay */
         if (sc->can_calibrate) {
             res = s->sample_delay;
@@ -699,7 +707,7 @@ static void allwinner_sdhost_write(void *opaque, hwaddr offset,
         s->hardware_rst = value;
         break;
     case REG_SD_DMAC:      /* Internal DMA Controller Control */
-        s->dmac = value;
+        s->dmac = value & ~1; /* DMA software reset is self-clearing. */
         allwinner_sdhost_update_irq(s);
         break;
     case REG_SD_DLBA:      /* Descriptor List Base Address */
@@ -737,9 +745,28 @@ static void allwinner_sdhost_write(void *opaque, hwaddr offset,
     case REG_SD_DATA0_CRC: /* CRC Data 0 from card/eMMC */
     case REG_SD_CRC_STA:   /* CRC status from card/eMMC in write operation */
         break;
+    case REG_SD_DRV_DL:
+        s->drive_delay = value;
+        break;
+    case REG_SD_DS_DL:
+        if (sc->b288_calibration) {
+            uint32_t calibrated = s->strobe_delay & 0x7f00;
+            if (value & BIT(15)) {
+                calibrated = BIT(14) | (32 << 8);
+            }
+            s->strobe_delay = (value & ~0x7f00) | calibrated;
+        } else {
+            s->strobe_delay = value;
+        }
+        break;
     case REG_SD_SAMP_DL: /* Sample delay control */
         if (sc->can_calibrate) {
-            s->sample_delay = value;
+            uint32_t calibrated = s->sample_delay & 0x7f00;
+            if (sc->b288_calibration && (value & BIT(15))) {
+                calibrated = BIT(14) | (32 << 8);
+            }
+            s->sample_delay = sc->b288_calibration ?
+                (value & ~0x7f00) | calibrated : value;
         } else {
             out_of_bounds = true;
         }
@@ -801,6 +828,8 @@ static const VMStateDescription vmstate_allwinner_sdhost = {
         VMSTATE_UINT32_ARRAY(data_crc, AwSdHostState, 8),
         VMSTATE_UINT32(status_crc, AwSdHostState),
         VMSTATE_UINT32(sample_delay, AwSdHostState),
+        VMSTATE_UINT32(drive_delay, AwSdHostState),
+        VMSTATE_UINT32(strobe_delay, AwSdHostState),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -879,6 +908,8 @@ static void allwinner_sdhost_reset(DeviceState *dev)
     }
 
     s->status_crc = REG_SD_CRC_STA_RST;
+    s->drive_delay = 0;
+    s->strobe_delay = 0;
 
     if (sc->can_calibrate) {
         s->sample_delay = REG_SD_SAMPLE_DL_RST;
@@ -939,6 +970,15 @@ static void allwinner_sdhost_sun50i_a64_emmc_class_init(ObjectClass *klass,
     sc->can_calibrate = true;
 }
 
+static void allwinner_sdhost_b288_class_init(ObjectClass *klass,
+                                             const void *data)
+{
+    AwSdHostClass *sc = AW_SDHOST_CLASS(klass);
+    sc->max_desc_size = 64 * KiB;
+    sc->can_calibrate = true;
+    sc->b288_calibration = true;
+}
+
 static const TypeInfo allwinner_sdhost_info = {
     .name          = TYPE_AW_SDHOST,
     .parent        = TYPE_SYS_BUS_DEVICE,
@@ -959,6 +999,12 @@ static const TypeInfo allwinner_sdhost_sun5i_info = {
     .name          = TYPE_AW_SDHOST_SUN5I,
     .parent        = TYPE_AW_SDHOST,
     .class_init    = allwinner_sdhost_sun5i_class_init,
+};
+
+static const TypeInfo allwinner_sdhost_b288_info = {
+    .name          = TYPE_AW_SDHOST_B288,
+    .parent        = TYPE_AW_SDHOST,
+    .class_init    = allwinner_sdhost_b288_class_init,
 };
 
 static const TypeInfo allwinner_sdhost_sun50i_a64_info = {
@@ -985,6 +1031,7 @@ static void allwinner_sdhost_register_types(void)
     type_register_static(&allwinner_sdhost_info);
     type_register_static(&allwinner_sdhost_sun4i_info);
     type_register_static(&allwinner_sdhost_sun5i_info);
+    type_register_static(&allwinner_sdhost_b288_info);
     type_register_static(&allwinner_sdhost_sun50i_a64_info);
     type_register_static(&allwinner_sdhost_sun50i_a64_emmc_info);
     type_register_static(&allwinner_sdhost_bus_info);

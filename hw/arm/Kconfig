@@ -550,6 +550,7 @@ config ALLWINNER_A10
     select ALLWINNER_WDT
     select ALLWINNER_EMAC
     select ALLWINNER_I2C
+    select ALLWINNER_SDHOST
     select ALLWINNER_A10_SPI
     select AXP2XX_PMU
     select SERIAL_MM
@@ -563,6 +564,7 @@ config ALLWINNER_H3
     select ALLWINNER_A10_PIT
     select ALLWINNER_SUN8I_EMAC
     select ALLWINNER_I2C
+    select ALLWINNER_SDHOST
     select ALLWINNER_WDT
     select SERIAL_MM
     select ARM_TIMER
@@ -578,6 +580,7 @@ config ALLWINNER_R40
     select AHCI_SYSBUS
     select ALLWINNER_SRAMC
     select ALLWINNER_A10_PIT
+    select ALLWINNER_SDHOST
     select ALLWINNER_WDT
     select AXP2XX_PMU
     select SERIAL_MM
