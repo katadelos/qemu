@@ -20,6 +20,7 @@ typedef struct MT8115BoardConfig {
     unsigned panel_width, panel_height;
     unsigned touch_width, touch_height;
     unsigned touch_bus, touch_eint, touch_reset_pin, touch_id_pin;
+    unsigned pen_bus, pen_eint, pen_detect_pin, pen_reset_pin;
     uint8_t touch_vendor_id;
     const MT8115I2CFittedDevice *i2c_devices;
     unsigned num_i2c_devices;

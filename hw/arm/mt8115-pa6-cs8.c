@@ -21,6 +21,7 @@
 #include "hw/i2c/mtk_i2c.h"
 #include "hw/i2c/ti-opt-sensors.h"
 #include "hw/i2c/parade-tt7010.h"
+#include "hw/i2c/wacom_emr.h"
 #include "hw/misc/unimp.h"
 #include "hw/misc/mt8171-m4u.h"
 #include "hw/misc/mt8171-gce.h"
@@ -187,6 +188,8 @@ typedef struct PA6PinBank {
     bool gpio;
     qemu_irq touch_reset;
     unsigned touch_reset_pin;
+    qemu_irq pen_reset;
+    unsigned pen_reset_pin;
 } PA6PinBank;
 
 typedef struct PA6LVTS {
@@ -1260,19 +1263,24 @@ static const MemoryRegionOps pa6_dramc_ops = {
 };
 
 /* MT8171 GPIO and IOCFG words have VAL/SET/CLR at +0/+4/+8. */
-static void pa6_touch_reset_update(PA6PinBank *p)
+static void pa6_gpio_reset_update(PA6PinBank *p, qemu_irq reset, unsigned pin)
 {
     /* Reset is pulled high when the AP is not driving it as a GPIO output. */
-    if (p->touch_reset) {
-        unsigned pin = p->touch_reset_pin;
+    if (reset) {
         unsigned bank = (pin / 32) * 0x10;
         unsigned mode = 0x300 + (pin / 8) * 0x10;
         uint32_t bit = BIT(pin % 32);
         bool driven = (p->regs[bank / 4] & bit) &&
                       !(p->regs[mode / 4] & (15U << ((pin % 8) * 4)));
-        qemu_set_irq(p->touch_reset,
+        qemu_set_irq(reset,
                      !driven || (p->regs[(0x100 + bank) / 4] & bit));
     }
+}
+
+static void pa6_peripheral_reset_update(PA6PinBank *p)
+{
+    pa6_gpio_reset_update(p, p->touch_reset, p->touch_reset_pin);
+    pa6_gpio_reset_update(p, p->pen_reset, p->pen_reset_pin);
 }
 
 static uint64_t pa6_pin_read(void *opaque, hwaddr offset, unsigned size)
@@ -1308,7 +1316,7 @@ static void pa6_pin_write(void *opaque, hwaddr offset, uint64_t value,
         *reg = value;
     }
     if (p->gpio) {
-        pa6_touch_reset_update(p);
+        pa6_peripheral_reset_update(p);
     }
 }
 
@@ -2293,7 +2301,7 @@ static void pa6_reset(void *opaque)
         unsigned pin = s->board->touch_id_pin;
         s->pins[0].regs[0x200 / 4 + (pin / 32) * 4] |= BIT(pin % 32);
     }
-    pa6_touch_reset_update(&s->pins[0]);
+    pa6_peripheral_reset_update(&s->pins[0]);
     for (unsigned i = 0; i < ARRAY_SIZE(s->dramc); i++) {
         /*
          * Reference operating point, not a captured training result:
@@ -2756,8 +2764,22 @@ static void pa6_init(MachineState *machine)
         s->pins[0].touch_reset =
             qdev_get_gpio_in_named(DEVICE(touch), "reset", 0);
         s->pins[0].touch_reset_pin = s->board->touch_reset_pin;
-        pa6_touch_reset_update(&s->pins[0]);
+        pa6_peripheral_reset_update(&s->pins[0]);
     }
+
+    /* The shared PA6/CS8 DT fits a Wacom EMR at I2C1 address 0x09.
+     * Keep its real reset and interrupt wiring across warm kernel handoff. */
+    I2CSlave *pen = i2c_slave_new(TYPE_WACOM_EMR, 0x09);
+    object_property_add_child(OBJECT(s), "pen", OBJECT(pen));
+    i2c_slave_realize_and_unref(pen, s->i2c[s->board->pen_bus].bus,
+                               &error_fatal);
+    qdev_connect_gpio_out_named(DEVICE(pen), "irq", 0,
+        qemu_allocate_irq(pa6_eint_input, s, s->board->pen_eint));
+    qdev_connect_gpio_out_named(DEVICE(pen), "pen-detect", 0,
+        qemu_allocate_irq(pa6_eint_input, s, s->board->pen_detect_pin));
+    s->pins[0].pen_reset = qdev_get_gpio_in_named(DEVICE(pen), "reset", 0);
+    s->pins[0].pen_reset_pin = s->board->pen_reset_pin;
+    pa6_peripheral_reset_update(&s->pins[0]);
 
     for (unsigned i = 0; i < s->board->num_i2c_devices; i++) {
         const MT8115I2CFittedDevice *fitted = &s->board->i2c_devices[i];
