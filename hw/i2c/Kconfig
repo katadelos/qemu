@@ -30,6 +30,10 @@ config IMX_I2C
     bool
     select I2C
 
+config FP9928
+    bool
+    select I2C
+
 config KOBO_MSP430
     bool
     select I2C
@@ -123,5 +127,17 @@ config TMP103
     select I2C
 
 config MAX14656
+    bool
+    select I2C
+
+config WACOM_EMR
+    bool
+    select I2C
+
+config BD71815
+    bool
+    select I2C
+
+config SY7636
     bool
     select I2C

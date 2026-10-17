@@ -229,11 +229,13 @@ config IMX6SL_EANAB
     bool
     default y
     depends on TCG && ARM
+    select BD71815
     select FSL_IMX6
     select IMX6SL_WARIO
     select NEONODE_ZFORCE
     select SD
     select BCM4343W_SDIO
+    select FP9928
 
 config IMX6SLL_REX
     bool
@@ -310,6 +312,7 @@ config IMX6SL_KOBO_GLO_HD
 
 config MT8115_PA6_CS8
     bool
+    select WACOM_EMR
     select PARADE_TT
     select BD72720
     select USB_MTU3
@@ -347,12 +350,14 @@ config MT8113_KOBO
     select LM3697
     default y
     depends on TCG && AARCH64
+    select SY7636
     select MT8113_ELIPSA2E
     select LM3630A
     select KOBO_NTX_BUTTONS
 
 config MT8110_BELLATRIX
     bool
+    select WACOM_EMR
     select PARADE_TT
     select AW99703
     select AT24C

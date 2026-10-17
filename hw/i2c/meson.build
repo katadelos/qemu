@@ -9,7 +9,7 @@ i2c_ss.add(when: 'CONFIG_EXYNOS4', if_true: files('exynos4210_i2c.c'))
 i2c_ss.add(when: 'CONFIG_IMX_I2C', if_true: files('imx_i2c.c'))
 i2c_ss.add(when: 'CONFIG_MTK_I2C', if_true: files('mtk_i2c.c'))
 i2c_ss.add(when: 'CONFIG_MT8113_ELIPSA2E', if_true: files('elan-ekth3500.c'))
-i2c_ss.add(when: 'CONFIG_MT8113_KOBO', if_true: files('jd9930.c', 'kx122.c', 'sy7636.c'))
+i2c_ss.add(when: 'CONFIG_MT8113_KOBO', if_true: files('jd9930.c', 'kx122.c'))
 i2c_ss.add(when: 'CONFIG_NEONODE_ZFORCE', if_true: files('zforce.c'))
 i2c_ss.add(when: 'CONFIG_IMX50_YOSHI', if_true: files('cyttsp.c'))
 i2c_ss.add(when: 'CONFIG_KOBO_MSP430', if_true: files('kobotouch_msp430.c'))
@@ -21,10 +21,8 @@ i2c_ss.add(when: 'CONFIG_MAX77696', if_true: files('max77696.c'))
 i2c_ss.add(when: 'CONFIG_DRV2667', if_true: files('drv2667.c'))
 i2c_ss.add(when: 'CONFIG_CYTTSP4', if_true: files('cyttsp4.c'))
 i2c_ss.add(when: 'CONFIG_MAX77796', if_true: files('max77796.c'))
-i2c_ss.add(when: 'CONFIG_IMX6SL_EANAB', if_true: files(
-  'bd71815.c',
-  'fp9928.c',
-))
+i2c_ss.add(when: 'CONFIG_BD71815', if_true: files('bd71815.c'))
+i2c_ss.add(when: 'CONFIG_FP9928', if_true: files('fp9928.c'))
 i2c_ss.add(when: 'CONFIG_BD71827', if_true: files('bd71827.c'))
 i2c_ss.add(when: 'CONFIG_FP9929', if_true: files('fp9929.c'))
 i2c_ss.add(when: 'CONFIG_GOODIX_GT9XX', if_true: files('goodix_gt9xx.c'))
@@ -45,9 +43,9 @@ i2c_ss.add(when: 'CONFIG_MT8110_BELLATRIX', if_true: files(
   'fp9966.c',
   'bq25611d.c',
   'kx132.c',
-  'wacom_emr.c',
   'ti-opt-sensors.c',
 ))
+i2c_ss.add(when: 'CONFIG_WACOM_EMR', if_true: files('wacom_emr.c'))
 i2c_ss.add(when: 'CONFIG_MPC_I2C', if_true: files('mpc_i2c.c'))
 i2c_ss.add(when: 'CONFIG_ALLWINNER_I2C', if_true: files('allwinner-i2c.c'))
 i2c_ss.add(when: 'CONFIG_NRF51_SOC', if_true: files('microbit_i2c.c'))
@@ -63,4 +61,7 @@ i2c_ss.add(when: ['CONFIG_MT8113_BELLATRIX4'], if_true: files('fp9967.c', 'max20
 i2c_ss.add(when: 'CONFIG_MT8115_PA6_CS8', if_true: files('fp9967.c', 'max20342.c', 'sgm66075.c', 'fp9936.c', 'ti-opt-sensors.c', 'focaltech-ft3a81.c'))
 i2c_ss.add(when: 'CONFIG_MT8115_PA6_CS8', if_true: files('lsm6dso16is.c'))
 
+
+
+i2c_ss.add(when: 'CONFIG_SY7636', if_true: files('sy7636.c'))
 system_ss.add_all(when: 'CONFIG_I2C', if_true: i2c_ss)
