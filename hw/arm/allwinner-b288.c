@@ -52,6 +52,7 @@ struct B288IOState {
     qemu_irq lradc_irq;
     qemu_irq gpio_irq[4];
     qemu_irq gpio_output[9 * 32];
+    qemu_irq wlan_power;
 };
 
 static void b288_lradc_update(B288IOState *s)
@@ -266,6 +267,9 @@ static void b288_io_write(void *opaque, hwaddr offset, uint64_t value,
         return;
     }
     s->regs[offset / 4] = value;
+    if (offset == 0x20148) {
+        qemu_set_irq(s->wlan_power, !!(value & BIT(31)));
+    }
     if (offset == 0x280a4) {
         s->regs[offset / 4] &= ~BIT(2); /* UART HALT, LCR update complete. */
     }
@@ -319,6 +323,7 @@ static void b288_io_reset(DeviceState *dev)
     timer_del(s->lradc_timer);
     b288_lradc_update(s);
     b288_gpio_update(s);
+    qemu_set_irq(s->wlan_power, 0);
 }
 
 static int b288_io_post_load(void *opaque, int version_id)
@@ -327,6 +332,7 @@ static int b288_io_post_load(void *opaque, int version_id)
     b288_gpio_update(s);
     b288_gpio_outputs(s);
     b288_lradc_update(s);
+    qemu_set_irq(s->wlan_power, !!(s->regs[0x20148 / 4] & BIT(31)));
     return 0;
 }
 
@@ -357,6 +363,7 @@ static void b288_io_init(Object *obj)
     sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->avs);
     qdev_init_gpio_in_named(DEVICE(s), b288_gpio_input, "gpio-in", 9 * 32);
     qdev_init_gpio_out_named(DEVICE(s), s->gpio_output, "gpio-out", 9 * 32);
+    qdev_init_gpio_out_named(DEVICE(s), &s->wlan_power, "wlan-power", 1);
     qdev_init_gpio_in_named(DEVICE(s), b288_lradc_input, "lradc-in", 1);
     s->lradc_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, b288_lradc_sample, s);
     sysbus_init_irq(SYS_BUS_DEVICE(s), &s->lradc_irq);
@@ -448,6 +455,7 @@ static void allwinner_b288_realize(DeviceState *device, Error **errp)
     sysbus_mmio_map_overlap(SYS_BUS_DEVICE(dev), 1, 0x01c20c80, 2);
     qdev_pass_gpios(dev, device, "gpio-in");
     qdev_pass_gpios(dev, device, "gpio-out");
+    qdev_pass_gpios(dev, device, "wlan-power");
     qdev_pass_gpios(dev, device, "lradc-in");
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
                         qdev_get_gpio_in(DEVICE(&s->gic), 30));
