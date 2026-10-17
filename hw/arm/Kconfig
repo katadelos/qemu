@@ -586,6 +586,17 @@ config ALLWINNER_B288
     select USB_OHCI_SYSBUS
     select FOCALTECH_FT5X
 
+config ALLWINNER_A13_POCKETBOOK
+    bool
+    default y
+    depends on TCG && ARM
+    select ALLWINNER_A10
+    select ELAN_KTF2K
+    select USB_RTL8188EU
+    select USB_EHCI_SYSBUS
+    select PCF8563
+    select NEONODE_ZFORCE
+
 config ALLWINNER_B288_POCKETBOOK
     bool
     default y if TCG && ARM
