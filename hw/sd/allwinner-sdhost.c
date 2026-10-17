@@ -190,6 +190,9 @@ static void allwinner_sdhost_update_irq(AwSdHostState *s)
 {
     uint32_t irq;
 
+    if (s->sdio_irq_level) {
+        s->irq_status |= SD_RISR_SDIO_INTR;
+    }
     if (s->global_ctl & SD_GCTL_INT_ENB) {
         irq = s->irq_status & s->irq_mask;
     } else {
@@ -198,6 +201,17 @@ static void allwinner_sdhost_update_irq(AwSdHostState *s)
 
     trace_allwinner_sdhost_update_irq(irq);
     qemu_set_irq(s->irq, !!irq);
+}
+
+static void allwinner_sdhost_sdio_irq(void *opaque, int line, int level)
+{
+    AwSdHostState *s = opaque;
+
+    s->sdio_irq_level = level;
+    if (!level) {
+        s->irq_status &= ~SD_RISR_SDIO_INTR;
+    }
+    allwinner_sdhost_update_irq(s);
 }
 
 static void allwinner_sdhost_update_transfer_cnt(AwSdHostState *s,
@@ -827,10 +841,17 @@ static const MemoryRegionOps allwinner_sdhost_ops = {
     .impl.min_access_size = 2,
 };
 
+static int allwinner_sdhost_post_load(void *opaque, int version_id)
+{
+    allwinner_sdhost_update_irq(opaque);
+    return 0;
+}
+
 static const VMStateDescription vmstate_allwinner_sdhost = {
     .name = "allwinner-sdhost",
     .version_id = 2,
     .minimum_version_id = 2,
+    .post_load = allwinner_sdhost_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(global_ctl, AwSdHostState),
         VMSTATE_UINT32(clock_ctl, AwSdHostState),
@@ -866,6 +887,7 @@ static const VMStateDescription vmstate_allwinner_sdhost = {
         VMSTATE_UINT32(sample_delay, AwSdHostState),
         VMSTATE_UINT32(drive_delay, AwSdHostState),
         VMSTATE_UINT32(strobe_delay, AwSdHostState),
+        VMSTATE_BOOL(sdio_irq_level, AwSdHostState),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -886,6 +908,7 @@ static void allwinner_sdhost_init(Object *obj)
                            TYPE_AW_SDHOST, 4 * KiB);
     sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->iomem);
     sysbus_init_irq(SYS_BUS_DEVICE(s), &s->irq);
+    qdev_init_gpio_in_named(DEVICE(s), allwinner_sdhost_sdio_irq, "sdio-irq", 1);
 }
 
 static void allwinner_sdhost_realize(DeviceState *dev, Error **errp)
@@ -952,6 +975,7 @@ static void allwinner_sdhost_reset(DeviceState *dev)
     if (sc->can_calibrate) {
         s->sample_delay = REG_SD_SAMPLE_DL_RST;
     }
+    allwinner_sdhost_update_irq(s);
 }
 
 static void allwinner_sdhost_bus_class_init(ObjectClass *klass,

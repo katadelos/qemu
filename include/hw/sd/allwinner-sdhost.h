@@ -123,6 +123,7 @@ struct AwSdHostState {
     uint32_t drive_delay;
     uint32_t strobe_delay;
     uint32_t status_crc;        /**< Status CRC */
+    bool sdio_irq_level;        /**< External DAT1 / SDIO card interrupt */
 
     /** @} */
 
