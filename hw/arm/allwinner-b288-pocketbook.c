@@ -389,6 +389,20 @@ static const B288PBProfile pb632_profile = {
     .touch_invert_y = true,
 };
 
+static const B288PBProfile pb700_profile = {
+    .description = "PocketBook Era (700, Allwinner B288)",
+    .ram_id = "pb700.ram",
+    .ram_size = 1 * GiB,
+    .width = 1264, .height = 1680,
+    .touch_width = 1680, .touch_height = 1264,
+    .focaltech_touch = "ft5436",
+    .touch_swap_axes = true,
+    .pmic_wakeup = 3 * 32 + 7, .pmic_powerup = 3 * 32 + 6,
+    .pmic_powergood = 3 * 32 + 26, .pmic_irq = 3 * 32 + 25,
+    .page_next = 32 + 14, .page_previous = 32 + 11,
+    .home_mv = 500,
+};
+
 static const B288PBProfile pb740_profile = {
     .description = "PocketBook InkPad 3 (740, Allwinner B288)",
     .ram_id = "pb740.ram",
@@ -455,6 +469,11 @@ static const TypeInfo b288_pb_types[] = {
         .parent = TYPE_B288PB_MACHINE,
         .class_init = b288_pb_class_init,
         .class_data = &pb632_profile,
+    }, {
+        .name = MACHINE_TYPE_NAME("allwinner-b288-pocketbook-700"),
+        .parent = TYPE_B288PB_MACHINE,
+        .class_init = b288_pb_class_init,
+        .class_data = &pb700_profile,
     }, {
         .name = MACHINE_TYPE_NAME("allwinner-b288-pocketbook-740"),
         .parent = TYPE_B288PB_MACHINE,
