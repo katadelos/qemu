@@ -69,6 +69,10 @@ zforce_queue_coalesce(uint8_t state, unsigned count, bool reading) "state=%u cou
 zforce_queue_drop(uint8_t type, unsigned count, bool reading) "type=0x%02x count=%u reading=%d"
 zforce_pop(uint8_t type, unsigned count) "type=0x%02x remaining=%u"
 
+# cyttsp5.c
+cyttsp5_command(uint16_t reg, unsigned len) "register=0x%04x len=%u"
+cyttsp5_queue(unsigned len, uint8_t report_id) "len=%u report=0x%02x"
+
 # cyttsp.c
 
 cyttsp_input(bool pressed, unsigned x, unsigned y, bool bootloader, uint8_t mode) "pressed=%d x=%u y=%u bootloader=%d mode=0x%02x"

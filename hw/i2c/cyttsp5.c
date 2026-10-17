@@ -3,6 +3,7 @@
  */
 #include "qemu/osdep.h"
 #include "hw/i2c/i2c.h"
+#include "hw/i2c/cyttsp5.h"
 #include "qemu/bswap.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
@@ -10,8 +11,8 @@
 #include "qemu/timer.h"
 #include "ui/input.h"
 #include "migration/vmstate.h"
+#include "trace.h"
 
-#define TYPE_CYTTSP5 "cyttsp5"
 #define CYTTSP5_TOUCH_QUEUE_SIZE 64
 #define CYTTSP5_TOUCH_EMPTY 4
 OBJECT_DECLARE_SIMPLE_TYPE(CYTTSP5State, CYTTSP5)
@@ -29,9 +30,10 @@ struct CYTTSP5State {
     unsigned tx_len, rx_len, rx_pos;
     int input_x, input_y;
     uint16_t width, height;
-    bool invert_x, invert_y, swap_axes;
+    bool invert_x, invert_y, swap_axes, packed_reports;
     bool reading, bootloader, reset_level, pressed, reported;
     bool input_dirty;
+    bool sleeping, scanning;
     bool irq_level;
     bool rx_pending, rx_is_touch;
     uint8_t sequence;
@@ -39,6 +41,7 @@ struct CYTTSP5State {
     uint8_t touch_head, touch_count;
 };
 static void cyttsp5_deliver_touch(CYTTSP5State *s);
+static void cyttsp5_input_sync(DeviceState *dev);
 
 static const uint8_t cyttsp5_report_descriptor[] = {
     0x05, 0x0d, 0x09, 0x04, 0xa1, 0x01, 0x85, 0x01, 0x09, 0x22, 0xa1, 0x02, 0x06, 0x0d, 0x00, 0x09,
@@ -67,6 +70,7 @@ static void cyttsp5_ready(void *opaque)
 
 static void cyttsp5_queue(CYTTSP5State *s, unsigned len)
 {
+    trace_cyttsp5_queue(len, s->rx[2]);
     stw_le_p(s->rx, len);
     s->rx_len = MAX(len, 2);
     s->rx_pos = 0;
@@ -88,14 +92,38 @@ static uint16_t cyttsp5_crc(const uint8_t *data, unsigned size)
     return crc;
 }
 
+/* PIP1 packed touch report, as described by the Parade TTDL fields. */
+static const uint8_t cyttsp5_packed_descriptor[] = {
+    0x05, 0x0d, 0x09, 0x04, 0xa1, 0x01, 0x85, 0x01, 0x09, 0x22, 0xa1, 0x02,
+    0x09, 0x56, 0x15, 0x00, 0x26, 0xff, 0xff, 0x75, 0x10, 0x95, 0x01, 0x81,
+    0x02, 0x09, 0x54, 0x25, 0x1f, 0x75, 0x05, 0x81, 0x02, 0x06, 0x01, 0xff,
+    0x09, 0x62, 0x25, 0x01, 0x75, 0x01, 0x81, 0x02, 0x75, 0x02, 0x81, 0x03,
+    0x09, 0x63, 0x25, 0x07, 0x75, 0x03, 0x81, 0x02, 0x75, 0x03, 0x81, 0x03,
+    0x09, 0x64, 0x25, 0x03, 0x75, 0x02, 0x81, 0x02, 0xc0, 0x09, 0x22, 0xa1,
+    0x02, 0x09, 0x60, 0x25, 0x07, 0x75, 0x03, 0x81, 0x02, 0x75, 0x05, 0x81,
+    0x03, 0x05, 0x0d, 0x09, 0x51, 0x25, 0x1f, 0x75, 0x05, 0x81, 0x02, 0x06,
+    0x01, 0xff, 0x09, 0x61, 0x25, 0x03, 0x75, 0x02, 0x81, 0x02, 0x05, 0x0d,
+    0x09, 0x42, 0x25, 0x01, 0x75, 0x01, 0x81, 0x02, 0x05, 0x01, 0x09, 0x30,
+    0x26, 0xff, 0x03, 0x75, 0x10, 0x81, 0x02, 0x09, 0x31, 0x26, 0xff, 0x07,
+    0x75, 0x10, 0x81, 0x02, 0x05, 0x0d, 0x09, 0x30, 0x26, 0xff, 0x00, 0x75,
+    0x08, 0x81, 0x02, 0x06, 0x01, 0xff, 0x09, 0x62, 0x26, 0xff, 0x00, 0x75,
+    0x08, 0x81, 0x02, 0x09, 0x63, 0x81, 0x02, 0x09, 0x64, 0x81, 0x02, 0xc0,
+    0xc0,
+};
+
 static void cyttsp5_command(CYTTSP5State *s)
 {
     uint16_t reg;
     uint8_t cmd;
+    const uint8_t *descriptor = s->packed_reports ?
+        cyttsp5_packed_descriptor : cyttsp5_report_descriptor;
+    size_t descriptor_size = s->packed_reports ?
+        sizeof(cyttsp5_packed_descriptor) : sizeof(cyttsp5_report_descriptor);
     if (s->tx_len < 2) {
         return;
     }
     reg = lduw_le_p(s->tx);
+    trace_cyttsp5_command(reg, s->tx_len);
     if (reg != 1 && reg != 2 && reg != 4 && reg != 5) {
         return;
     }
@@ -105,7 +133,7 @@ static void cyttsp5_command(CYTTSP5State *s)
     if (reg == 1 && s->tx_len == 2) {
         s->rx[2] = s->bootloader ? 0xff : 0xf7;
         stw_le_p(s->rx + 4, 0x100);
-        stw_le_p(s->rx + 6, sizeof(cyttsp5_report_descriptor) + 3);
+        stw_le_p(s->rx + 6, descriptor_size + 3);
         stw_le_p(s->rx + 8, 2); /* report descriptor */
         stw_le_p(s->rx + 10, 3); /* input */
         stw_le_p(s->rx + 12, 512);
@@ -119,17 +147,22 @@ static void cyttsp5_command(CYTTSP5State *s)
         cyttsp5_queue(s, 32);
     } else if (reg == 2 && s->tx_len == 2) {
         s->rx[2] = 0xf6;
-        memcpy(s->rx + 3, cyttsp5_report_descriptor, sizeof(cyttsp5_report_descriptor));
+        memcpy(s->rx + 3, descriptor, descriptor_size);
         /* Logical maxima in the X and Y HID items. */
-        stw_le_p(s->rx + 3 + 139, s->width - 1);
-        stw_le_p(s->rx + 3 + 155, s->height - 1);
-        cyttsp5_queue(s, sizeof(cyttsp5_report_descriptor) + 3);
+        stw_le_p(s->rx + 3 + (s->packed_reports ? 121 : 139), s->width - 1);
+        stw_le_p(s->rx + 3 + (s->packed_reports ? 130 : 155), s->height - 1);
+        cyttsp5_queue(s, descriptor_size + 3);
     } else if (reg == 5 && s->tx_len >= 4) {
         cmd = s->tx[3] & 0xf;
         if (cmd == 1) {
             s->bootloader = true;
             cyttsp5_queue(s, 0);
         } else {
+            if (cmd == 8) { /* HID SET_POWER */
+                s->sleeping = (s->tx[2] & 3) != 0;
+                s->touch_head = s->touch_count = 0;
+                s->input_dirty = true;
+            }
             s->rx[2] = 0xf0;
             s->rx[3] = s->tx[2] & 3;
             s->rx[4] = cmd;
@@ -177,6 +210,13 @@ static void cyttsp5_command(CYTTSP5State *s)
             s->rx[50] = 10;
             cyttsp5_queue(s, 51);
             break;
+        case 3: /* suspend scanning */
+        case 4: /* resume scanning */
+            s->scanning = cmd == 4;
+            s->touch_head = s->touch_count = 0;
+            s->input_dirty = true;
+            cyttsp5_queue(s, 6);
+            break;
         case 5: /* get RAM parameter */
         case 6: /* set RAM parameter */
             if (s->tx_len < 8) {
@@ -191,7 +231,15 @@ static void cyttsp5_command(CYTTSP5State *s)
             cyttsp5_queue(s, 8);
             break;
         case 0x20: /* verify config CRC */
-            cyttsp5_queue(s, 10);
+            if (s->scanning) {
+                /* VERIFY_CONFIG is a test-mode command. A scanning PIP1
+                 * controller returns the unsupported-command response. */
+                s->rx[4] = 0;
+                s->rx[5] = cmd;
+                cyttsp5_queue(s, 6);
+            } else {
+                cyttsp5_queue(s, 10);
+            }
             break;
         case 0x21: /* configuration row size */
             stw_le_p(s->rx + 5, 128);
@@ -276,6 +324,7 @@ static int cyttsp5_event(I2CSlave *i2c, enum i2c_event event)
             s->rx_len = 2;
             s->irq_level = true;
             qemu_set_irq(s->irq, 1);
+            cyttsp5_input_sync(DEVICE(s));
             cyttsp5_deliver_touch(s);
         }
         break;
@@ -289,6 +338,8 @@ static void cyttsp5_gpio_reset(void *opaque, int line, int level)
     CYTTSP5State *s = opaque;
     if (level && !s->reset_level) {
         s->bootloader = true;
+        s->sleeping = false;
+        s->scanning = true;
         s->touch_head = s->touch_count = 0;
         s->pressed = s->reported = s->input_dirty = false;
         s->rx_is_touch = false;
@@ -322,10 +373,13 @@ static void cyttsp5_input_sync(DeviceState *dev)
     bool previous_pressed = s->reported;
     unsigned tail = 0;
 
-    if (s->bootloader || !s->input_dirty) {
+    if (!s->input_dirty) {
         return;
     }
     s->input_dirty = false;
+    if (s->bootloader || s->sleeping || !s->scanning) {
+        return;
+    }
     if (s->touch_count) {
         tail = (s->touch_head + s->touch_count - 1) % CYTTSP5_TOUCH_QUEUE_SIZE;
         previous_pressed = s->touches[tail].event < 3;
@@ -367,7 +421,8 @@ static void cyttsp5_deliver_touch(CYTTSP5State *s)
     CYTTSP5Touch *touch;
     bool pressed;
 
-    if (s->bootloader || s->rx_pending || !s->touch_count) {
+    if (s->bootloader || s->sleeping || !s->scanning ||
+        s->rx_pending || !s->touch_count) {
         return;
     }
     touch = &s->touches[s->touch_head];
@@ -377,14 +432,28 @@ static void cyttsp5_deliver_touch(CYTTSP5State *s)
     stw_le_p(s->rx + 3, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL));
     s->rx[5] = touch->event != CYTTSP5_TOUCH_EMPTY;
     s->rx[6] = s->sequence++;
-    s->rx[9] = touch->event;
-    s->rx[10] = pressed;
-    /* Compensate for the sensor mounting described by the board's DT. */
-    stw_le_p(s->rx + 11, s->invert_x ? s->width - touch->x : touch->x);
-    stw_le_p(s->rx + 13, s->invert_y ? s->height - touch->y : touch->y);
-    s->rx[15] = pressed ? 64 : 0;
-    s->rx[16] = s->rx[17] = 2;
-    cyttsp5_queue(s, touch->event == CYTTSP5_TOUCH_EMPTY ? 7 : 19);
+    uint16_t x = s->invert_x ? s->width - touch->x : touch->x;
+    uint16_t y = s->invert_y ? s->height - touch->y : touch->y;
+    if (s->packed_reports) {
+        /* PIP1 packed record: object, ID/event/tip, X, Y, pressure,
+         * major, minor, orientation. Header is seven bytes. */
+        s->rx[6] = (s->sequence & 3) << 6;
+        s->rx[7] = 0;
+        s->rx[8] = (touch->event << 5) | (pressed ? BIT(7) : 0);
+        stw_le_p(s->rx + 9, x);
+        stw_le_p(s->rx + 11, y);
+        s->rx[13] = pressed ? 64 : 0;
+        s->rx[14] = s->rx[15] = 2;
+        cyttsp5_queue(s, touch->event == CYTTSP5_TOUCH_EMPTY ? 7 : 17);
+    } else {
+        s->rx[9] = touch->event;
+        s->rx[10] = pressed;
+        stw_le_p(s->rx + 11, x);
+        stw_le_p(s->rx + 13, y);
+        s->rx[15] = pressed ? 64 : 0;
+        s->rx[16] = s->rx[17] = 2;
+        cyttsp5_queue(s, touch->event == CYTTSP5_TOUCH_EMPTY ? 7 : 19);
+    }
     s->rx_is_touch = true;
 }
 static const QemuInputHandler cyttsp5_input = {
@@ -393,6 +462,16 @@ static const QemuInputHandler cyttsp5_input = {
     .event = cyttsp5_input_event,
     .sync = cyttsp5_input_sync,
 };
+void cyttsp5_set_input(DeviceState *dev, int x, int y, bool down)
+{
+    CYTTSP5State *s = CYTTSP5(dev);
+    s->input_dirty |= s->input_x != x || s->input_y != y || s->pressed != down;
+    s->input_x = x;
+    s->input_y = y;
+    s->pressed = down;
+    cyttsp5_input_sync(dev);
+}
+
 static void cyttsp5_reset(DeviceState *dev)
 {
     CYTTSP5State *s = CYTTSP5(dev);
@@ -403,6 +482,8 @@ static void cyttsp5_reset(DeviceState *dev)
     memset(s->params, 0, sizeof(s->params));
     s->rx[0] = 2;
     s->bootloader = s->reset_level = true;
+    s->sleeping = false;
+    s->scanning = true;
     s->pressed = s->reported = false;
     s->rx_pending = s->rx_is_touch = false;
     s->touch_head = s->touch_count = 0;
@@ -440,8 +521,8 @@ static const VMStateDescription cyttsp5_touch_vmstate = {
 };
 static const VMStateDescription cyttsp5_vmstate = {
     .name = TYPE_CYTTSP5,
-    .version_id = 2,
-    .minimum_version_id = 2,
+    .version_id = 3,
+    .minimum_version_id = 3,
     .post_load = cyttsp5_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_I2C_SLAVE(parent_obj, CYTTSP5State),
@@ -459,6 +540,8 @@ static const VMStateDescription cyttsp5_vmstate = {
         VMSTATE_BOOL(pressed, CYTTSP5State),
         VMSTATE_BOOL(reported, CYTTSP5State),
         VMSTATE_BOOL(input_dirty, CYTTSP5State),
+        VMSTATE_BOOL(sleeping, CYTTSP5State),
+        VMSTATE_BOOL(scanning, CYTTSP5State),
         VMSTATE_BOOL(irq_level, CYTTSP5State),
         VMSTATE_BOOL(rx_pending, CYTTSP5State),
         VMSTATE_BOOL(rx_is_touch, CYTTSP5State),
@@ -492,6 +575,7 @@ static void cyttsp5_finalize(Object *obj)
     timer_free(s->ready_timer);
 }
 static const Property cyttsp5_properties[] = {
+    DEFINE_PROP_BOOL("packed-touch-reports", CYTTSP5State, packed_reports, false),
     DEFINE_PROP_UINT16("width", CYTTSP5State, width, 1440),
     DEFINE_PROP_UINT16("height", CYTTSP5State, height, 1920),
     DEFINE_PROP_BOOL("invert-x", CYTTSP5State, invert_x, false),
