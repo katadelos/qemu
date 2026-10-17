@@ -41,3 +41,8 @@ config WARIO_KEYBOARD
 
 config KOBO_NTX_BUTTONS
     bool
+
+config REMARKABLE_INPUT
+    bool
+    select WACOM_EMR
+    select CYTTSP5
