@@ -169,3 +169,7 @@ config SY7636
 config MAX77818
     bool
     select I2C
+
+config REMARKABLE3_I2C
+    bool
+    select I2C
