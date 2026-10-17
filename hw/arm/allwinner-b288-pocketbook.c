@@ -459,6 +459,21 @@ static const B288PBProfile pb1040_profile = {
     .home_mv = 700,
 };
 
+static const B288PBProfile pb970_profile = {
+    .description = "PocketBook InkPad Lite (970, Allwinner B288)",
+    .ram_id = "pb970.ram",
+    .ram_size = 512 * MiB,
+    .width = 1200, .height = 825, .rotation = 90,
+    .touch_width = 1200, .touch_height = 825,
+    .focaltech_touch = "ft5726",
+    .touch_swap_axes = true,
+    .touch_invert_y = true,
+    .pmic_wakeup = 3 * 32 + 7, .pmic_powerup = 3 * 32 + 6,
+    .pmic_powergood = 3 * 32 + 26, .pmic_irq = 3 * 32 + 25,
+    .page_next = 32 + 14, .page_previous = 32 + 11,
+    .home_mv = 500,
+};
+
 static const TypeInfo b288_pb_types[] = {
     {
         .name = TYPE_B288PB_BUTTONS,
@@ -503,6 +518,11 @@ static const TypeInfo b288_pb_types[] = {
         .parent = TYPE_B288PB_MACHINE,
         .class_init = b288_pb_class_init,
         .class_data = &pb740_2_profile,
+    }, {
+        .name = MACHINE_TYPE_NAME("allwinner-b288-pocketbook-970"),
+        .parent = TYPE_B288PB_MACHINE,
+        .class_init = b288_pb_class_init,
+        .class_data = &pb970_profile,
     }, {
         .name = MACHINE_TYPE_NAME("allwinner-b288-pocketbook-1040"),
         .parent = TYPE_B288PB_MACHINE,
