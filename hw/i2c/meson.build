@@ -66,6 +66,7 @@ i2c_ss.add(when: ['CONFIG_MT8113_BELLATRIX4'], if_true: files('fp9967.c', 'max20
 i2c_ss.add(when: 'CONFIG_MT8115_PA6_CS8', if_true: files('fp9967.c', 'max20342.c', 'sgm66075.c', 'fp9936.c', 'ti-opt-sensors.c', 'focaltech-ft3a81.c'))
 i2c_ss.add(when: 'CONFIG_MT8115_PA6_CS8', if_true: files('lsm6dso16is.c'))
 
+i2c_ss.add(when: 'CONFIG_REMARKABLE_PMIC', if_true: files('remarkable-pmic.c'))
 
 
 i2c_ss.add(when: 'CONFIG_SY7636', if_true: files('sy7636.c'))
