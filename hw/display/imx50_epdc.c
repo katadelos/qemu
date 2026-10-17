@@ -31,11 +31,16 @@ enum {
     EPDC_UPD_CORD = 0x120,
     EPDC_UPD_SIZE = 0x140,
     EPDC_UPD_CTRL = 0x160,
+    EPDC_TCE_CTRL = 0x200,
+    EPDC_TCE_POLARITY = 0x2e0,
+    EPDC_TCE_TIMING2 = 0x310,
+    EPDC_TCE_TIMING3 = 0x320,
     EPDC_IRQ_MASK = 0x400,
     EPDC_IRQ = 0x420,
     EPDC_STATUS_LUTS = 0x440,
     EPDC_STATUS_NEXTLUT = 0x460,
     EPDC_STATUS = 0x4a0,
+    EPDC_VERSION = 0x7f0,
 };
 
 #define EPDC_CTRL_SFTRST        (1U << 31)
@@ -284,16 +289,59 @@ static void imx50_epdc_wb_complete(void *opaque)
     imx50_epdc_update_irq(s);
 }
 
+static bool imx50_epdc_wb_owned(IMX50EPDCState *s)
+{
+    return (*epdc_reg(s, EPDC_IRQ_MASK) & *epdc_reg(s, EPDC_IRQ) &
+            EPDC_IRQ_WB_CMPLT) != 0;
+}
+
+static void imx50_epdc_schedule_luts(IMX50EPDCState *s)
+{
+    int64_t next = INT64_MAX;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    unsigned lut;
+
+    for (lut = 0; lut < ARRAY_SIZE(s->lut_deadline); lut++) {
+        if ((s->pending_luts & BIT(lut)) && s->lut_deadline[lut]) {
+            next = MIN(next, s->lut_deadline[lut]);
+        }
+    }
+    if (next == INT64_MAX || (next <= now && imx50_epdc_wb_owned(s))) {
+        timer_del(s->lut_timer);
+    } else {
+        /* Keep LUT completion a separate ownership transition after WB ACK. */
+        timer_mod(s->lut_timer, MAX(next, now + 1));
+    }
+}
+
 static void imx50_epdc_lut_complete(void *opaque)
 {
     IMX50EPDCState *s = opaque;
-    uint32_t completed = s->pending_luts;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    uint32_t completed = 0;
+    unsigned lut;
 
-    s->pending_luts = 0;
+    /* Waveform timing is collapsed, but an enabled WB interrupt hands its
+     * result to software before the final LUT ownership transition. Without
+     * this boundary a delayed IRQ can combine both phases and strand the
+     * Netronix driver's final idle check. Polling bootloaders mask WB IRQs
+     * and do not participate in that acknowledgment path. */
+    if (!imx50_epdc_wb_owned(s)) {
+        for (lut = 0; lut < ARRAY_SIZE(s->lut_deadline); lut++) {
+            if ((s->pending_luts & BIT(lut)) && s->lut_deadline[lut] &&
+                s->lut_deadline[lut] <= now) {
+                completed |= BIT(lut);
+                s->lut_deadline[lut] = 0;
+            }
+        }
+    }
+
+    s->pending_luts &= ~completed;
     *epdc_reg(s, EPDC_STATUS_LUTS) &= ~completed;
     *epdc_reg(s, EPDC_IRQ) |= completed;
     trace_whitney_epdc_lut_complete(completed, *epdc_reg(s, EPDC_IRQ));
     imx50_epdc_update_irq(s);
+    imx50_epdc_schedule_luts(s);
 }
 
 static uint64_t imx50_epdc_read(void *opaque, hwaddr offset, unsigned size)
@@ -327,6 +375,25 @@ static bool imx50_epdc_is_atomic(hwaddr base)
     }
 }
 
+static void imx50_epdc_reset_registers(IMX50EPDCState *s)
+{
+    timer_del(s->wb_timer);
+    timer_del(s->lut_timer);
+    memset(s->regs, 0, sizeof(s->regs));
+    /* i.MX50 RM, section 24.4: SFTRST restores the block's reset state. */
+    *epdc_reg(s, EPDC_CTRL) = EPDC_CTRL_SFTRST | EPDC_CTRL_CLKGATE;
+    *epdc_reg(s, EPDC_FIFOCTRL) = 0x00800000;
+    *epdc_reg(s, EPDC_TCE_CTRL) = 0x10;
+    *epdc_reg(s, EPDC_TCE_POLARITY) = 0x1e;
+    *epdc_reg(s, EPDC_TCE_TIMING2) = 1;
+    *epdc_reg(s, EPDC_TCE_TIMING3) = 1;
+    *epdc_reg(s, EPDC_STATUS_NEXTLUT) = 0x10f;
+    *epdc_reg(s, EPDC_VERSION) = 0x01000000;
+    s->pending_luts = 0;
+    memset(s->lut_deadline, 0, sizeof(s->lut_deadline));
+    imx50_epdc_update_irq(s);
+}
+
 static void imx50_epdc_write(void *opaque, hwaddr offset, uint64_t value,
                              unsigned size)
 {
@@ -335,6 +402,10 @@ static void imx50_epdc_write(void *opaque, hwaddr offset, uint64_t value,
     unsigned alias = offset & 0xc;
     uint32_t *reg;
 
+    if (base != EPDC_CTRL &&
+        (*epdc_reg(s, EPDC_CTRL) & EPDC_CTRL_SFTRST)) {
+        return;
+    }
     if (alias && imx50_epdc_is_atomic(base)) {
         reg = epdc_reg(s, base);
         if (alias == 4) {
@@ -349,7 +420,9 @@ static void imx50_epdc_write(void *opaque, hwaddr offset, uint64_t value,
     }
 
     if (base == EPDC_CTRL && (*epdc_reg(s, EPDC_CTRL) & EPDC_CTRL_SFTRST)) {
-        *epdc_reg(s, EPDC_CTRL) |= EPDC_CTRL_CLKGATE;
+        /* Controller reset leaves the physical panel's painted image intact. */
+        imx50_epdc_reset_registers(s);
+        return;
     }
 
     if (offset == EPDC_UPD_CTRL) {
@@ -372,13 +445,6 @@ static void imx50_epdc_write(void *opaque, hwaddr offset, uint64_t value,
         trace_whitney_epdc_submit(lut,
                                   *epdc_reg(s, EPDC_STATUS_LUTS));
 
-        /*
-         * The i.MX50 presents working-buffer and LUT completion as distinct
-         * ownership transitions.  Leave enough virtual time between them
-         * for the guest to service WB_CMPLT before the LUT interrupt arrives;
-         * otherwise both status bits are observed in one IRQ and Kobo's
-         * 2.6.35 queue never reaches its final idle/powerdown check.
-         */
         if (value & EPDC_UPD_CTRL_AUTOWV_PAUSE) {
             /*
              * Lab126 pauses AUTO waveform updates after histogram/working-
@@ -386,19 +452,21 @@ static void imx50_epdc_write(void *opaque, hwaddr offset, uint64_t value,
              * waveform and VCOM, then rewrites UPD_CTRL with PAUSE clear.
              */
             *epdc_reg(s, EPDC_IRQ) |= EPDC_IRQ_UPD_DONE;
+            s->lut_deadline[lut] = 0;
             imx50_epdc_update_irq(s);
         } else {
+            s->lut_deadline[lut] =
+                qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + EPDC_LUT_COMPLETE_NS;
             timer_mod(s->wb_timer,
                       qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
                       EPDC_WB_COMPLETE_NS);
-            timer_mod(s->lut_timer,
-                      qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-                      EPDC_LUT_COMPLETE_NS);
         }
+        imx50_epdc_schedule_luts(s);
     }
 
     if (base == EPDC_IRQ_MASK || base == EPDC_IRQ) {
         imx50_epdc_update_irq(s);
+        imx50_epdc_schedule_luts(s);
     }
 }
 
@@ -417,12 +485,7 @@ static void imx50_epdc_reset(DeviceState *dev)
 {
     IMX50EPDCState *s = IMX50_EPDC(dev);
 
-    timer_del(s->wb_timer);
-    timer_del(s->lut_timer);
-    memset(s->regs, 0, sizeof(s->regs));
-    *epdc_reg(s, EPDC_CTRL) = EPDC_CTRL_CLKGATE;
-    s->pending_luts = 0;
-    qemu_set_irq(s->irq, 0);
+    imx50_epdc_reset_registers(s);
     if (s->direct_fb && s->scanout_timer) {
         timer_mod(s->scanout_timer,
                   qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
@@ -430,14 +493,27 @@ static void imx50_epdc_reset(DeviceState *dev)
     }
 }
 
+static int imx50_epdc_post_load(void *opaque, int version_id)
+{
+    IMX50EPDCState *s = opaque;
+
+    imx50_epdc_update_irq(s);
+    imx50_epdc_schedule_luts(s);
+    return 0;
+}
+
 static const VMStateDescription vmstate_imx50_epdc = {
     .name = TYPE_IMX50_EPDC,
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = imx50_epdc_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IMX50EPDCState,
                              IMX50_EPDC_MMIO_SIZE / sizeof(uint32_t)),
         VMSTATE_UINT32(pending_luts, IMX50EPDCState),
+        VMSTATE_INT64_ARRAY(lut_deadline, IMX50EPDCState, 16),
+        VMSTATE_TIMER_PTR(wb_timer, IMX50EPDCState),
+        VMSTATE_TIMER_PTR(lut_timer, IMX50EPDCState),
         VMSTATE_END_OF_LIST()
     },
 };

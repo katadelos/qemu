@@ -27,6 +27,7 @@ struct IMX50EPDCState {
     QemuConsole *console;
     uint32_t regs[IMX50_EPDC_MMIO_SIZE / sizeof(uint32_t)];
     uint32_t pending_luts;
+    int64_t lut_deadline[16];
     uint64_t direct_fb_addr;
     uint32_t direct_fb_stride;
     uint32_t direct_fb_width;
