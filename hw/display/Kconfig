@@ -152,3 +152,6 @@ config MAC_PVG_PCI
 
 config IMX_EPDC
     bool
+
+config IMX_LCDIF
+    bool
