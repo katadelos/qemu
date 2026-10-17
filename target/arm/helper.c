@@ -150,6 +150,18 @@ static bool raw_accessors_invalid(const ARMCPRegInfo *ri)
     return true;
 }
 
+static uint32_t cpreg_list_key(uint64_t regid)
+{
+    uint32_t key = kvm_to_cpreg_id(regid);
+
+    /* KVM IDs imply Non-secure state; TCG lists encode both banks. */
+    if (tcg_enabled() && !(key & CP_REG_AA64_MASK)) {
+        key = (key & ~CP_REG_AA32_NS_MASK) |
+              (regid & CP_REG_AA32_NS_MASK);
+    }
+    return key;
+}
+
 bool write_cpustate_to_list(ARMCPU *cpu, bool kvm_sync)
 {
     /* Write the coprocessor state from cpu->env to the (index,value) list. */
@@ -157,7 +169,7 @@ bool write_cpustate_to_list(ARMCPU *cpu, bool kvm_sync)
     bool ok = true;
 
     for (i = 0; i < cpu->cpreg_array_len; i++) {
-        uint32_t regidx = kvm_to_cpreg_id(cpu->cpreg_indexes[i]);
+        uint32_t regidx = cpreg_list_key(cpu->cpreg_indexes[i]);
         const ARMCPRegInfo *ri;
         uint64_t newval;
 
@@ -202,7 +214,7 @@ bool write_list_to_cpustate(ARMCPU *cpu)
     bool ok = true;
 
     for (i = 0; i < cpu->cpreg_array_len; i++) {
-        uint32_t regidx = kvm_to_cpreg_id(cpu->cpreg_indexes[i]);
+        uint32_t regidx = cpreg_list_key(cpu->cpreg_indexes[i]);
         uint64_t v = cpu->cpreg_values[i];
         const ARMCPRegInfo *ri;
 
