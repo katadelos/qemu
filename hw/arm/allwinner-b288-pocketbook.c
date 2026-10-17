@@ -349,6 +349,19 @@ static const B288PBProfile pb628_profile = {
     .page_next = 32 + 11, .page_previous = 32 + 14,
 };
 
+static const B288PBProfile pb632_profile = {
+    .description = "PocketBook Touch HD 3 (632, Allwinner B288)",
+    .ram_id = "pb632.ram",
+    .ram_size = 512 * MiB,
+    .width = 1448, .height = 1072, .rotation = 90,
+    .touch_width = 1448, .touch_height = 1072,
+    .pmic_wakeup = 3 * 32 + 7, .pmic_powerup = 3 * 32 + 6,
+    .pmic_powergood = 3 * 32 + 26, .pmic_irq = 3 * 32 + 25,
+    .page_next = 32 + 14, .page_previous = 32 + 11,
+    .touch_swap_axes = true,
+    .touch_invert_y = true,
+};
+
 static const TypeInfo b288_pb_types[] = {
     {
         .name = TYPE_B288PB_BUTTONS,
@@ -368,6 +381,11 @@ static const TypeInfo b288_pb_types[] = {
         .parent = TYPE_B288PB_MACHINE,
         .class_init = b288_pb_class_init,
         .class_data = &pb628_profile,
+    }, {
+        .name = MACHINE_TYPE_NAME("allwinner-b288-pocketbook-632"),
+        .parent = TYPE_B288PB_MACHINE,
+        .class_init = b288_pb_class_init,
+        .class_data = &pb632_profile,
     },
 };
 
