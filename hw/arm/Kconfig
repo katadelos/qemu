@@ -920,6 +920,15 @@ config FSL_IMX8MM
     select UNIMP
     select WDT_IMX2
 
+config IMX8MM_REMARKABLE_PAPER_PRO
+    bool
+    default y if AARCH64 && TCG
+    depends on GNUTLS
+    select FSL_IMX8MM
+    select REMARKABLE3_I2C
+    select AW99703
+    select SD
+
 config FSL_IMX8MP_EVK
     bool
     default y
