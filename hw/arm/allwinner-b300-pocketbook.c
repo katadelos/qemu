@@ -451,6 +451,16 @@ static const B300PBProfile pb743k3_profile = {
     .page_next = 11 * 32 + 12, .page_previous = 11 * 32 + 11,
 };
 
+static const B300PBProfile pb700k3_profile = {
+    .description = "PocketBook Era Color (700K3, Allwinner B300)",
+    .ram_id = "pb700k3.ram",
+    .width = 1264, .height = 1680, .rotation = 0,
+    .touch_type = "ft3518",
+    .touch_width = 1680, .touch_height = 1264,
+    .touch_swap_axes = true,
+    .page_next = 11 * 32 + 11, .page_previous = 11 * 32 + 12,
+};
+
 static const TypeInfo b300_pb_types[] = {
     {
         .name = TYPE_B300PB_BUTTONS,
@@ -470,6 +480,11 @@ static const TypeInfo b300_pb_types[] = {
         .parent = TYPE_B300PB_MACHINE,
         .class_init = b300_pb_class_init,
         .class_data = &pb743k3_profile,
+    }, {
+        .name = MACHINE_TYPE_NAME("allwinner-b300-pocketbook-700k3"),
+        .parent = TYPE_B300PB_MACHINE,
+        .class_init = b300_pb_class_init,
+        .class_data = &pb700k3_profile,
     },
 };
 DEFINE_TYPES(b300_pb_types)
