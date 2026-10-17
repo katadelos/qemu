@@ -1,5 +1,6 @@
 /* Freescale i.MX50 Clock Control Module and DPLLs */
 #include "qemu/osdep.h"
+#include "hw/core/irq.h"
 #include "hw/misc/imx50_ccm.h"
 #include "migration/vmstate.h"
 #include "qemu/module.h"
@@ -11,6 +12,9 @@
 #define CCM_CS1CDR 0x28
 #define CCM_CS2CDR 0x2c
 #define CCM_CSCDR2 0x38
+#define CCM_CLPCR  0x54
+#define CCM_CLPCR_LPM_MASK 3
+#define CCM_CLPCR_LPM_STOP 2
 
 #define PLL_DP_CTL      0x00
 #define PLL_DP_CTL_LRF  (1U << 0)
@@ -24,6 +28,8 @@ static void imx50_ccm_reset(DeviceState *dev)
     memset(s->ccm, 0, sizeof(s->ccm));
     memset(s->pll, 0, sizeof(s->pll));
     s->stop_wake_asserted = false;
+    s->stop_mode = false;
+    qemu_set_irq(s->stop, 0);
 
     /*
      * SSI_EXT1 and SSI_EXT2 use their respective common SSI clocks after
@@ -54,6 +60,11 @@ static void imx50_ccm_write(void *opaque, hwaddr offset, uint64_t value,
     IMX50CCMState *s = opaque;
 
     s->ccm[offset / 4] = value;
+    if (offset == CCM_CLPCR) {
+        s->stop_mode = (value & CCM_CLPCR_LPM_MASK) == CCM_CLPCR_LPM_STOP &&
+                       !s->stop_wake_asserted;
+        qemu_set_irq(s->stop, s->stop_mode);
+    }
 }
 
 static uint64_t imx50_pll_read(void *opaque, hwaddr offset, unsigned size)
@@ -102,6 +113,10 @@ static void imx50_ccm_stop_wake(void *opaque, int line, int level)
     if (level && !s->stop_wake_asserted &&
         (s->pll[0][PLL_DP_CTL / 4] & PLL_DP_CTL_UPEN)) {
         s->pll[0][PLL_DP_CTL / 4] |= PLL_DP_CTL_LRF;
+    }
+    if (level) {
+        s->stop_mode = false;
+        qemu_set_irq(s->stop, 0);
     }
     s->stop_wake_asserted = level;
 }
@@ -220,16 +235,27 @@ static void imx50_ccm_init(Object *obj)
     }
     qdev_init_gpio_in_named(DEVICE(obj), imx50_ccm_stop_wake,
                             "stop-wake", 1);
+    qdev_init_gpio_out_named(DEVICE(obj), &s->stop, "stop", 1);
+}
+
+static int imx50_ccm_post_load(void *opaque, int version_id)
+{
+    IMX50CCMState *s = opaque;
+
+    qemu_set_irq(s->stop, s->stop_mode);
+    return 0;
 }
 
 static const VMStateDescription vmstate_imx50_ccm = {
     .name = TYPE_IMX50_CCM,
-    .version_id = 2,
-    .minimum_version_id = 2,
+    .version_id = 3,
+    .minimum_version_id = 3,
+    .post_load = imx50_ccm_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(ccm, IMX50CCMState, 0x1000 / 4),
         VMSTATE_UINT32_2DARRAY(pll, IMX50CCMState, 3, 0x100 / 4),
         VMSTATE_BOOL(stop_wake_asserted, IMX50CCMState),
+        VMSTATE_BOOL(stop_mode, IMX50CCMState),
         VMSTATE_END_OF_LIST()
     },
 };

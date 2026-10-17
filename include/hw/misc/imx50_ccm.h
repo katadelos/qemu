@@ -20,5 +20,7 @@ struct IMX50CCMState {
     uint32_t ccm[0x1000 / 4];
     uint32_t pll[3][0x100 / 4];
     bool stop_wake_asserted;
+    bool stop_mode;
+    qemu_irq stop;
 };
 #endif

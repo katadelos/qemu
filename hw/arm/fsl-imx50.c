@@ -711,6 +711,8 @@ static void fsl_imx50_realize(DeviceState *dev, Error **errp)
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->wdt), errp)) {
         return;
     }
+    qdev_connect_gpio_out_named(DEVICE(&s->ccm), "stop", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->wdt), "stop", 0));
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->wdt), 0, 0x53f98000);
     memory_region_init_ram(&s->iram, OBJECT(dev), "imx50.iram",
                            FSL_IMX50_IRAM_SIZE, errp);
