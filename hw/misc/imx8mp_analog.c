@@ -12,6 +12,7 @@
 #include "qemu/log.h"
 
 #include "hw/misc/imx8mp_analog.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 
 #define ANALOG_PLL_LOCK BIT(31)
@@ -68,7 +69,7 @@ static void imx8mp_analog_reset(DeviceState *dev)
     s->analog[ANALOG_SYS_PLL3_MNIT_CTRL] = 0x00280081;
     s->analog[ANALOG_OSC_MISC_CFG] = 0x00000000;
     s->analog[ANALOG_ANAMIX_PLL_MNIT_CTL] = 0x00000000;
-    s->analog[ANALOG_DIGPROG] = 0x00824010;
+    s->analog[ANALOG_DIGPROG] = s->digprog;
 
     /* all PLLs need to be locked */
     s->analog[ANALOG_AUDIO_PLL1_GEN_CTRL] |= ANALOG_PLL_LOCK;
@@ -81,6 +82,10 @@ static void imx8mp_analog_reset(DeviceState *dev)
     s->analog[ANALOG_SYS_PLL1_GEN_CTRL] |= ANALOG_PLL_LOCK;
     s->analog[ANALOG_SYS_PLL2_GEN_CTRL] |= ANALOG_PLL_LOCK;
     s->analog[ANALOG_SYS_PLL3_GEN_CTRL] |= ANALOG_PLL_LOCK;
+    if (s->rom_boot_clocks) {
+        s->analog[ANALOG_SYS_PLL1_GEN_CTRL] |= BIT(9);
+        s->analog[ANALOG_SYS_PLL2_GEN_CTRL] |= BIT(9);
+    }
 }
 
 static uint64_t imx8mp_analog_read(void *opaque, hwaddr offset, unsigned size)
@@ -99,6 +104,8 @@ static void imx8mp_analog_write(void *opaque, hwaddr offset,
         qemu_log_mask(LOG_GUEST_ERROR,
                       "Guest write to read-only ANALOG_DIGPROG register\n");
     } else {
+        /* LOCK is read-only; reprogramming a PLL does not write its status. */
+        value |= s->analog[offset >> 2] & ANALOG_PLL_LOCK;
         s->analog[offset >> 2] = value;
     }
 }
@@ -145,6 +152,11 @@ static void imx8mp_analog_class_init(ObjectClass *klass, const void *data)
     device_class_set_legacy_reset(dc, imx8mp_analog_reset);
     dc->vmsd  = &imx8mp_analog_vmstate;
     dc->desc  = "i.MX 8M Plus Analog Module";
+    static const Property properties[] = {
+        DEFINE_PROP_UINT32("digprog", IMX8MPAnalogState, digprog, 0x00824010),
+        DEFINE_PROP_BOOL("rom-boot-clocks", IMX8MPAnalogState, rom_boot_clocks, false),
+    };
+    device_class_set_props(dc, properties);
 }
 
 static const TypeInfo imx8mp_analog_types[] = {

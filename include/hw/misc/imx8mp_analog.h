@@ -76,6 +76,8 @@ struct IMX8MPAnalogState {
     } mmio;
 
     uint32_t analog[ANALOG_MAX];
+    uint32_t digprog;
+    bool rom_boot_clocks;
 };
 
 #endif /* IMX8MP_ANALOG_H */
