@@ -16,6 +16,7 @@
  */
 #include "qemu/osdep.h"
 #include "hw/display/mt8171-hwtcon.h"
+#include "hw/display/mt8171-panel.h"
 #include "hw/core/irq.h"
 #include "qemu/bitops.h"
 #include "qemu/log.h"
@@ -702,6 +703,10 @@ static void write_reg(void *opaque, hwaddr offset, uint64_t value, unsigned size
             break;
         case 0xd028:
             if ((value & 1) && !(old & 1)) {
+                /* pipeline_config_trigger() programs geometry and pitch before
+                 * this edge. The first MDP frame can precede those registers;
+                 * let the observer consume it before the next frame's tiles. */
+                mt8171_panel_pipeline_trigger(s->panel);
                 s->pipeline_triggers++;
                 if (clear_working_buffer(s) || numerical_regal(s) ||
                     update_working_buffer(s, value)) { break; }

@@ -6,6 +6,7 @@
 #include "hw/misc/mt8171-m4u.h"
 #define TYPE_MT8171_HWTCON "mt8171-hwtcon"
 OBJECT_DECLARE_SIMPLE_TYPE(MT8171HWTCONState, MT8171_HWTCON)
+typedef struct MT8171PanelState MT8171PanelState;
 typedef struct MT8171HWTCONBank {
     MemoryRegion iomem;
     MT8171HWTCONState *owner;
@@ -20,6 +21,7 @@ struct MT8171HWTCONState {
     SysBusDevice parent_obj;
     MT8171HWTCONBank bank[2];
     MT8171M4UState *m4u;
+    MT8171PanelState *panel;
     uint32_t *larb3_regs;
     uint32_t *larb8_regs;
     /* Same order as the signed DT's nine interrupts. */

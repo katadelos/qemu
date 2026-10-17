@@ -28,6 +28,10 @@ struct MT8171PanelState {
     QTAILQ_HEAD(, MT8171PanelTile) pending;
 };
 
+/* Retry queued observations at the controller's pipeline trigger, after the
+ * guest has supplied its image geometry and before another MDP frame arrives. */
+void mt8171_panel_pipeline_trigger(MT8171PanelState *s);
+
 /* Observe bytes already fetched by a genuine MDP DMA transaction. The source
  * format/swap is the programmed RDMA encoding. Destination metadata is the
  * WROT output address after normalizing its rotation offset to the tile origin.

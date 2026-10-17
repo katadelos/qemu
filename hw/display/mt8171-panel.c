@@ -175,6 +175,13 @@ static void panel_present_pending(MT8171PanelState *s)
     }
 }
 
+void mt8171_panel_pipeline_trigger(MT8171PanelState *s)
+{
+    if (s) {
+        panel_present_pending(s);
+    }
+}
+
 static uint32_t panel_unpack(const uint8_t *p, unsigned format, bool swap)
 {
     uint8_t red, green, blue;

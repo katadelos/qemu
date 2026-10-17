@@ -2885,6 +2885,7 @@ static void pa6_init(MachineState *machine)
     qdev_prop_set_uint32(DEVICE(&s->panel), "height", s->board->panel_height);
     sysbus_realize(SYS_BUS_DEVICE(&s->panel), &error_fatal);
     s->mdp.panel = &s->panel;
+    s->hwtcon.panel = &s->panel;
 
     object_initialize_child(OBJECT(s), "msdc0", &s->msdc, TYPE_MTK_MSDC);
     sysbus_realize(SYS_BUS_DEVICE(&s->msdc), &error_fatal);
