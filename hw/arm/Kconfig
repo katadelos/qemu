@@ -375,6 +375,23 @@ config IMX50_YOSHI
     select NEONODE_ZFORCE
     select SD
 
+config IMX50_POCKETBOOK
+    bool
+    default y
+    depends on TCG && ARM
+    select FSL_IMX50
+    select FP9928
+    select ELAN_KTF2K
+    select GOODIX_GT813
+    select CY8C_SLIDER
+    select TMP105
+    select SPLIT_IRQ
+    select SD
+    select BCM4343W_SDIO
+    select IMX_KEYPAD
+    select KOBO_MSP430
+    select MMA7660
+
 config IMX50_KOBOTOUCH
     bool
     default y
