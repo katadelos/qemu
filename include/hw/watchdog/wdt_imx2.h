@@ -86,6 +86,7 @@ struct IMX2WdtState {
     bool wcr_locked;            /* affects WDZST, WDBG, and WDW */
     bool wcr_wde_locked;        /* affects WDE */
     bool wcr_wdt_locked;        /* affects WDT (never cleared) */
+    bool stop_mode;
 };
 
 #endif /* WDT_IMX2_H */

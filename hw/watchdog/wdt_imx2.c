@@ -61,6 +61,7 @@ static void imx2_wdt_reset(DeviceState *dev)
     s->wcr_locked = false;
     s->wcr_wde_locked = false;
     s->wcr_wdt_locked = false;
+    s->stop_mode = false;
 
     s->wcr = IMX2_WDT_WCR_WDA | IMX2_WDT_WCR_SRS;
     s->wsr = 0;
@@ -117,7 +118,8 @@ static void imx_wdt2_update_itimer(IMX2WdtState *s, bool start)
          */
         if (count > pretimeout) {
             ptimer_set_count(s->itimer, count - pretimeout);
-            if (start) {
+            if (start && !(s->stop_mode &&
+                           (s->wcr & IMX2_WDT_WCR_WDZST))) {
                 ptimer_run(s->itimer, 1);
             }
         }
@@ -136,13 +138,49 @@ static void imx_wdt2_update_timer(IMX2WdtState *s, bool start)
 
         /* A value of 0 reflects one period (0.5s). */
         ptimer_set_count(s->timer, count + 1);
-        if (start) {
+        if (start && !(s->stop_mode &&
+                       (s->wcr & IMX2_WDT_WCR_WDZST))) {
             ptimer_run(s->timer, 1);
         }
     }
     ptimer_transaction_commit(s->timer);
     if (s->pretimeout_support) {
         imx_wdt2_update_itimer(s, start);
+    }
+}
+
+static void imx2_wdt_stop(void *opaque, int line, int level)
+{
+    IMX2WdtState *s = opaque;
+    bool was_stopped = s->stop_mode && (s->wcr & IMX2_WDT_WCR_WDZST);
+    bool stopped;
+
+    s->stop_mode = !!level;
+    stopped = s->stop_mode && (s->wcr & IMX2_WDT_WCR_WDZST);
+    if (stopped == was_stopped) {
+        return;
+    }
+
+    /* WDZST gates the counters in STOP without reloading either count. */
+    ptimer_transaction_begin(s->timer);
+    if (stopped) {
+        ptimer_stop(s->timer);
+    } else if ((s->wcr & IMX2_WDT_WCR_WDE) &&
+               ptimer_get_count(s->timer)) {
+        ptimer_run(s->timer, 1);
+    }
+    ptimer_transaction_commit(s->timer);
+
+    if (s->pretimeout_support) {
+        ptimer_transaction_begin(s->itimer);
+        if (stopped) {
+            ptimer_stop(s->itimer);
+        } else if ((s->wcr & IMX2_WDT_WCR_WDE) &&
+                   (s->wicr & IMX2_WDT_WICR_WIE) &&
+                   ptimer_get_count(s->itimer)) {
+            ptimer_run(s->itimer, 1);
+        }
+        ptimer_transaction_commit(s->itimer);
     }
 }
 
@@ -252,6 +290,7 @@ static const VMStateDescription vmstate_imx2_wdt = {
         VMSTATE_BOOL(wcr_locked, IMX2WdtState),
         VMSTATE_BOOL(wcr_wde_locked, IMX2WdtState),
         VMSTATE_BOOL(wcr_wdt_locked, IMX2WdtState),
+        VMSTATE_BOOL(stop_mode, IMX2WdtState),
         VMSTATE_UINT16(wcr, IMX2WdtState),
         VMSTATE_UINT16(wsr, IMX2WdtState),
         VMSTATE_UINT16(wrsr, IMX2WdtState),
@@ -265,6 +304,8 @@ static void imx2_wdt_realize(DeviceState *dev, Error **errp)
 {
     IMX2WdtState *s = IMX2_WDT(dev);
     SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
+
+    qdev_init_gpio_in_named(dev, imx2_wdt_stop, "stop", 1);
 
     memory_region_init_io(&s->mmio, OBJECT(dev),
                           &imx2_wdt_ops, s,
