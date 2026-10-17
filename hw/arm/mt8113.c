@@ -2227,7 +2227,11 @@ enum {
     USB_NET_FAILED,
 };
 
+#define MT8113_USB_IP_PW_CTRL0       0x00
 #define MT8113_USB_IP_PW_CTRL2       0x08
+#define MT8113_USB_DEV_RST_CTRL      0x98
+#define MT8113_USB_IP_SW_RST         BIT(0)
+#define MT8113_USB_DEV_SW_RST        BIT(0)
 #define MT8113_USB_IP_PW_STS1        0x10
 #define MT8113_USB_IP_PW_STS2        0x14
 #define MT8113_USB_IP_XHCI_CAP       0x24
@@ -2523,6 +2527,16 @@ static void mt8113_usb_disconnect(MT8113USBState *usb)
         timer_del(usb->tx_timer);
         qemu_purge_queued_packets(qemu_get_queue(usb->nic));
     }
+}
+
+static void mt8113_usb_mac_reset(MT8113USBState *usb)
+{
+    mt8113_usb_disconnect(usb);
+    memset(usb->mac_regs, 0, sizeof(usb->mac_regs));
+    usb->ep0_fifo_length = 0;
+    usb->ep0_fifo_offset = 0;
+    usb->processing_tx = false;
+    qemu_set_irq(usb->irq, 0);
 }
 
 static void mt8113_usb_link_changed(NetClientState *nc)
@@ -3013,6 +3027,17 @@ static void mt8113_usb_ippc_write(void *opaque, hwaddr offset,
 {
     MT8113USBState *usb = opaque;
 
+    /*
+     * The guest resets the MAC during probe, including after kexec. Clear
+     * pullup, endpoint queues and host enumeration state with the hardware
+     * reset so the next gadget starts a fresh USB connection.
+     */
+    if ((offset == MT8113_USB_IP_PW_CTRL0 &&
+         (value & MT8113_USB_IP_SW_RST)) ||
+        (offset == MT8113_USB_DEV_RST_CTRL &&
+         (value & MT8113_USB_DEV_SW_RST))) {
+        mt8113_usb_mac_reset(usb);
+    }
     usb->ippc_regs[offset / sizeof(uint32_t)] = value;
 }
 
@@ -3287,16 +3312,8 @@ static const MemoryRegionOps mt8113_toprgu_ops = {
 
 static void mt8113_usb_reset(MT8113USBState *usb)
 {
-    mt8113_usb_disconnect(usb);
-    memset(usb->mac_regs, 0, sizeof(usb->mac_regs));
+    mt8113_usb_mac_reset(usb);
     memset(usb->ippc_regs, 0, sizeof(usb->ippc_regs));
-    usb->ep0_fifo_length = 0;
-    usb->ep0_fifo_offset = 0;
-    usb->config_phase = 0;
-    usb->setup_pending = false;
-    usb->configured = false;
-    usb->processing_tx = false;
-    qemu_set_irq(usb->irq, 0);
     qemu_set_irq(usb->vbus, usb->nic &&
                  !qemu_get_queue(usb->nic)->link_down);
 }
