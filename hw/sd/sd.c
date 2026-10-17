@@ -4880,12 +4880,81 @@ static const Property ar6003_sdio_properties[] = {
     DEFINE_NIC_PROPERTIES(SDState, sdio_nic_conf),
 };
 
+static int ar6003_post_load(void *opaque, int version_id)
+{
+    SDState *sd = opaque;
+
+    if (sd->sdio_htc_rx_head >= ARRAY_SIZE(sd->sdio_htc_rx) ||
+        sd->sdio_htc_rx_count > ARRAY_SIZE(sd->sdio_htc_rx) ||
+        sd->sdio_htc_rx_pos > sizeof(sd->sdio_htc_rx[0]) ||
+        sd->sdio_rx_len > sizeof(sd->sdio_rx) ||
+        sd->sdio_rx_pos > sd->sdio_rx_len ||
+        sd->sdio_xfer_pos > sd->sdio_xfer_len) {
+        return -EINVAL;
+    }
+    for (size_t i = 0; i < ARRAY_SIZE(sd->sdio_htc_rx_len); i++) {
+        if (sd->sdio_htc_rx_len[i] > sizeof(sd->sdio_htc_rx[0])) {
+            return -EINVAL;
+        }
+    }
+    ar6003_update_irq(sd);
+    return 0;
+}
+
+static const VMStateDescription ar6003_vmstate = {
+    .name = TYPE_AR6003_SDIO,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = ar6003_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT16(rca, SDState),
+        VMSTATE_UINT8(dat_lines, SDState),
+        VMSTATE_BOOL(cmd_line, SDState),
+        VMSTATE_BOOL(sdio_powered, SDState),
+        VMSTATE_BOOL(sdio_selected, SDState),
+        VMSTATE_UINT8(sdio_io_enable, SDState),
+        VMSTATE_UINT8(sdio_int_enable, SDState),
+        VMSTATE_UINT8(sdio_bus_if, SDState),
+        VMSTATE_UINT8(sdio_irq_mode, SDState),
+        VMSTATE_UINT8(sdio_speed, SDState),
+        VMSTATE_UINT16(sdio_block_size, SDState),
+        VMSTATE_UINT8(sdio_xfer_func, SDState),
+        VMSTATE_BOOL(sdio_xfer_write, SDState),
+        VMSTATE_BOOL(sdio_xfer_increment, SDState),
+        VMSTATE_UINT32(sdio_xfer_addr, SDState),
+        VMSTATE_UINT32(sdio_xfer_len, SDState),
+        VMSTATE_UINT32(sdio_xfer_pos, SDState),
+        VMSTATE_BUFFER(sdio_tx, SDState),
+        VMSTATE_UINT8_2DARRAY(sdio_htc_rx, SDState, 32, 4 * KiB),
+        VMSTATE_UINT16_ARRAY(sdio_htc_rx_len, SDState, 32),
+        VMSTATE_UINT16(sdio_htc_rx_pos, SDState),
+        VMSTATE_UINT8(sdio_htc_rx_head, SDState),
+        VMSTATE_UINT8(sdio_htc_rx_count, SDState),
+        VMSTATE_BOOL(sdio_htc_xfer_exhausted, SDState),
+        VMSTATE_BUFFER(sdio_rx, SDState),
+        VMSTATE_UINT32(sdio_rx_len, SDState),
+        VMSTATE_UINT32(sdio_rx_pos, SDState),
+        VMSTATE_BUFFER(sdio_target_mem, SDState),
+        VMSTATE_UINT32(sdio_lz_addr, SDState),
+        VMSTATE_BOOL(sdio_bmi_done, SDState),
+        VMSTATE_BOOL(sdio_associated, SDState),
+        VMSTATE_TIMER_PTR(sdio_scan_timer, SDState),
+        VMSTATE_TIMER_PTR(sdio_connect_timer, SDState),
+        VMSTATE_TIMER_PTR(sdio_credit_timer, SDState),
+        VMSTATE_UINT8(sdio_scan_credit_ep, SDState),
+        VMSTATE_UINT8(sdio_scan_credits, SDState),
+        VMSTATE_UINT16_ARRAY(sdio_pending_credits, SDState, 8),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static void ar6003_sdio_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     SDCardClass *sc = SDMMC_COMMON_CLASS(klass);
 
     dc->desc = "Atheros AR6003 SDIO Wi-Fi transport";
+    dc->vmsd = &ar6003_vmstate;
     dc->realize = ar6003_sdio_realize;
     device_class_set_legacy_reset(dc, ar6003_sdio_reset);
     device_class_set_props(dc, ar6003_sdio_properties);
