@@ -310,6 +310,20 @@ config IMX6SL_KOBO_GLO_HD
     select KOBO_NTX_PMIC
     select KOBO_NTX_BUTTONS
 
+config IMX6SL_REMARKABLE1
+    bool
+    default y
+    depends on TCG && ARM
+    select REMARKABLE_INPUT
+    select FSL_IMX6
+    select IMX6SL_MMDC
+    select IMX6SL_IOMUXC
+    select IMX6SLL_OCOTP
+    select CYTTSP5
+    select WACOM_EMR
+    select REMARKABLE_PMIC
+    select SD
+
 config IMX6SL_POCKETBOOK_650
     bool
     default y
