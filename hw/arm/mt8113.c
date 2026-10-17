@@ -2353,19 +2353,144 @@ static void mt8113_usb_complete_gpd(MT8113USBState *usb, unsigned ep,
     }
 }
 
+static gboolean mt8113_usb_adb_writable(void *unused, GIOCondition condition,
+                                         void *opaque)
+{
+    MT8113USBState *usb = opaque;
+
+    usb->adb_watch = 0;
+    timer_mod(usb->tx_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL));
+    return G_SOURCE_REMOVE;
+}
+
+static bool mt8113_usb_adb_send(MT8113USBState *usb, hwaddr address,
+                                 const uint8_t *data, unsigned length)
+{
+    int written;
+
+    if (!qemu_chr_fe_backend_open(&usb->adb_chr)) {
+        return false;
+    }
+    if (usb->adb_tx_gpd != address || usb->adb_tx_offset > length) {
+        usb->adb_tx_gpd = address;
+        usb->adb_tx_offset = 0;
+    }
+    written = qemu_chr_fe_write(&usb->adb_chr, data + usb->adb_tx_offset,
+                                length - usb->adb_tx_offset);
+    if (written > 0) {
+        usb->adb_tx_offset += written;
+    }
+    if (usb->adb_tx_offset == length) {
+        usb->adb_tx_offset = 0;
+        return true;
+    }
+    if (!usb->adb_watch) {
+        usb->adb_watch = qemu_chr_fe_add_watch(&usb->adb_chr,
+                          G_IO_OUT | G_IO_HUP, mt8113_usb_adb_writable, usb);
+    }
+    return false;
+}
+
+static void mt8113_usb_adb_receive_pending(MT8113USBState *usb)
+{
+    unsigned ep = usb->adb_out;
+
+    if (!usb->configured || !ep || !mt8113_usb_qmu_active(usb, ep, false) ||
+        !mt8113_usb_bulk_ep(usb, ep, false)) {
+        return;
+    }
+    for (unsigned count = 0; usb->adb_rx_length &&
+         count < MT8113_USB_GPD_RING_LIMIT; count++) {
+        MT8113USBGpd gpd;
+        hwaddr address;
+        unsigned length;
+        bool header = usb->adb_payload_left == 0;
+
+        if (!mt8113_usb_read_gpd(usb, ep, false, &gpd, &address)) {
+            break;
+        }
+        if (header) {
+            if (usb->adb_rx_length < 24 || (gpd.info >> 16) < 24) {
+                break;
+            }
+            if ((ldl_le_p(usb->adb_rx) ^ ldl_le_p(usb->adb_rx + 20)) !=
+                UINT32_MAX || ldl_le_p(usb->adb_rx + 12) > MiB) {
+                qemu_chr_fe_disconnect(&usb->adb_chr);
+                return;
+            }
+            length = 24;
+        } else {
+            length = MIN(usb->adb_rx_length, gpd.info >> 16);
+            length = MIN(length, usb->adb_payload_left);
+        }
+        if (!length || dma_memory_write(&address_space_memory, gpd.buffer,
+                                       usb->adb_rx, length,
+                                       MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
+            break;
+        }
+        gpd.length = (gpd.length & ~MT8113_USB_GPD_LENGTH_MASK) | length;
+        mt8113_usb_complete_gpd(usb, ep, false, address, &gpd);
+        usb->adb_payload_left = header ? ldl_le_p(usb->adb_rx + 12)
+                                       : usb->adb_payload_left - length;
+        usb->adb_rx_length -= length;
+        memmove(usb->adb_rx, usb->adb_rx + length, usb->adb_rx_length);
+        mt8113_usb_update_irq(usb);
+    }
+    qemu_chr_fe_accept_input(&usb->adb_chr);
+}
+
+static int mt8113_usb_adb_can_read(void *opaque)
+{
+    MT8113USBState *usb = opaque;
+
+    return sizeof(usb->adb_rx) - usb->adb_rx_length;
+}
+
+static void mt8113_usb_adb_read(void *opaque, const uint8_t *data, int length)
+{
+    MT8113USBState *usb = opaque;
+
+    memcpy(usb->adb_rx + usb->adb_rx_length, data, length);
+    usb->adb_rx_length += length;
+    mt8113_usb_adb_receive_pending(usb);
+}
+
+static void mt8113_usb_adb_event(void *opaque, QEMUChrEvent event)
+{
+    MT8113USBState *usb = opaque;
+
+    if (event == CHR_EVENT_CLOSED) {
+        usb->adb_rx_length = 0;
+        usb->adb_payload_left = 0;
+        usb->adb_tx_offset = 0;
+        if (usb->adb_watch) {
+            g_source_remove(usb->adb_watch);
+            usb->adb_watch = 0;
+        }
+    }
+    if (usb->tx_timer &&
+        (event == CHR_EVENT_OPENED || event == CHR_EVENT_CLOSED)) {
+        timer_mod(usb->tx_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL));
+    }
+}
+
 static void mt8113_usb_process_tx(MT8113USBState *usb, unsigned ep)
 {
     bool completed = false;
-    bool bulk = mt8113_usb_bulk_ep(usb, ep, true);
+    bool bulk = ep == usb->network_in && mt8113_usb_bulk_ep(usb, ep, true);
+    bool hid = ep == usb->hid_in && usb->configured;
+    bool adb = ep == usb->adb_in && usb->configured &&
+               mt8113_usb_bulk_ep(usb, ep, true);
     hwaddr csr0 = mt8113_usb_tx_reg(ep, MT8113_USB_TX1CSR0);
     hwaddr csr1 = mt8113_usb_tx_reg(ep, MT8113_USB_TX1CSR1);
-    bool notify = (usb->mac_regs[csr0 / 4] & MT8113_USB_DMA_REQUEST) &&
+    bool notify = (ep == usb->notify_in || hid) &&
+                  (usb->mac_regs[csr0 / 4] & MT8113_USB_DMA_REQUEST) &&
                   (usb->mac_regs[csr1 / 4] & (3 << 4)) == (1 << 4);
 
     if (!usb->nic || qemu_get_queue(usb->nic)->link_down ||
         usb->processing_tx || (!usb->configured && bulk) ||
         !mt8113_usb_qmu_active(usb, ep, true) ||
-        (!bulk && !notify)) {
+        (!bulk && !notify && !adb)) {
         return;
     }
 
@@ -2381,13 +2506,22 @@ static void mt8113_usb_process_tx(MT8113USBState *usb, unsigned ep)
         }
         length = gpd.length & MT8113_USB_GPD_LENGTH_MASK;
         packet = g_malloc(length ?: 1);
-        /* ECM interrupt-IN notifications complete like ordinary USB IN
-         * requests, but are not Ethernet frames for the network backend. */
-        if (bulk && length &&
-            dma_memory_read(&address_space_memory, gpd.buffer,
+        if (length && dma_memory_read(&address_space_memory, gpd.buffer,
                                       packet, length,
-                                      MEMTXATTRS_UNSPECIFIED) == MEMTX_OK &&
-            length >= 14) {
+                                      MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
+            g_free(packet);
+            break;
+        }
+        if (adb) {
+            if (!mt8113_usb_adb_send(usb, address, packet, length)) {
+                g_free(packet);
+                break;
+            }
+        } else if (hid) {
+            usb->hid_report_length = MIN(length, sizeof(usb->hid_report));
+            memcpy(usb->hid_report, packet, usb->hid_report_length);
+            usb->hid_reports++;
+        } else if (bulk && length >= 14) {
             if (!usb->rndis) {
                 qemu_send_packet(qemu_get_queue(usb->nic), packet, length);
             } else {
@@ -2447,7 +2581,8 @@ static bool mt8113_usb_can_receive(NetClientState *nc)
         MT8113USBGpd gpd;
         hwaddr address;
 
-        if (mt8113_usb_qmu_active(usb, ep, false) &&
+        if (ep == usb->network_out &&
+            mt8113_usb_qmu_active(usb, ep, false) &&
             mt8113_usb_bulk_ep(usb, ep, false) &&
             mt8113_usb_read_gpd(usb, ep, false, &gpd, &address)) {
             return true;
@@ -2471,7 +2606,8 @@ static ssize_t mt8113_usb_receive(NetClientState *nc, const uint8_t *packet,
         hwaddr address;
         size_t capacity;
 
-        if (!mt8113_usb_qmu_active(usb, ep, false) ||
+        if (ep != usb->network_out ||
+            !mt8113_usb_qmu_active(usb, ep, false) ||
             !mt8113_usb_bulk_ep(usb, ep, false) ||
             !mt8113_usb_read_gpd(usb, ep, false, &gpd, &address)) {
             continue;
@@ -2522,6 +2658,14 @@ static void mt8113_usb_disconnect(MT8113USBState *usb)
     usb->control_out_length = 0;
     usb->control_in_length = 0;
     usb->rndis = false;
+    usb->network_in = usb->network_out = usb->notify_in = usb->hid_in = 0;
+    usb->adb_in = usb->adb_out = 0;
+    usb->adb_rx_length = usb->adb_tx_offset = usb->adb_payload_left = 0;
+    if (usb->adb_watch) {
+        g_source_remove(usb->adb_watch);
+        usb->adb_watch = 0;
+    }
+    qemu_chr_fe_disconnect(&usb->adb_chr);
     if (usb->config_timer) {
         timer_del(usb->config_timer);
         timer_del(usb->tx_timer);
@@ -2584,7 +2728,9 @@ static bool mt8113_usb_parse_configuration(MT8113USBState *usb)
 {
     const uint8_t *desc = usb->control_in;
     size_t length = usb->control_in_length;
-    bool found_control = false, found_data = false;
+    unsigned interface = 0, class = 0;
+    bool found_control = false;
+    bool adb_interface = false;
 
     if (length < 9 || desc[1] != 2 || lduw_le_p(desc + 2) > length) {
         return false;
@@ -2597,29 +2743,59 @@ static bool mt8113_usb_parse_configuration(MT8113USBState *usb)
         if (d[0] < 2 || d[0] > length - offset) {
             return false;
         }
-        if (d[1] == 4 && d[0] >= 9) { /* interface */
-            if ((d[5] == 0xe0 && d[6] == 1 && d[7] == 3) ||
-                (d[5] == 2 && d[6] == 2 && d[7] == 0xff)) {
-                usb->rndis = true;
-                usb->control_interface = d[2];
+        if (d[1] == 4 && d[0] >= 9) {
+            bool rndis = (d[5] == 0xe0 && d[6] == 1 && d[7] == 3) ||
+                         (d[5] == 2 && d[6] == 2 && d[7] == 0xff);
+            bool ecm = d[5] == 2 && d[6] == 6;
+
+            interface = d[2];
+            class = d[5];
+            adb_interface = class == 0xff && d[6] == 0x42 && d[7] == 1;
+            if (!found_control && (rndis || ecm)) {
+                usb->rndis = rndis;
+                usb->control_interface = interface;
+                usb->data_interface = interface + 1;
                 found_control = true;
-            } else if (d[5] == 2 && d[6] == 6) { /* CDC ECM */
-                usb->control_interface = d[2];
-                found_control = true;
-            } else if (d[5] == 0x0a) { /* CDC data */
-                usb->data_interface = d[2];
-                found_data = true;
+            }
+        } else if (d[1] == 0x24 && d[0] >= 5 && d[2] == 6 &&
+                   found_control && d[3] == usb->control_interface) {
+            usb->data_interface = d[4]; /* CDC union slave interface */
+        } else if (d[1] == 5 && d[0] >= 7) {
+            unsigned ep = d[2] & 15;
+            bool in = d[2] & 0x80;
+
+            if (!ep || ep >= MT8113_USB_ENDPOINTS) {
+                return false;
+            }
+            if (found_control && interface == usb->data_interface &&
+                class == 0x0a && (d[3] & 3) == 2) {
+                if (in) {
+                    usb->network_in = ep;
+                } else {
+                    usb->network_out = ep;
+                }
+            } else if (found_control && interface == usb->control_interface &&
+                       (d[3] & 3) == 3 && in) {
+                usb->notify_in = ep;
+            } else if (adb_interface && (d[3] & 3) == 2) {
+                if (in) {
+                    usb->adb_in = ep;
+                } else {
+                    usb->adb_out = ep;
+                }
+            } else if (class == 3 && (d[3] & 3) == 3 && in) {
+                usb->hid_in = ep;
             }
         }
         offset += d[0];
     }
-    return found_control && found_data;
+    return (found_control && usb->network_in && usb->network_out) ||
+           usb->hid_in || (usb->adb_in && usb->adb_out);
 }
 
 static void mt8113_usb_control_complete(MT8113USBState *usb)
 {
     bool valid = true;
-
 
     if (usb->config_phase == USB_NET_DESCRIPTOR) {
         valid = mt8113_usb_parse_configuration(usb);
@@ -2747,6 +2923,9 @@ static void mt8113_usb_config_timer(void *opaque)
         mt8113_usb_inject_setup(usb, set_configuration);
         break;
     case USB_NET_INTERFACE_OR_INIT:
+        if (!usb->network_in) {
+            goto ready;
+        }
         if (usb->rndis) {
             memset(usb->control_out, 0, sizeof(usb->control_out));
             stl_le_p(usb->control_out, 2); /* INITIALIZE_MSG */
@@ -2797,6 +2976,7 @@ static void mt8113_usb_config_timer(void *opaque)
     default:
 ready:
         usb->configured = true;
+        mt8113_usb_adb_receive_pending(usb);
         timer_mod(usb->tx_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL));
         qemu_flush_queued_packets(qemu_get_queue(usb->nic));
         return;
@@ -2963,6 +3143,8 @@ static void mt8113_usb_mac_write(void *opaque, hwaddr offset, uint64_t value,
             if (tx && usb->tx_timer) {
                 timer_mod(usb->tx_timer,
                           qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL));
+            } else if (ep == usb->adb_out) {
+                mt8113_usb_adb_receive_pending(usb);
             } else if (usb->nic) {
                 qemu_flush_queued_packets(qemu_get_queue(usb->nic));
             }
@@ -3314,6 +3496,7 @@ static void mt8113_usb_reset(MT8113USBState *usb)
 {
     mt8113_usb_mac_reset(usb);
     memset(usb->ippc_regs, 0, sizeof(usb->ippc_regs));
+    usb->hid_reports = usb->hid_report_length = 0;
     qemu_set_irq(usb->vbus, usb->nic &&
                  !qemu_get_queue(usb->nic)->link_down);
 }
@@ -3703,6 +3886,10 @@ static void mt8113_realize(DeviceState *dev, Error **errp)
                                        &s->usb);
     }
 
+    qemu_chr_fe_set_handlers(&s->usb.adb_chr, mt8113_usb_adb_can_read,
+                             mt8113_usb_adb_read, mt8113_usb_adb_event,
+                             NULL, &s->usb, NULL, true);
+
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->gpio), errp)) {
         return;
     }
@@ -3783,6 +3970,11 @@ static void mt8113_unrealize(DeviceState *dev)
     MT8113State *s = MT8113(dev);
 
     qemu_unregister_reset(mt8113_system_reset, s);
+    if (s->usb.adb_watch) {
+        g_source_remove(s->usb.adb_watch);
+        s->usb.adb_watch = 0;
+    }
+    qemu_chr_fe_deinit(&s->usb.adb_chr, false);
     if (s->wifi_timer) {
         timer_free(s->wifi_timer);
     }
@@ -3796,14 +3988,30 @@ static const Property mt8113_properties[] = {
     DEFINE_PROP_UINT64("reset-vector", MT8113State, reset_vector, 0),
     DEFINE_PROP_UINT32("iommu-irq", MT8113State, iommu_irq, MT8113_IOMMU_IRQ),
     DEFINE_NIC_PROPERTIES(MT8113State, usb.nic_conf),
+    DEFINE_PROP_CHR("usb-adb", MT8113State, usb.adb_chr),
     DEFINE_PROP_NETDEV("wifi-netdev", MT8113State, wifi_conf.peers),
     DEFINE_PROP_MACADDR("wifi-mac", MT8113State, wifi_conf.macaddr),
 };
+
+static char *mt8113_usb_hid_report(Object *obj, Error **errp)
+{
+    MT8113USBState *usb = &MT8113(obj)->usb;
+    GString *report = g_string_new(NULL);
+
+    for (unsigned i = 0; i < usb->hid_report_length; i++) {
+        g_string_append_printf(report, "%02x", usb->hid_report[i]);
+    }
+    return g_string_free(report, false);
+}
 
 static void mt8113_init(Object *obj)
 {
     MT8113State *s = MT8113(obj);
 
+    object_property_add_uint64_ptr(obj, "usb-hid-reports", &s->usb.hid_reports,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_str(obj, "usb-hid-last-report",
+                            mt8113_usb_hid_report, NULL);
     qdev_init_gpio_out_named(DEVICE(obj), &s->usb.vbus, "usb-vbus", 1);
     object_initialize_child(obj, "gic", &s->gic, TYPE_ARM_GICV3);
     object_initialize_child(obj, "gpio", &s->gpio, TYPE_MT8113_GPIO);

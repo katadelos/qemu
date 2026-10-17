@@ -7,6 +7,7 @@
 #ifndef HW_ARM_MT8113_H
 #define HW_ARM_MT8113_H
 
+#include "chardev/char-fe.h"
 #include "hw/core/qdev.h"
 #include "hw/display/mt8113_hwtcon.h"
 #include "hw/gpio/mt8113_gpio.h"
@@ -126,6 +127,18 @@ typedef struct MT8113USBState {
     uint8_t config_value;
     uint8_t control_interface;
     uint8_t data_interface;
+    uint8_t network_in, network_out, notify_in, hid_in;
+    CharFrontend adb_chr;
+    uint8_t adb_in, adb_out;
+    uint8_t adb_rx[65536];
+    unsigned adb_rx_length;
+    unsigned adb_payload_left;
+    unsigned adb_tx_offset;
+    hwaddr adb_tx_gpd;
+    guint adb_watch;
+    uint8_t hid_report[1024];
+    unsigned hid_report_length;
+    uint64_t hid_reports;
     bool rndis;
     bool control_tx_pending;
     bool setup_pending;
