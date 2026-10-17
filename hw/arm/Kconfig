@@ -416,6 +416,7 @@ config IMX50_POCKETBOOK
     select SPLIT_IRQ
     select SD
     select BCM4343W_SDIO
+    select USB_RTL8188EU
     select IMX_KEYPAD
     select KOBO_MSP430
     select MMA7660

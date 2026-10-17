@@ -31,6 +31,7 @@
 #include "hw/ssi/mc13892.h"
 #include "hw/ssi/ssi.h"
 #include "hw/usb/imx-usb-misc.h"
+#include "hw/usb/usb.h"
 #include "migration/vmstate.h"
 #include "net/net.h"
 #include "qemu/error-report.h"
@@ -519,13 +520,16 @@ static void pb_create_lm75(FslIMX50State *soc)
                              &error_fatal);
 }
 
-static DeviceState *pb_create_color_peripherals(FslIMX50State *soc)
+static DeviceState *pb_create_color_peripherals(FslIMX50State *soc,
+                                               DeviceState *usb_misc)
 {
     I2CSlave *touch = i2c_slave_create_simple(soc->i2c[0].bus,
                                               TYPE_GOODIX_GT813, 0x5d);
     I2CSlave *slider = i2c_slave_create_simple(soc->i2c[2].bus,
                                                TYPE_CY8C_SLIDER, 0x24);
     DeviceState *supply = qdev_new(TYPE_SPLIT_IRQ);
+    DeviceState *wifi = qdev_new("rtl8188eu");
+    DeviceState *wifi_supply = qdev_new(TYPE_SPLIT_IRQ);
 
     pb_create_lm75(soc);
     qdev_connect_gpio_out_named(DEVICE(touch), "irq", 0,
@@ -546,8 +550,19 @@ static DeviceState *pb_create_color_peripherals(FslIMX50State *soc)
         qdev_get_gpio_in_named(DEVICE(touch), "power", 0));
     qdev_connect_gpio_out(supply, 1,
         qdev_get_gpio_in_named(DEVICE(slider), "power", 0));
-    /* USB Wi-Fi's supply remains the software-visible GPIO4_17. There is
-     * no RTL8188EU USB radio model attached to this port. */
+    qemu_configure_nic_device(wifi, true, "rtl8188eu");
+    usb_realize_and_unref(USB_DEVICE(wifi), &soc->usb_h1.parent_obj.ehci.bus,
+                           &error_fatal);
+    qdev_prop_set_uint16(wifi_supply, "num-lines", 2);
+    qdev_realize_and_unref(wifi_supply, NULL, &error_fatal);
+    qdev_connect_gpio_out(DEVICE(&soc->gpio[3]), 17,
+        qdev_get_gpio_in(wifi_supply, 0));
+    /* Latch the PHY wake request before the USB attach raises H1's IRQ. */
+    qdev_connect_gpio_out(wifi_supply, 0, qdev_get_gpio_in(usb_misc, 1));
+    qdev_connect_gpio_out(wifi_supply, 1,
+        qdev_get_gpio_in_named(wifi, "power", 0));
+    sysbus_connect_irq(SYS_BUS_DEVICE(usb_misc), 1,
+        qdev_get_gpio_in_named(DEVICE(&soc->usb_h1), "wakeup", 0));
     return DEVICE(slider);
 }
 
@@ -558,6 +573,8 @@ static void pb_create_peripherals(FslIMX50State *soc, const PBProfile *profile)
     DeviceState *usb_misc = qdev_new(TYPE_IMX_USB_MISC);
     unsigned i;
 
+    /* GPIO links require the wake controller's canonical object path. */
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(usb_misc), &error_fatal);
     if (profile->netronix) {
         I2CSlave *mcu = i2c_slave_new(TYPE_KOBOTOUCH_MSP430, 0x43);
         DeviceState *keypad = sysbus_create_simple("imx-keypad", 0x53f94000,
@@ -572,7 +589,7 @@ static void pb_create_peripherals(FslIMX50State *soc, const PBProfile *profile)
                                         profile->matrix_contacts[i]));
         }
     } else if (profile->color) {
-        DeviceState *slider = pb_create_color_peripherals(soc);
+        DeviceState *slider = pb_create_color_peripherals(soc, usb_misc);
 
         object_property_set_link(OBJECT(buttons), "slider", OBJECT(slider),
                                   &error_fatal);
@@ -656,7 +673,6 @@ static void pb_create_peripherals(FslIMX50State *soc, const PBProfile *profile)
             qdev_get_gpio_in_named(light, "power", 0));
     }
 
-    sysbus_realize_and_unref(SYS_BUS_DEVICE(usb_misc), &error_fatal);
     sysbus_mmio_map_overlap(SYS_BUS_DEVICE(usb_misc), 0, 0x53f80800, 2);
     sysbus_connect_irq(SYS_BUS_DEVICE(usb_misc), 0,
         qdev_get_gpio_in_named(DEVICE(&soc->usb_otg), "wakeup", 0));
@@ -748,6 +764,8 @@ static void pb_machine_class_init(ObjectClass *oc, const void *data)
     mc->ignore_memory_transaction_failures = true;
     if (profile->wifi) {
         mc->default_nic = TYPE_BCM43362_SDIO;
+    } else if (profile->color) {
+        mc->default_nic = "rtl8188eu";
     }
 }
 
