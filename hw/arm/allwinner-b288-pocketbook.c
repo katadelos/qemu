@@ -362,6 +362,19 @@ static void b288_pb_class_init(ObjectClass *oc, const void *data)
     mc->no_parallel = true;
 }
 
+static const B288PBProfile pb618_profile = {
+    .description = "PocketBook Basic Lux 4 (618, Allwinner B288)",
+    .ram_id = "pb618.ram",
+    .ram_size = 512 * MiB,
+    .width = 1024, .height = 758, .rotation = 90,
+    .touch_width = 758, .touch_height = 1024,
+    .focaltech_touch = "ft6336",
+    .pmic_wakeup = 3 * 32 + 7, .pmic_powerup = 3 * 32 + 6,
+    .pmic_powergood = 3 * 32 + 26, .pmic_irq = 3 * 32 + 25,
+    .page_next = 32 + 14, .page_previous = 32 + 11,
+    .home_mv = 240,
+};
+
 static const B288PBProfile pb628_profile = {
     .description = "PocketBook Touch Lux 5 (628, Allwinner B288)",
     .ram_id = "pb628.ram",
@@ -531,6 +544,11 @@ static const TypeInfo b288_pb_types[] = {
         .class_size = sizeof(B288PBMachineClass),
         .abstract = true,
         .interfaces = arm_machine_interfaces,
+    }, {
+        .name = MACHINE_TYPE_NAME("allwinner-b288-pocketbook-618"),
+        .parent = TYPE_B288PB_MACHINE,
+        .class_init = b288_pb_class_init,
+        .class_data = &pb618_profile,
     }, {
         .name = MACHINE_TYPE_NAME("allwinner-b288-pocketbook-628"),
         .parent = TYPE_B288PB_MACHINE,
