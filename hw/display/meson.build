@@ -156,3 +156,4 @@ system_ss.add(when: 'CONFIG_MT8115_PA6_CS8', if_true: files('mt8171-panel.c'))
 system_ss.add(when: 'CONFIG_IMX_LCDIF', if_true: files('imx_lcdif.c'))
 
 system_ss.add(when: 'CONFIG_IMX7D_REMARKABLE2', if_true: files('remarkable2-panel.c'))
+system_ss.add(when: 'CONFIG_IMX8MM_REMARKABLE_PAPER_PRO', if_true: files('remarkable3-panel.c'))
