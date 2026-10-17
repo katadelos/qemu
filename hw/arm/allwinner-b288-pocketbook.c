@@ -362,6 +362,19 @@ static const B288PBProfile pb632_profile = {
     .touch_invert_y = true,
 };
 
+static const B288PBProfile pb740_profile = {
+    .description = "PocketBook InkPad 3 (740, Allwinner B288)",
+    .ram_id = "pb740.ram",
+    .ram_size = 1 * GiB,
+    .width = 1872, .height = 1404, .rotation = 90,
+    .touch_width = 1872, .touch_height = 1404,
+    .pmic_wakeup = 32 + 1, .pmic_powerup = 32,
+    .pmic_powergood = 32 + 3, .pmic_irq = 32 + 2,
+    .page_next = 32 + 11, .page_previous = 32 + 14,
+    .touch_swap_axes = true,
+    .touch_invert_x = true,
+};
+
 static const TypeInfo b288_pb_types[] = {
     {
         .name = TYPE_B288PB_BUTTONS,
@@ -386,6 +399,11 @@ static const TypeInfo b288_pb_types[] = {
         .parent = TYPE_B288PB_MACHINE,
         .class_init = b288_pb_class_init,
         .class_data = &pb632_profile,
+    }, {
+        .name = MACHINE_TYPE_NAME("allwinner-b288-pocketbook-740"),
+        .parent = TYPE_B288PB_MACHINE,
+        .class_init = b288_pb_class_init,
+        .class_data = &pb740_profile,
     },
 };
 
