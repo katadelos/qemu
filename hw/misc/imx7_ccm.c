@@ -26,6 +26,7 @@ static void imx7_analog_reset(DeviceState *dev)
 
     memset(s->pmu, 0, sizeof(s->pmu));
     memset(s->analog, 0, sizeof(s->analog));
+    memset(s->osc, 0, sizeof(s->osc));
 
     s->analog[ANALOG_PLL_ARM]         = 0x00002053;
     s->analog[ANALOG_PLL_DDR]         = 0x0060302c;
@@ -141,6 +142,23 @@ static const struct MemoryRegionOps imx7_set_clr_tog_ops = {
     },
 };
 
+static uint64_t imx7_osc_read(void *opaque, hwaddr offset, unsigned size)
+{
+    uint32_t value = imx7_set_clr_tog_read(opaque, offset, size);
+    if (CCM_INDEX(offset) == 0) {
+        /* OSC_CTRL0: the RC oscillator is stable after power-down clears. */
+        value = (value & ~BIT(2)) | ((value & BIT(0)) ? 0 : BIT(2));
+    }
+    return value;
+}
+
+static const MemoryRegionOps imx7_osc_ops = {
+    .read = imx7_osc_read,
+    .write = imx7_set_clr_tog_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 4 },
+};
+
 static bool imx7_pmu_is_ldo(hwaddr offset)
 {
     /* REG_1P0A, REG_1P0D and REG_1P2, including their SET/CLR/TOG aliases. */
@@ -224,6 +242,10 @@ static void imx7_analog_init(Object *obj)
 
     memory_region_init(&s->mmio.container, obj, TYPE_IMX7_ANALOG,
                        0x10000);
+
+    memory_region_init_io(&s->mmio.osc, obj, &imx7_osc_ops,
+                          s->osc, TYPE_IMX7_ANALOG ".osc", sizeof(s->osc));
+    memory_region_add_subregion(&s->mmio.container, 0, &s->mmio.osc);
 
     memory_region_init_io(&s->mmio.analog,
                           obj,
@@ -333,11 +355,12 @@ static const TypeInfo imx7_ccm_info = {
 
 static const VMStateDescription vmstate_imx7_analog = {
     .name = TYPE_IMX7_ANALOG,
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(analog, IMX7AnalogState, ANALOG_MAX),
         VMSTATE_UINT32_ARRAY(pmu,    IMX7AnalogState, PMU_MAX),
+        VMSTATE_UINT32_ARRAY(osc,    IMX7AnalogState, 0x60 / sizeof(uint32_t)),
         VMSTATE_END_OF_LIST()
     },
 };

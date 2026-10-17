@@ -128,12 +128,14 @@ struct IMX7AnalogState {
     /* <public> */
     struct {
         MemoryRegion container;
+        MemoryRegion osc;
         MemoryRegion analog;
         MemoryRegion digprog;
         MemoryRegion pmu;
     } mmio;
 
     uint32_t analog[ANALOG_MAX];
+    uint32_t osc[0x60 / sizeof(uint32_t)];
     uint32_t pmu[PMU_MAX];
 };
 
