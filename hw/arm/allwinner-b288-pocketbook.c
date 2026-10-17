@@ -375,6 +375,18 @@ static const B288PBProfile pb618_profile = {
     .home_mv = 240,
 };
 
+static const B288PBProfile pb619_profile = {
+    .description = "PocketBook Verse Lite (619, Allwinner B288)",
+    .ram_id = "pb619.ram",
+    .ram_size = 512 * MiB,
+    .width = 1024, .height = 758, .rotation = 90,
+    .touch_width = 758, .touch_height = 1024,
+    .focaltech_touch = "ft6336",
+    .touch_only = true,
+    .pmic_wakeup = 3 * 32 + 7, .pmic_powerup = 3 * 32 + 6,
+    .pmic_powergood = 3 * 32 + 26, .pmic_irq = 3 * 32 + 25,
+};
+
 static const B288PBProfile pb628_profile = {
     .description = "PocketBook Touch Lux 5 (628, Allwinner B288)",
     .ram_id = "pb628.ram",
@@ -549,6 +561,11 @@ static const TypeInfo b288_pb_types[] = {
         .parent = TYPE_B288PB_MACHINE,
         .class_init = b288_pb_class_init,
         .class_data = &pb618_profile,
+    }, {
+        .name = MACHINE_TYPE_NAME("allwinner-b288-pocketbook-619"),
+        .parent = TYPE_B288PB_MACHINE,
+        .class_init = b288_pb_class_init,
+        .class_data = &pb619_profile,
     }, {
         .name = MACHINE_TYPE_NAME("allwinner-b288-pocketbook-628"),
         .parent = TYPE_B288PB_MACHINE,
