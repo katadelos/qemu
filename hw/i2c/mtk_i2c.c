@@ -316,7 +316,8 @@ static const MemoryRegionOps mtk_i2c_dma_ops = {
     .write = mtk_i2c_dma_write_reg,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = {
-        .min_access_size = 4,
+        /* The MT8171 driver polls DMA warm reset with readw(). */
+        .min_access_size = 2,
         .max_access_size = 4,
     },
 };
