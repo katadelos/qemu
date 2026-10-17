@@ -450,14 +450,15 @@ static const ARMCPRegInfo cortexa9_cp_reginfo[] = {
       .access = PL1_W, .resetvalue = 0,
       .fieldoffset = offsetof(CPUARMState, cp15.a9_tlb_write_index),
       .writefn = a9_tlb_write_index_write },
+    /* Indexed data windows: migrate all entries through cpu/a9-tlb. */
     { .name = "TLB_VA", .cp = 15, .crn = 15, .crm = 5, .opc1 = 5, .opc2 = 2,
-      .access = PL1_RW, .resetvalue = 0,
+      .access = PL1_RW, .resetvalue = 0, .type = ARM_CP_NO_RAW,
       .readfn = a9_tlb_va_read, .writefn = a9_tlb_va_write },
     { .name = "TLB_PA", .cp = 15, .crn = 15, .crm = 6, .opc1 = 5, .opc2 = 2,
-      .access = PL1_RW, .resetvalue = 0,
+      .access = PL1_RW, .resetvalue = 0, .type = ARM_CP_NO_RAW,
       .readfn = a9_tlb_pa_read, .writefn = a9_tlb_pa_write },
     { .name = "TLB_ATTR", .cp = 15, .crn = 15, .crm = 7, .opc1 = 5, .opc2 = 2,
-      .access = PL1_RW, .resetvalue = 0,
+      .access = PL1_RW, .resetvalue = 0, .type = ARM_CP_NO_RAW,
       .readfn = a9_tlb_attr_read, .writefn = a9_tlb_attr_write },
 };
 

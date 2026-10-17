@@ -1235,6 +1235,28 @@ static int cpu_post_load(void *opaque, int version_id)
     return 0;
 }
 
+static bool a9_tlb_needed(void *opaque)
+{
+    ARMCPU *cpu = opaque;
+
+    return object_dynamic_cast(OBJECT(cpu), ARM_CPU_TYPE_NAME("cortex-a9"));
+}
+
+/* The indexed register interface cannot describe all four locked entries. */
+static const VMStateDescription vmstate_a9_tlb = {
+    .name = "cpu/a9-tlb",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = a9_tlb_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(env.cp15.a9_tlb_lockdown, ARMCPU),
+        VMSTATE_UINT32_ARRAY(env.cp15.a9_tlb_va, ARMCPU, 4),
+        VMSTATE_UINT32_ARRAY(env.cp15.a9_tlb_pa, ARMCPU, 4),
+        VMSTATE_UINT32_ARRAY(env.cp15.a9_tlb_attr, ARMCPU, 4),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 const VMStateDescription vmstate_arm_cpu = {
     .name = "cpu",
     .version_id = 22,
@@ -1313,6 +1335,7 @@ const VMStateDescription vmstate_arm_cpu = {
     },
     .subsections = (const VMStateDescription * const []) {
         &vmstate_vfp,
+        &vmstate_a9_tlb,
         &vmstate_m,
         &vmstate_thumb2ee,
         /* pmsav7_rnr must come before pmsav7 so that we have the
