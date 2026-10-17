@@ -722,6 +722,7 @@ config FSL_IMX31
 
 config FSL_IMX6
     bool
+    select IMX_KEYPAD
     select IMX_EPDC
     imply PCIE_DEVICES
     imply I2C_DEVICES
@@ -736,6 +737,7 @@ config FSL_IMX6
     select SDHCI
     select USB_CHIPIDEA
     select OR_IRQ
+    select SPLIT_IRQ
 
 config FSL_IMX50
     bool

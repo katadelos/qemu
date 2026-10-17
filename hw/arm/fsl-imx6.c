@@ -478,6 +478,19 @@ static void fsl_imx6_realize(DeviceState *dev, Error **errp)
         qdev_realize(DEVICE(&s->pcie4_msi_irq), NULL, &error_abort);
     }
 
+    sysbus_create_simple("imx-keypad", 0x020b8000, NULL);
+    sysbus_create_simple("imx6-gpc", FSL_IMX6_GPC_ADDR, NULL);
+    if (s->sololite) {
+        /* The QoS controller does not arbitrate QEMU memory transactions. */
+        create_unimplemented_device("imx6sl.qosc", 0x02094000, 0x4000);
+    }
+
+    /* Bus access-control setup has no effect on QEMU's unrestricted bus. */
+    create_unimplemented_device("imx6.aips1-config", FSL_IMX6_AIPS1_CFG_ADDR,
+                                FSL_IMX6_AIPS1_CFG_SIZE);
+    create_unimplemented_device("imx6.aips2-config", FSL_IMX6_AIPS2_CFG_ADDR,
+                                FSL_IMX6_AIPS2_CFG_SIZE);
+
     /* ROM memory */
     if (!memory_region_init_rom(&s->rom, OBJECT(dev), "imx6.rom",
                                 FSL_IMX6_ROM_SIZE, errp)) {
