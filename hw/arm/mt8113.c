@@ -49,6 +49,10 @@
 #define MT8113_WDT_MODE_KEY              0x22000000
 #define MT8113_WDT_SWRST                 0x14
 #define MT8113_WDT_SWRST_KEY             0x1209
+#define MT8113_WDT_SWSYSRST              0x18
+#define MT8113_WDT_SWSYSRST_KEY          0x88000000
+#define MT8113_WDT_CONN_RST              BIT(9)
+#define MT8113_WDT_CONN_MCU_RST          BIT(12)
 
 #define MT8113_RNG_CTRL                  0x00
 #define MT8113_RNG_DATA                  0x08
@@ -552,7 +556,7 @@ static void mt8113_btif_rx_enqueue(MT8113State *s, const uint8_t *data,
     mt8113_btif_rx_pump(s);
 }
 
-static void mt8113_btif_wmt_session_reset(MT8113State *s)
+static void mt8113_btif_wmt_firmware_reset(MT8113State *s)
 {
     s->btif_wmt_stp_config = 0;
     s->btif_wmt_txseq = 0;
@@ -565,6 +569,11 @@ static void mt8113_btif_wmt_session_reset(MT8113State *s)
     s->btif_rx_pending_len = 0;
     s->btif_last_response_len = 0;
     s->btif_wmt_pda_remaining = 0;
+}
+
+static void mt8113_btif_wmt_session_reset(MT8113State *s)
+{
+    mt8113_btif_wmt_firmware_reset(s);
     s->btif_tx_dma_regs[MT8113_BTIF_DMA_EN / 4] = 0;
     s->btif_tx_dma_regs[MT8113_BTIF_DMA_INT_FLAG / 4] = 0;
     s->btif_tx_dma_regs[MT8113_BTIF_DMA_VALID_SIZE / 4] = 0;
@@ -3247,6 +3256,18 @@ static void mt8113_toprgu_write(void *opaque, hwaddr offset, uint64_t value,
     if (offset == MT8113_WDT_MODE &&
         (value & 0xff000000) != MT8113_WDT_MODE_KEY) {
         return;
+    }
+    if (offset == MT8113_WDT_SWSYSRST) {
+        if ((value & 0xff000000) != MT8113_WDT_SWSYSRST_KEY) {
+            return;
+        }
+        if (value & (MT8113_WDT_CONN_RST | MT8113_WDT_CONN_MCU_RST)) {
+            /* The WMT driver resets the connectivity MCU even when its
+             * SCPSYS power domain remains on across a warm handoff. AP
+             * BTIF DMA belongs to a separate reset domain.
+             */
+            mt8113_btif_wmt_firmware_reset(s);
+        }
     }
     s->toprgu_regs[offset / sizeof(uint32_t)] = value;
     if (offset == MT8113_WDT_SWRST && value == MT8113_WDT_SWRST_KEY) {
