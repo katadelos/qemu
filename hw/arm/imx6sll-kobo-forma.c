@@ -266,7 +266,9 @@ static void forma_init(MachineState *ms)
         qdev_get_gpio_in(DEVICE(&s->gpio[3]), 31));
     object_unref(OBJECT(dev));
 
-    i2c_slave_create_simple(s->i2c[2].bus, "forma-ricoh619", 0x32);
+    dev = DEVICE(i2c_slave_create_simple(s->i2c[2].bus,
+                                          "forma-ricoh619", 0x32));
+    qdev_connect_gpio_out(dev, 0, qdev_get_gpio_in(DEVICE(&s->gpio[3]), 19));
     i2c_slave_create_simple(s->i2c[1].bus, "forma-tps65185", 0x68);
     dev = qdev_new("cyttsp5");
     qdev_prop_set_uint8(dev, "address", 0x24);

@@ -1,10 +1,23 @@
 /* Kobo Forma power devices. SPDX-License-Identifier: GPL-2.0-or-later */
 #include "qemu/osdep.h"
 #include "hw/i2c/i2c.h"
+#include "hw/core/irq.h"
+#include "qemu/timer.h"
 #include "migration/vmstate.h"
 #include "qemu/module.h"
 #include "qemu/bcd.h"
+#include "qemu/cutils.h"
 #include "system/rtc.h"
+#include "system/system.h"
+
+#define RTC_ALARM 0xa8
+#define RTC_CTRL1 0xae
+#define RTC_CTRL2 0xaf
+#define IRQ_ENABLE 0x9d
+#define IRQ_STATUS 0x9e
+#define RTC_IRQ BIT(2)
+#define RTC_ALARM_ENABLE BIT(6)
+#define RTC_ALARM_PENDING BIT(0)
 
 #define TYPE_FORMA_PMIC "forma-pmic"
 OBJECT_DECLARE_SIMPLE_TYPE(FormaPMICState, FORMA_PMIC)
@@ -14,11 +27,58 @@ struct FormaPMICState {
     uint8_t pointer, bank;
     bool expect_pointer;
     int64_t rtc_offset;
+    qemu_irq irq;
+    QEMUTimer *alarm_timer;
 };
 static bool ricoh(FormaPMICState *s)
 {
     return !strcmp(object_get_typename(OBJECT(s)), "forma-ricoh619");
 }
+static void forma_pmic_update_irq(FormaPMICState *s)
+{
+    bool pending = s->regs[RTC_CTRL2] & RTC_ALARM_PENDING;
+
+    s->regs[IRQ_STATUS] = pending ? RTC_IRQ : 0;
+    qemu_set_irq(s->irq, !(pending &&
+                          (s->regs[RTC_CTRL1] & RTC_ALARM_ENABLE) &&
+                          (s->regs[IRQ_ENABLE] & RTC_IRQ)));
+}
+
+static void forma_rtc_alarm(void *opaque)
+{
+    FormaPMICState *s = opaque;
+
+    s->regs[RTC_CTRL2] |= RTC_ALARM_PENDING;
+    forma_pmic_update_irq(s);
+}
+
+static void forma_rtc_schedule(FormaPMICState *s)
+{
+    const uint8_t *alarm = &s->regs[RTC_ALARM];
+    struct tm now;
+    struct tm when = {
+        .tm_sec = from_bcd(alarm[0] & 0x7f),
+        .tm_min = from_bcd(alarm[1] & 0x7f),
+        .tm_hour = from_bcd(alarm[2] & 0x3f),
+        .tm_mday = from_bcd(alarm[3] & 0x3f),
+        .tm_mon = from_bcd(alarm[4] & 0x1f) - 1,
+        .tm_year = from_bcd(alarm[5]) +
+                   ((s->regs[0xa5] & 0x80) ? 100 : 0),
+    };
+
+    timer_del(s->alarm_timer);
+    if (!(s->regs[RTC_CTRL1] & RTC_ALARM_ENABLE) ||
+        (s->regs[RTC_CTRL2] & RTC_ALARM_PENDING) ||
+        when.tm_mon < 0 || when.tm_mon > 11 || !when.tm_mday) {
+        return;
+    }
+    qemu_get_timedate(&now, s->rtc_offset);
+    int64_t delay = mktimegm(&when) - mktimegm(&now);
+    if (delay > 0) {
+        timer_mod(s->alarm_timer, qemu_clock_get_ms(rtc_clock) + delay * 1000);
+    }
+}
+
 static void forma_rtc_capture(FormaPMICState *s)
 {
     struct tm now;
@@ -44,7 +104,12 @@ static int forma_pmic_send(I2CSlave *i2c, uint8_t data)
             s->pointer == 0x0d && (data & 0x80)) {
             data = 0x20; /* Temperature conversion complete. */
         }
-        s->regs[s->bank * 256 + s->pointer++] = data;
+        unsigned address = s->bank * 256 + s->pointer++;
+        if (ricoh(s) && address == RTC_CTRL2) {
+            /* Alarm/periodic status bits clear when written as zero. */
+            data = (data & ~0x85) | (s->regs[address] & data & 0x85);
+        }
+        s->regs[address] = data;
         if (ricoh(s) && !s->bank && s->pointer == 0xa7) {
             struct tm tm = {
                 .tm_sec = from_bcd(s->regs[0xa0]),
@@ -56,6 +121,12 @@ static int forma_pmic_send(I2CSlave *i2c, uint8_t data)
                            ((s->regs[0xa5] & 0x80) ? 100 : 0),
             };
             s->rtc_offset = qemu_timedate_diff(&tm);
+        }
+        if (ricoh(s) && !s->bank) {
+            forma_pmic_update_irq(s);
+            if (address >= 0xa0 && address <= RTC_CTRL2) {
+                forma_rtc_schedule(s);
+            }
         }
     }
     return 0;
@@ -79,6 +150,8 @@ static int forma_pmic_event(I2CSlave *i2c, enum i2c_event event)
 static void forma_pmic_reset(DeviceState *dev)
 {
     FormaPMICState *s = FORMA_PMIC(dev);
+    timer_del(s->alarm_timer);
+    qemu_set_irq(s->irq, 1);
     memset(s->regs, 0, sizeof(s->regs));
     s->pointer = s->bank = 0;
     s->expect_pointer = true;
@@ -102,8 +175,19 @@ static void forma_pmic_reset(DeviceState *dev)
         s->regs[0x10] = 0x65;
     }
 }
+static int forma_pmic_post_load(void *opaque, int version)
+{
+    FormaPMICState *s = opaque;
+
+    if (ricoh(s)) {
+        forma_pmic_update_irq(s);
+    }
+    return 0;
+}
+
 static const VMStateDescription forma_pmic_vmstate = {
-    .name = TYPE_FORMA_PMIC, .version_id = 1, .minimum_version_id = 1,
+    .name = TYPE_FORMA_PMIC, .version_id = 2, .minimum_version_id = 2,
+    .post_load = forma_pmic_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_I2C_SLAVE(parent_obj, FormaPMICState),
         VMSTATE_UINT8_ARRAY(regs, FormaPMICState, 512),
@@ -111,9 +195,23 @@ static const VMStateDescription forma_pmic_vmstate = {
         VMSTATE_UINT8(bank, FormaPMICState),
         VMSTATE_BOOL(expect_pointer, FormaPMICState),
         VMSTATE_INT64(rtc_offset, FormaPMICState),
+        VMSTATE_TIMER_PTR(alarm_timer, FormaPMICState),
         VMSTATE_END_OF_LIST()
     }
 };
+static void forma_pmic_init(Object *obj)
+{
+    FormaPMICState *s = FORMA_PMIC(obj);
+
+    qdev_init_gpio_out(DEVICE(obj), &s->irq, 1);
+    s->alarm_timer = timer_new_ms(rtc_clock, forma_rtc_alarm, s);
+}
+
+static void forma_pmic_finalize(Object *obj)
+{
+    timer_free(FORMA_PMIC(obj)->alarm_timer);
+}
+
 static void forma_pmic_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
@@ -127,7 +225,8 @@ static void forma_pmic_class_init(ObjectClass *oc, const void *data)
 static const TypeInfo forma_pmic_types[] = {
     { .name = TYPE_FORMA_PMIC, .parent = TYPE_I2C_SLAVE,
       .instance_size = sizeof(FormaPMICState), .class_init = forma_pmic_class_init,
-      .abstract = true },
+      .instance_init = forma_pmic_init,
+      .instance_finalize = forma_pmic_finalize, .abstract = true },
     { .name = "forma-ricoh619", .parent = TYPE_FORMA_PMIC },
     { .name = "forma-tps65185", .parent = TYPE_FORMA_PMIC },
 };
