@@ -11,6 +11,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/misc/imx6_ccm.h"
 #include "migration/vmstate.h"
@@ -253,13 +254,24 @@ static const char *imx6_analog_reg_name(uint32_t reg)
 
 #define CKIH_FREQ 24000000 /* 24MHz crystal input */
 
+static int imx6_ccm_post_load(void *opaque, int version_id)
+{
+    IMX6CCMState *s = opaque;
+
+    qemu_set_irq(s->stop, s->stop_mode);
+    return 0;
+}
+
 static const VMStateDescription vmstate_imx6_ccm = {
     .name = TYPE_IMX6_CCM,
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
+    .post_load = imx6_ccm_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(ccm, IMX6CCMState, CCM_MAX),
         VMSTATE_UINT32_ARRAY(analog, IMX6CCMState, CCM_ANALOG_MAX),
+        VMSTATE_BOOL(stop_mode, IMX6CCMState),
+        VMSTATE_BOOL(stop_wake_asserted, IMX6CCMState),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -429,6 +441,9 @@ static void imx6_ccm_reset(DeviceState *dev)
     s->ccm[CCM_CDHIPR] = 0x00000000;
     s->ccm[CCM_CTOR] = 0x00000000;
     s->ccm[CCM_CLPCR] = 0x00000079;
+    s->stop_mode = false;
+    s->stop_wake_asserted = false;
+    qemu_set_irq(s->stop, 0);
     s->ccm[CCM_CISR] = 0x00000000;
     s->ccm[CCM_CIMR] = 0xFFFFFFFF;
     s->ccm[CCM_CCOSR] = 0x000A0001;
@@ -517,6 +532,22 @@ static void imx6_ccm_write(void *opaque, hwaddr offset, uint64_t value,
      * cannot be written to.
      */
     s->ccm[index] = (uint32_t)value;
+    if (index == CCM_CLPCR) {
+        s->stop_mode = (value & 3) == 2 && !s->stop_wake_asserted;
+        qemu_set_irq(s->stop, s->stop_mode);
+    }
+}
+
+static void imx6_ccm_stop_wake(void *opaque, int line, int level)
+{
+    IMX6CCMState *s = opaque;
+
+    /* CLPCR retains its programmed mode after the wake event exits STOP. */
+    s->stop_wake_asserted = level;
+    if (level) {
+        s->stop_mode = false;
+        qemu_set_irq(s->stop, 0);
+    }
 }
 
 static uint64_t imx6_analog_read(void *opaque, hwaddr offset, unsigned size)
@@ -823,6 +854,9 @@ static void imx6_ccm_init(Object *obj)
     DeviceState *dev = DEVICE(obj);
     SysBusDevice *sd = SYS_BUS_DEVICE(obj);
     IMX6CCMState *s = IMX6_CCM(obj);
+
+    qdev_init_gpio_in_named(dev, imx6_ccm_stop_wake, "stop-wake", 1);
+    qdev_init_gpio_out_named(dev, &s->stop, "stop", 1);
 
     /* initialize a container for the all memory range */
     memory_region_init(&s->container, OBJECT(dev), TYPE_IMX6_CCM, 0x5000);

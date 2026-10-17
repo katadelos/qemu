@@ -208,9 +208,12 @@ struct IMX6CCMState {
     MemoryRegion container;
     MemoryRegion ioccm;
     MemoryRegion ioanalog;
+    qemu_irq stop;
 
     uint32_t ccm[CCM_MAX];
     uint32_t analog[CCM_ANALOG_MAX];
+    bool stop_mode;
+    bool stop_wake_asserted;
     bool sololite;
     bool sololite_lite;
 

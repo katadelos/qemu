@@ -26,6 +26,7 @@
 #include "hw/usb/imx-usb-phy.h"
 #include "hw/core/boards.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/core/split-irq.h"
 #include "system/system.h"
 #include "chardev/char.h"
 #include "qemu/error-report.h"
@@ -112,6 +113,7 @@ static void fsl_imx6_realize(DeviceState *dev, Error **errp)
     unsigned int smp_cpus = ms->smp.cpus;
     DeviceState *mpcore = DEVICE(&s->a9mpcore);
     DeviceState *gic;
+    DeviceState *ccm_wake, *ccm_stop;
     char name[NAME_SIZE];
 
     if (smp_cpus > FSL_IMX6_NUM_CPUS) {
@@ -158,11 +160,31 @@ static void fsl_imx6_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(mpcore), 0, FSL_IMX6_A9MPCORE_ADDR);
 
     gic = mpcore;
+    ccm_wake = qdev_new(TYPE_OR_IRQ);
+    qdev_prop_set_uint16(ccm_wake, "num-lines", smp_cpus * 2);
+    if (!qdev_realize_and_unref(ccm_wake, NULL, errp)) {
+        return;
+    }
+    qdev_connect_gpio_out(ccm_wake, 0,
+                         qdev_get_gpio_in_named(DEVICE(&s->ccm),
+                                               "stop-wake", 0));
     for (i = 0; i < smp_cpus; i++) {
-        sysbus_connect_irq(SYS_BUS_DEVICE(gic), i,
-                           qdev_get_gpio_in(DEVICE(&s->cpu[i]), ARM_CPU_IRQ));
-        sysbus_connect_irq(SYS_BUS_DEVICE(gic), i + smp_cpus,
-                           qdev_get_gpio_in(DEVICE(&s->cpu[i]), ARM_CPU_FIQ));
+        for (unsigned j = 0; j < 2; j++) {
+            DeviceState *split = qdev_new(TYPE_SPLIT_IRQ);
+            unsigned output = i + j * smp_cpus;
+
+            qdev_prop_set_uint16(split, "num-lines", 2);
+            if (!qdev_realize_and_unref(split, NULL, errp)) {
+                return;
+            }
+            sysbus_connect_irq(SYS_BUS_DEVICE(gic), output,
+                               qdev_get_gpio_in(split, 0));
+            qdev_connect_gpio_out(split, 0,
+                qdev_get_gpio_in(DEVICE(&s->cpu[i]),
+                                 j ? ARM_CPU_FIQ : ARM_CPU_IRQ));
+            qdev_connect_gpio_out(split, 1,
+                                 qdev_get_gpio_in(ccm_wake, output));
+        }
     }
 
     /* L2 cache controller */
@@ -422,6 +444,13 @@ static void fsl_imx6_realize(DeviceState *dev, Error **errp)
     /*
      * Watchdog
      */
+    ccm_stop = qdev_new(TYPE_SPLIT_IRQ);
+    qdev_prop_set_uint16(ccm_stop, "num-lines", FSL_IMX6_NUM_WDTS);
+    if (!qdev_realize_and_unref(ccm_stop, NULL, errp)) {
+        return;
+    }
+    qdev_connect_gpio_out_named(DEVICE(&s->ccm), "stop", 0,
+                               qdev_get_gpio_in(ccm_stop, 0));
     for (i = 0; i < FSL_IMX6_NUM_WDTS; i++) {
         static const hwaddr FSL_IMX6_WDOGn_ADDR[FSL_IMX6_NUM_WDTS] = {
             FSL_IMX6_WDOG1_ADDR,
@@ -439,6 +468,8 @@ static void fsl_imx6_realize(DeviceState *dev, Error **errp)
         sysbus_mmio_map(SYS_BUS_DEVICE(&s->wdt[i]), 0, FSL_IMX6_WDOGn_ADDR[i]);
         sysbus_connect_irq(SYS_BUS_DEVICE(&s->wdt[i]), 0,
                            qdev_get_gpio_in(gic, FSL_IMX6_WDOGn_IRQ[i]));
+        qdev_connect_gpio_out(ccm_stop, i,
+            qdev_get_gpio_in_named(DEVICE(&s->wdt[i]), "stop", 0));
     }
 
     /* PCIe is present on i.MX6Q/DL, not i.MX6SoloLite. */
