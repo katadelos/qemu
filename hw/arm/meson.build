@@ -49,6 +49,7 @@ arm_common_ss.add(when: 'CONFIG_ALLWINNER_H3', if_true: files('allwinner-h3.c', 
 arm_common_ss.add(when: 'CONFIG_ALLWINNER_B288', if_true: files('allwinner-b288.c'))
 arm_common_ss.add(when: 'CONFIG_ALLWINNER_B288_POCKETBOOK', if_true: files('allwinner-b288-pocketbook.c'))
 arm_common_ss.add(when: 'CONFIG_ALLWINNER_B300', if_true: files('allwinner-b300.c', 'allwinner-b300-iommu.c'))
+arm_common_ss.add(when: 'CONFIG_ALLWINNER_B300_POCKETBOOK', if_true: files('allwinner-b300-pocketbook.c'))
 arm_common_ss.add(when: 'CONFIG_ALLWINNER_R40', if_true: files('allwinner-r40.c', 'bananapi_m2u.c'))
 arm_common_ss.add(when: 'CONFIG_MAX78000_SOC', if_true: files('max78000_soc.c'))
 arm_ss.add(when: 'CONFIG_RASPI', if_true: files('bcm2836.c', 'raspi.c'))

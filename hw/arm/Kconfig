@@ -600,6 +600,16 @@ config ALLWINNER_B300
     select USB_EHCI_SYSBUS
     select USB_OHCI_SYSBUS
 
+config ALLWINNER_B300_POCKETBOOK
+    bool
+    default y if TCG && ARM
+    select ALLWINNER_B300
+    select SY7636
+    select CYTTSP5
+    select FOCALTECH_FT5X
+    select LM3630A
+    select AIC8800_SDIO
+
 config ALLWINNER_A13_POCKETBOOK
     bool
     default y
