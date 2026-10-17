@@ -36,7 +36,7 @@ struct ElanKTF2KState {
     uint16_t firmware_version, firmware_id;
     uint8_t contact_mask;
     int32_t x, y;
-    bool swap_axes, invert_x, invert_y;
+    bool swap_axes, invert_x, invert_y, swap_coordinate_ranges;
     bool powered;
     bool reset_high;
     bool reading;
@@ -249,9 +249,12 @@ static void elan_ktf2k_input_sync(DeviceState *dev)
     }
     x = qemu_input_scale_axis(x,
                              INPUT_EVENT_ABS_MIN, INPUT_EVENT_ABS_MAX,
-                             0, s->x_resolution);
+                             0, s->swap_coordinate_ranges ?
+                             s->y_resolution : s->x_resolution);
     y = qemu_input_scale_axis(y, INPUT_EVENT_ABS_MIN,
-                             INPUT_EVENT_ABS_MAX, 0, s->y_resolution);
+                             INPUT_EVENT_ABS_MAX, 0,
+                             s->swap_coordinate_ranges ?
+                             s->x_resolution : s->y_resolution);
     memset(s->rx, 0, sizeof(s->rx));
     s->rx[0] = 0x5a;
     s->rx[1] = ((x >> 4) & 0xf0) | ((y >> 8) & 0x0f);
@@ -396,6 +399,9 @@ static void elan_ktf2k_class_init(ObjectClass *oc, const void *data)
                            firmware_version, 0x0100),
         DEFINE_PROP_UINT16("firmware-id", ElanKTF2KState, firmware_id, 0x0001),
         DEFINE_PROP_UINT8("contact-mask", ElanKTF2KState, contact_mask, 2),
+        /* A13 packets use the opposite query axis as their native range. */
+        DEFINE_PROP_BOOL("swap-coordinate-ranges", ElanKTF2KState,
+                         swap_coordinate_ranges, false),
         DEFINE_PROP_BOOL("swap-axes", ElanKTF2KState, swap_axes, true),
         DEFINE_PROP_BOOL("invert-x", ElanKTF2KState, invert_x, true),
         DEFINE_PROP_BOOL("invert-y", ElanKTF2KState, invert_y, false),
