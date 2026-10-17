@@ -232,11 +232,22 @@ static const MemoryRegionOps imx2_wdt_ops = {
     },
 };
 
+static bool imx2_wdt_has_pretimeout(void *opaque, int version_id)
+{
+    IMX2WdtState *s = opaque;
+
+    return s->pretimeout_support;
+}
+
 static const VMStateDescription vmstate_imx2_wdt = {
     .name = "imx2.wdt",
+    .version_id = 1,
+    .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_PTIMER(timer, IMX2WdtState),
-        VMSTATE_PTIMER(itimer, IMX2WdtState),
+        VMSTATE_STRUCT_POINTER_TEST_V(itimer, IMX2WdtState,
+                                      imx2_wdt_has_pretimeout, 1,
+                                      vmstate_ptimer, ptimer_state),
         VMSTATE_BOOL(wicr_locked, IMX2WdtState),
         VMSTATE_BOOL(wcr_locked, IMX2WdtState),
         VMSTATE_BOOL(wcr_wde_locked, IMX2WdtState),
