@@ -786,6 +786,17 @@ static const PBProfile pb622_profile = {
     .wifi = true,
 };
 
+static const PBProfile pb623_profile = {
+    .description = "PocketBook Touch Lux 623 (i.MX50 EP7A)",
+    .ram_id = "pocketbook-623.ram",
+    .keys = pb622_keys,
+    .num_keys = ARRAY_SIZE(pb622_keys),
+    .ram_size = PB_RAM_SIZE,
+    .touch = true,
+    .wifi = true,
+    .frontlight = true,
+};
+
 static const TypeInfo pb_types[] = {
     {
         .name = TYPE_PB_BATTERY,
@@ -821,6 +832,11 @@ static const TypeInfo pb_types[] = {
         .parent = TYPE_PB_MACHINE,
         .class_init = pb_machine_class_init,
         .class_data = &pb622_profile,
+    }, {
+        .name = MACHINE_TYPE_NAME("imx50-pocketbook-623"),
+        .parent = TYPE_PB_MACHINE,
+        .class_init = pb_machine_class_init,
+        .class_data = &pb623_profile,
     },
 };
 
