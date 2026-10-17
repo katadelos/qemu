@@ -92,10 +92,9 @@ static void imx_gpio_set_int_line(IMXGPIOState *s, int line, IMXGPIOLevel level)
             }
         }
     } else {
-        /* interrupt is level sensitive */
-        if (extract64(s->icr, 2*line, 1) == level) {
-            s->isr = deposit32(s->isr, line, 1, 1);
-        }
+        /* Level-sensitive status follows the pin; only edges are latched. */
+        s->isr = deposit32(s->isr, line, 1,
+                           extract64(s->icr, 2 * line, 1) == level);
     }
 }
 
