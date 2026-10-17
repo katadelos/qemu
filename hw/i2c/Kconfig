@@ -78,6 +78,10 @@ config BMA2X2
     bool
     select I2C
 
+config MMA7660
+    bool
+    select I2C
+
 config MTK_I2C
     bool
     select I2C
