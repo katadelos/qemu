@@ -238,3 +238,11 @@ apple_gfx_iosfc_map_memory_new_region(size_t i, void *region, uint64_t start, ui
 apple_gfx_iosfc_unmap_memory(void *a, void *b, void *c, void *d, void *e, void *f) "a=%p b=%p c=%p d=%p e=%p f=%p"
 apple_gfx_iosfc_unmap_memory_region(void* mem, void *region) "unmapping @ %p from memory region %p"
 apple_gfx_iosfc_raise_irq(uint32_t vector) "vector=0x%x"
+
+# allwinner-b300-eink.c
+allwinner_b300_eink_kick(uint64_t index, uint64_t output, unsigned pipes) "index=0x%"PRIx64" output=0x%"PRIx64" pipes=0x%x"
+allwinner_b300_eink_index(uint32_t mode, uint64_t old_index, uint64_t new_index, uint32_t start, uint32_t end) "mode=0x%x old=0x%"PRIx64" new=0x%"PRIx64" start=0x%08x end=0x%08x"
+allwinner_b300_eink_pipe(unsigned pipe, uint32_t control, uint32_t start, uint32_t end, uint64_t waveform) "pipe=%u control=0x%x start=0x%08x end=0x%08x waveform=0x%"PRIx64
+allwinner_b300_eink_decode(uint64_t index, uint64_t output, unsigned pipes, int64_t host_us) "index=0x%"PRIx64" output=0x%"PRIx64" pipes=0x%x host_us=%"PRId64
+allwinner_b300_eink_scan(uint64_t address, unsigned dark, unsigned light, uint8_t before, uint8_t after, int64_t host_us) "address=0x%"PRIx64" dark=%u light=%u first=%u->%u host_us=%"PRId64
+allwinner_b300_eink_dbuf(uint64_t address, unsigned phase) "address=0x%"PRIx64" phase=%u"
