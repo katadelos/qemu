@@ -131,7 +131,7 @@ typedef struct B288PBProfile {
     const char *description;
     const char *ram_id;
     uint64_t ram_size;
-    uint32_t width, height, rotation;
+    uint32_t width, height, rotation, color_filter;
     uint16_t touch_width, touch_height;
     unsigned pmic_wakeup, pmic_powerup, pmic_powergood, pmic_irq;
     unsigned page_next, page_previous;
@@ -251,6 +251,7 @@ static void b288_pb_init(MachineState *machine)
     qdev_prop_set_uint32(s->soc->display, "width", p->width);
     qdev_prop_set_uint32(s->soc->display, "height", p->height);
     qdev_prop_set_uint32(s->soc->display, "rotation", p->rotation);
+    qdev_prop_set_uint32(s->soc->display, "color-filter", p->color_filter);
     sysbus_realize(SYS_BUS_DEVICE(s->soc), &error_fatal);
     memory_region_add_subregion(get_system_memory(), AW_B288_SDRAM_BASE,
                                  machine->ram);

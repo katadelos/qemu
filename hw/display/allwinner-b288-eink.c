@@ -30,7 +30,7 @@ struct AwB288EinkState {
     uint32_t de[DE_SIZE / 4];
     uint32_t tcon[TCON_SIZE / 4];
     uint32_t eink[EINK_SIZE / 4];
-    uint32_t width, height, rotation, panel_size;
+    uint32_t width, height, rotation, color_filter, panel_size;
     uint8_t *panel;
     uint32_t pending;
     bool dirty;
@@ -38,6 +38,54 @@ struct AwB288EinkState {
     QEMUTimer *frame_timer, *decode_timer;
     qemu_irq tcon_irq, de_irq, eink_irq;
 };
+
+static unsigned b288_eink_color_channel(AwB288EinkState *s, unsigned x,
+                                        unsigned y)
+{
+    if (s->color_filter == 1) {
+        /* Original Kaleido, from the vendor's colormask 1 table. */
+        return (x / 3 + y) % 3;
+    }
+    /* Kaleido Plus: the channel bits of the vendor's colormask 2 table.
+     * The other bits supply software dithering before EINK indexing; the
+     * optical filter has the following six-column, two-row period.
+     */
+    static const uint8_t channels[2][6] = {
+        { 1, 2, 2, 0, 0, 1 },
+        { 0, 0, 1, 1, 2, 2 },
+    };
+    return channels[y & 1][x % 6];
+}
+
+static uint32_t b288_eink_color_pixel(AwB288EinkState *s, unsigned x,
+                                     unsigned y)
+{
+    unsigned sum[3] = { 0 }, weight[3] = { 0 };
+    unsigned cx = x, cy = y;
+
+    if (s->color_filter == 1) {
+        /* Kaleido needs three distinct rows to sample every channel. */
+        cx = CLAMP(x, 1, s->width - 2);
+        cy = CLAMP(y, 1, s->height - 2);
+    }
+
+    /* Reconstruct RGB from the actual, individually driven filter pixels.
+     * A three-by-three neighbourhood contains all three channels. Keep
+     * filtering in panel coordinates so display rotation does not alter it.
+     */
+    for (int oy = -1; oy <= 1; oy++) {
+        unsigned sy = CLAMP((int)cy + oy, 0, (int)s->height - 1);
+        for (int ox = -1; ox <= 1; ox++) {
+            unsigned sx = CLAMP((int)cx + ox, 0, (int)s->width - 1);
+            unsigned channel = b288_eink_color_channel(s, sx, sy);
+            unsigned w = (ox ? 1 : 2) * (oy ? 1 : 2);
+            sum[channel] += s->panel[sy * s->width + sx] * w;
+            weight[channel] += w;
+        }
+    }
+    return rgb_to_pixel32(sum[0] / weight[0], sum[1] / weight[1],
+                          sum[2] / weight[2]);
+}
 
 static void b288_eink_update_irq(AwB288EinkState *s)
 {
@@ -59,6 +107,8 @@ static void b288_eink_draw(void *opaque)
         for (unsigned x = 0; x < s->width; x++) {
             unsigned dx = x, dy = y;
             uint8_t grey = s->panel[y * s->width + x];
+            uint32_t pixel = s->color_filter ? b288_eink_color_pixel(s, x, y) :
+                                              rgb_to_pixel32(grey, grey, grey);
             if (s->rotation == 90) {
                 dx = s->height - y - 1;
                 dy = x;
@@ -69,8 +119,7 @@ static void b288_eink_draw(void *opaque)
                 dx = s->width - x - 1;
                 dy = s->height - y - 1;
             }
-            stl_he_p(pixels + dy * stride + dx * 4,
-                      rgb_to_pixel32(grey, grey, grey));
+            stl_he_p(pixels + dy * stride + dx * 4, pixel);
         }
     }
     dpy_gfx_update(s->console, 0, 0, surface_width(surface), surface_height(surface));
@@ -234,8 +283,11 @@ static void b288_eink_realize(DeviceState *dev, Error **errp)
 {
     AwB288EinkState *s = AW_B288_EINK(dev);
     if (!s->width || !s->height || s->width > 4096 || s->height > 4096 ||
-        (s->rotation != 0 && s->rotation != 90 && s->rotation != 180 && s->rotation != 270)) {
-        error_setg(errp, "B288 EINK requires valid panel dimensions and rotation");
+        (s->rotation != 0 && s->rotation != 90 && s->rotation != 180 && s->rotation != 270) ||
+        s->color_filter > 2 ||
+        (s->color_filter == 1 && (s->width < 3 || s->height < 3)) ||
+        (s->color_filter == 2 && (s->width < 2 || s->height < 2))) {
+        error_setg(errp, "B288 EINK requires valid panel dimensions, rotation and color filter");
         return;
     }
     s->panel_size = s->width * s->height;
@@ -275,6 +327,7 @@ static const Property b288_eink_properties[] = {
     DEFINE_PROP_UINT32("width", AwB288EinkState, width, 0),
     DEFINE_PROP_UINT32("height", AwB288EinkState, height, 0),
     DEFINE_PROP_UINT32("rotation", AwB288EinkState, rotation, 0),
+    DEFINE_PROP_UINT32("color-filter", AwB288EinkState, color_filter, 0),
 };
 
 static void b288_eink_class_init(ObjectClass *oc, const void *data)
