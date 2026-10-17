@@ -105,6 +105,7 @@ struct AwSdHostState {
     uint32_t fifo_wlevel;       /**< FIFO Water Level */
     uint32_t fifo_func_sel;     /**< FIFO Function Select */
     uint32_t debug_enable;      /**< Debug Enable */
+    uint32_t crc_detect_ctl;    /**< CRC status detection timing */
     uint32_t auto12_arg;        /**< Auto Command 12 Argument */
     uint32_t newtiming_set;     /**< SD New Timing Set */
     uint32_t newtiming_debug;   /**< SD New Timing Debug */
@@ -114,6 +115,7 @@ struct AwSdHostState {
     uint32_t dmac_status;       /**< Internal DMA Controller Status */
     uint32_t dmac_irq;          /**< Internal DMA Controller IRQ Enable */
     uint32_t card_threshold;    /**< Card Threshold Control */
+    uint32_t startbit_filter;   /**< Start-bit filter control */
     uint32_t startbit_detect;   /**< eMMC DDR Start Bit Detection Control */
     uint32_t response_crc;      /**< Response CRC */
     uint32_t data_crc[8];       /**< Data CRC */

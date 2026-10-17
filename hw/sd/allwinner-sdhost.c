@@ -57,6 +57,7 @@ enum {
     REG_SD_FWLR       = 0x40,  /* FIFO Water Level */
     REG_SD_FUNS       = 0x44,  /* FIFO Function Select */
     REG_SD_DBGC       = 0x50,  /* Debug Enable */
+    REG_SD_CSDC       = 0x54,  /* CRC Status Detect Control */
     REG_SD_A12A       = 0x58,  /* Auto command 12 argument */
     REG_SD_NTSR       = 0x5C,  /* SD NewTiming Set */
     REG_SD_SDBG       = 0x60,  /* SD newTiming Set Debug */
@@ -66,6 +67,7 @@ enum {
     REG_SD_IDST       = 0x88,  /* Internal DMA Controller Status */
     REG_SD_IDIE       = 0x8C,  /* Internal DMA Controller IRQ Enable */
     REG_SD_THLDC      = 0x100, /* Card Threshold Control / FIFO (sun4i only)*/
+    REG_SD_SFC        = 0x104, /* Start-bit Filter Control */
     REG_SD_DSBD       = 0x10C, /* eMMC DDR Start Bit Detection Control */
     REG_SD_RES_CRC    = 0x110, /* Response CRC from card/eMMC */
     REG_SD_DATA7_CRC  = 0x114, /* CRC Data 7 from card/eMMC */
@@ -526,6 +528,9 @@ static uint64_t allwinner_sdhost_read(void *opaque, hwaddr offset,
     case REG_SD_DBGC:      /* Debug Enable */
         res = s->debug_enable;
         break;
+    case REG_SD_CSDC:
+        res = s->crc_detect_ctl;
+        break;
     case REG_SD_A12A:      /* Auto command 12 argument */
         res = s->auto12_arg;
         break;
@@ -559,6 +564,9 @@ static uint64_t allwinner_sdhost_read(void *opaque, hwaddr offset,
         break;
     case REG_SD_DSBD:      /* eMMC DDR Start Bit Detection Control */
         res = s->startbit_detect;
+        break;
+    case REG_SD_SFC:
+        res = s->startbit_filter;
         break;
     case REG_SD_RES_CRC:   /* Response CRC from card/eMMC */
         res = s->response_crc;
@@ -694,6 +702,9 @@ static void allwinner_sdhost_write(void *opaque, hwaddr offset,
     case REG_SD_DBGC:      /* Debug Enable */
         s->debug_enable = value;
         break;
+    case REG_SD_CSDC:
+        s->crc_detect_ctl = value;
+        break;
     case REG_SD_A12A:      /* Auto command 12 argument */
         s->auto12_arg = value;
         break;
@@ -730,6 +741,9 @@ static void allwinner_sdhost_write(void *opaque, hwaddr offset,
         break;
     case REG_SD_DSBD:      /* eMMC DDR Start Bit Detection Control */
         s->startbit_detect = value;
+        break;
+    case REG_SD_SFC:
+        s->startbit_filter = value;
         break;
     case REG_SD_FIFO:      /* Read/Write FIFO */
         allwinner_sdhost_fifo_write(s, value);
@@ -795,8 +809,8 @@ static const MemoryRegionOps allwinner_sdhost_ops = {
 
 static const VMStateDescription vmstate_allwinner_sdhost = {
     .name = "allwinner-sdhost",
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(global_ctl, AwSdHostState),
         VMSTATE_UINT32(clock_ctl, AwSdHostState),
@@ -814,6 +828,7 @@ static const VMStateDescription vmstate_allwinner_sdhost = {
         VMSTATE_UINT32(fifo_wlevel, AwSdHostState),
         VMSTATE_UINT32(fifo_func_sel, AwSdHostState),
         VMSTATE_UINT32(debug_enable, AwSdHostState),
+        VMSTATE_UINT32(crc_detect_ctl, AwSdHostState),
         VMSTATE_UINT32(auto12_arg, AwSdHostState),
         VMSTATE_UINT32(newtiming_set, AwSdHostState),
         VMSTATE_UINT32(newtiming_debug, AwSdHostState),
@@ -823,6 +838,7 @@ static const VMStateDescription vmstate_allwinner_sdhost = {
         VMSTATE_UINT32(dmac_status, AwSdHostState),
         VMSTATE_UINT32(dmac_irq, AwSdHostState),
         VMSTATE_UINT32(card_threshold, AwSdHostState),
+        VMSTATE_UINT32(startbit_filter, AwSdHostState),
         VMSTATE_UINT32(startbit_detect, AwSdHostState),
         VMSTATE_UINT32(response_crc, AwSdHostState),
         VMSTATE_UINT32_ARRAY(data_crc, AwSdHostState, 8),
@@ -891,6 +907,7 @@ static void allwinner_sdhost_reset(DeviceState *dev)
     s->fifo_wlevel = REG_SD_FWLR_RST;
     s->fifo_func_sel = REG_SD_FUNS_RST;
     s->debug_enable = REG_SD_DBGC_RST;
+    s->crc_detect_ctl = 0;
     s->auto12_arg = REG_SD_A12A_RST;
     s->newtiming_set = REG_SD_NTSR_RST;
     s->newtiming_debug = REG_SD_SDBG_RST;
@@ -900,6 +917,7 @@ static void allwinner_sdhost_reset(DeviceState *dev)
     s->dmac_status = REG_SD_IDST_RST;
     s->dmac_irq = REG_SD_IDIE_RST;
     s->card_threshold = REG_SD_THLDC_RST;
+    s->startbit_filter = 0;
     s->startbit_detect = REG_SD_DSBD_RST;
     s->response_crc = REG_SD_RES_CRC_RST;
 
