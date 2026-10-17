@@ -46,6 +46,10 @@ config CY8C_SLIDER
     bool
     select I2C
 
+config MSG2133
+    bool
+    select I2C
+
 config KOBO_MSP430
     bool
     select I2C
