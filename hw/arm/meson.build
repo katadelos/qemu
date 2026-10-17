@@ -139,3 +139,5 @@ arm_common_ss.add(when: 'CONFIG_IMX6SLL_JAEGER', if_true: files('imx6sll-jaeger.
 arm_common_ss.add(when: 'CONFIG_IMX7D_STINGER', if_true: files('imx7d-stinger.c'))
 
 arm_common_ss.add(when: 'CONFIG_IMX6SL_REMARKABLE1', if_true: files('imx6sl-remarkable1.c'))
+
+arm_common_ss.add(when: 'CONFIG_IMX7D_REMARKABLE2', if_true: files('imx7d-remarkable2.c'))
