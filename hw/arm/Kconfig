@@ -589,6 +589,7 @@ config ALLWINNER_B288_POCKETBOOK
     bool
     default y if TCG && ARM
     select ALLWINNER_B288
+    select XRADIO_SDIO
     select AXP2XX_PMU
     select NEONODE_ZFORCE
     select CYTTSP5

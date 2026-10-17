@@ -18,6 +18,7 @@
 #include "hw/i2c/elan-ktf2k.h"
 #include "hw/i2c/zforce.h"
 #include "migration/vmstate.h"
+#include "net/net.h"
 #include "system/address-spaces.h"
 #include "system/blockdev.h"
 #include "system/reset.h"
@@ -263,6 +264,14 @@ static void b288_pb_init(MachineState *machine)
                 &error_fatal);
         }
     }
+    DeviceState *wifi = qdev_new("xradio-sdio");
+    qemu_configure_nic_device(wifi, true, "xradio");
+    qdev_realize_and_unref(wifi,
+        qdev_get_child_bus(DEVICE(&s->soc->mmc[1]), "sd-bus"), &error_fatal);
+    qdev_connect_gpio_out_named(DEVICE(s->soc), "wlan-power", 0,
+        qdev_get_gpio_in_named(wifi, "power", 0));
+    qdev_connect_gpio_out_named(wifi, "irq", 0,
+        qdev_get_gpio_in(DEVICE(&s->soc->gic), 107));
     i2c_slave_create_simple(s->soc->i2c[0].bus, "axp227_pmu", 0x34);
     DeviceState *pmic = qdev_new(TYPE_TPS65185);
     qdev_prop_set_bit(pmic, "gpio-rails", true);
