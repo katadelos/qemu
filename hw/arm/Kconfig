@@ -310,6 +310,20 @@ config IMX6SL_KOBO_GLO_HD
     select KOBO_NTX_PMIC
     select KOBO_NTX_BUTTONS
 
+config IMX6SL_POCKETBOOK_650
+    bool
+    default y
+    depends on TCG && ARM
+    select FSL_IMX6
+    select IMX6SL_MMDC
+    select IMX6SL_IOMUXC
+    select IMX6SLL_OCOTP
+    select NEONODE_ZFORCE
+    select MSG2133
+    select SPLIT_IRQ
+    select SD
+    select BCM4343W_SDIO
+
 config MT8115_PA6_CS8
     bool
     select WACOM_EMR
