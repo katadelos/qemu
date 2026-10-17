@@ -1,5 +1,5 @@
 /*
- * FocalTech classic I2C touchscreens.
+ * FocalTech FT3518, FT5436, FT5726 and FT6336 classic I2C touchscreens.
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "qemu/osdep.h"
@@ -276,6 +276,14 @@ static void ft5726_class_init(ObjectClass *oc, const void *data)
     klass->chip_id_low = 0x22;
 }
 
+static void ft3518_class_init(ObjectClass *oc, const void *data)
+{
+    FT5436Class *klass = FT5436_CLASS(oc);
+
+    klass->chip_id = 0x54;
+    klass->chip_id_low = 0x52;
+}
+
 static void ft6336_class_init(ObjectClass *oc, const void *data)
 {
     FT5436Class *klass = FT5436_CLASS(oc);
@@ -291,6 +299,10 @@ static const TypeInfo ft5436_types[] = {
         .class_size = sizeof(FT5436Class),
         .instance_init = ft5436_init,
         .class_init = ft5436_class_init,
+    }, {
+        .name = "ft3518",
+        .parent = TYPE_FT5436,
+        .class_init = ft3518_class_init,
     }, {
         .name = "ft5726",
         .parent = TYPE_FT5436,
