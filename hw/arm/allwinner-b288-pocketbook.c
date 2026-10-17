@@ -461,6 +461,21 @@ static const B288PBProfile pb740_2_profile = {
     .touch_invert_x = true,
 };
 
+static const B288PBProfile pb741_profile = {
+    .description = "PocketBook InkPad Color (741, Allwinner B288)",
+    .ram_id = "pb741.ram",
+    .ram_size = 1 * GiB,
+    .width = 1872, .height = 1404, .rotation = 90,
+    .color_filter = 2,
+    .touch_width = 1872, .touch_height = 1404,
+    .pmic_wakeup = 3 * 32 + 7, .pmic_powerup = 3 * 32 + 6,
+    .pmic_powergood = 3 * 32 + 26, .pmic_irq = 3 * 32 + 25,
+    .page_next = 32 + 11, .page_previous = 32 + 14,
+    .home_mv = 500,
+    .touch_swap_axes = true,
+    .touch_invert_x = true,
+};
+
 static const B288PBProfile pb1040_profile = {
     .description = "PocketBook InkPad X (1040, Allwinner B288)",
     .ram_id = "pb1040.ram",
@@ -538,6 +553,11 @@ static const TypeInfo b288_pb_types[] = {
         .parent = TYPE_B288PB_MACHINE,
         .class_init = b288_pb_class_init,
         .class_data = &pb740_2_profile,
+    }, {
+        .name = MACHINE_TYPE_NAME("allwinner-b288-pocketbook-741"),
+        .parent = TYPE_B288PB_MACHINE,
+        .class_init = b288_pb_class_init,
+        .class_data = &pb741_profile,
     }, {
         .name = MACHINE_TYPE_NAME("allwinner-b288-pocketbook-970"),
         .parent = TYPE_B288PB_MACHINE,
