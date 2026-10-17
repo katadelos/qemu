@@ -165,3 +165,7 @@ config BD71815
 config SY7636
     bool
     select I2C
+
+config MAX77818
+    bool
+    select I2C

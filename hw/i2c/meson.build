@@ -70,4 +70,5 @@ i2c_ss.add(when: 'CONFIG_REMARKABLE_PMIC', if_true: files('remarkable-pmic.c'))
 
 
 i2c_ss.add(when: 'CONFIG_SY7636', if_true: files('sy7636.c'))
+i2c_ss.add(when: 'CONFIG_MAX77818', if_true: files('max77818.c'))
 system_ss.add_all(when: 'CONFIG_I2C', if_true: i2c_ss)
