@@ -12,6 +12,7 @@
 #define MMDC_SIZE   0x4000
 #define MDCTL       0x0000
 #define MDSCR       0x001c
+#define MDREF       0x0020
 #define MDMISC      0x0018
 #define MDMRR       0x0034
 #define MAPSR       0x0404
@@ -20,6 +21,7 @@
 #define MDSCR_CON_REQ   (1U << 15)
 #define MDSCR_CON_ACK   (1U << 14)
 #define MDSCR_MRR_VALID (1U << 10)
+#define MDREF_REF_ONE   (1U << 0)
 #define MAPSR_DVFS      (1U << 21)
 #define MAPSR_DVACK     (1U << 25)
 #define MAPSR_PSS       (1U << 4)
@@ -63,7 +65,10 @@ static void imx6sl_mmdc_write(void *opaque, hwaddr offset, uint64_t value,
 {
     IMX6SLMMDCState *s = opaque;
 
-    if (offset == MPMUR0) {
+    if (offset == MDREF) {
+        /* The requested one-shot refresh completes synchronously. */
+        value &= ~MDREF_REF_ONE;
+    } else if (offset == MPMUR0) {
         /*
          * FRC_MSR starts a PHY measurement and self-clears when it is done.
          * The SoloLite IRAM DDR-frequency routine polls this bit with caches
