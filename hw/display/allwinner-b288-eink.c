@@ -99,14 +99,17 @@ static void b288_eink_decode_done(void *opaque)
     if (w == s->width && h == s->height && pitch >= w &&
         source >= 0x40000000 && source + (uint64_t)pitch * h <= 0x80000000) {
         g_autofree uint8_t *row = g_malloc(w);
+        bool changed = false;
         for (unsigned y = 0; y < h; y++) {
             address_space_read(&address_space_memory, source + (uint64_t)pitch * y,
                                 MEMTXATTRS_UNSPECIFIED, row, w);
             for (unsigned x = 0; x < w; x++) {
-                s->panel[y * w + x] = s->pending == 1 ? (row[x] & 15) * 17 : row[x];
+                uint8_t grey = s->pending == 1 ? (row[x] & 15) * 17 : row[x];
+                changed |= s->panel[y * w + x] != grey;
+                s->panel[y * w + x] = grey;
             }
         }
-        s->dirty = true;
+        s->dirty |= changed;
         b288_eink_draw(s);
     }
     s->eink[1] |= s->pending;
