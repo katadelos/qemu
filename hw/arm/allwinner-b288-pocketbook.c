@@ -389,6 +389,18 @@ static const B288PBProfile pb740_2_profile = {
     .touch_invert_x = true,
 };
 
+static const B288PBProfile pb1040_profile = {
+    .description = "PocketBook InkPad X (1040, Allwinner B288)",
+    .ram_id = "pb1040.ram",
+    .ram_size = 1 * GiB,
+    .width = 1872, .height = 1404, .rotation = 90,
+    /* Touch type 20 uses portrait coordinates with identity calibration. */
+    .touch_width = 1404, .touch_height = 1872,
+    .pmic_wakeup = 3 * 32 + 7, .pmic_powerup = 3 * 32 + 6,
+    .pmic_powergood = 3 * 32 + 26, .pmic_irq = 3 * 32 + 25,
+    .page_next = 32 + 11, .page_previous = 32 + 14,
+};
+
 static const TypeInfo b288_pb_types[] = {
     {
         .name = TYPE_B288PB_BUTTONS,
@@ -423,6 +435,11 @@ static const TypeInfo b288_pb_types[] = {
         .parent = TYPE_B288PB_MACHINE,
         .class_init = b288_pb_class_init,
         .class_data = &pb740_2_profile,
+    }, {
+        .name = MACHINE_TYPE_NAME("allwinner-b288-pocketbook-1040"),
+        .parent = TYPE_B288PB_MACHINE,
+        .class_init = b288_pb_class_init,
+        .class_data = &pb1040_profile,
     },
 };
 
