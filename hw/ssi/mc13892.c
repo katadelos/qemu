@@ -30,8 +30,13 @@
 #define MC13892_REG_RTCDAYA     23
 #define MC13892_REG_ADC1       44
 #define MC13892_REG_ADC2       45
+#define MC13892_REG_ADC4       47
 #define MC13892_REG_MASK        0x00ffffff
+#define MC13892_ADC1_ADCCAL     BIT(2)
 #define MC13892_ADC1_ASC        0x00100000
+#define MC13892_ADC1_BIS        BIT(23)
+#define MC13892_ADCDONE         BIT(0)
+#define MC13892_ADCBISDONE      BIT(1)
 #define MC13892_ADC_BATT_RAW    832
 #define MC13892_TODA            (1U << 1)
 #define MC13892_PWRON1          (1U << 3)
@@ -214,9 +219,17 @@ static void mc13892_write_register(MC13892State *s, uint8_t reg,
     }
 
     if (reg == MC13892_REG_ADC1 && (value & MC13892_ADC1_ASC)) {
-        /* Complete the single battery-voltage conversion immediately. */
-        s->regs[MC13892_REG_ADC1] &= ~MC13892_ADC1_ASC;
-        s->regs[MC13892_REG_ADC2] = MC13892_ADC_BATT_RAW << 2;
+        bool bis = value & MC13892_ADC1_BIS;
+        unsigned result_reg = bis ? MC13892_REG_ADC4 : MC13892_REG_ADC2;
+
+        /* Complete both ADC result lanes. The secondary converter uses
+         * ADC4 and ADCBISDONE rather than the primary ADC2/ADCDONE pair. */
+        s->regs[MC13892_REG_ADC1] &= ~(MC13892_ADC1_ASC |
+                                       MC13892_ADC1_ADCCAL);
+        s->regs[result_reg] = (MC13892_ADC_BATT_RAW << 2) |
+                              (MC13892_ADC_BATT_RAW << 14);
+        s->regs[MC13892_REG_INT_STAT0] |= bis ? MC13892_ADCBISDONE :
+                                               MC13892_ADCDONE;
     }
     mc13892_update_irq(s);
 }
