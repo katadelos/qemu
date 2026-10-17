@@ -2532,9 +2532,9 @@ static void mt8113_usb_link_changed(NetClientState *nc)
     qemu_set_irq(usb->vbus, !nc->link_down);
     mt8113_usb_disconnect(usb);
     if (nc->link_down) {
-        /* MTU3 enables RESET, not DISCONN, in high-speed device mode.
-         * A bus reset tears down ECM endpoints and lowers usb0 carrier. */
-        usb->mac_regs[MT8113_USB_COMMON_ISR / 4] |= MT8113_USB_RESET;
+        usb->mac_regs[MT8113_USB_DEVICE_CONF / 4] &= ~7U;
+        usb->mac_regs[MT8113_USB_DEV_LINK_ISR / 4] |=
+            MT8113_USB_SPEED_CHANGE;
         mt8113_usb_update_irq(usb);
     } else if (mt8113_usb_connected(usb)) {
         timer_mod(usb->config_timer,
