@@ -102,3 +102,8 @@ xradio_hif(bool write, unsigned reg, uint32_t base, unsigned length, uint32_t va
 xradio_wsm(bool tx, unsigned id, unsigned length) "tx=%d id=0x%04x len=%u"
 xradio_frame(bool tx, uint16_t fc, unsigned length) "tx=%d fc=0x%04x len=%u"
 xradio_power(bool on) "on=%d"
+
+# aic8800-sdio.c
+aic8800_command(unsigned cmd, uint32_t arg) "CMD%u arg=0x%08x"
+aic8800_message(bool tx, unsigned function, unsigned id, unsigned length) "tx=%d fn=%u id=0x%04x len=%u"
+aic8800_power(bool on) "on=%d"
