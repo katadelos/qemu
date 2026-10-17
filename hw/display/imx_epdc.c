@@ -368,7 +368,8 @@ static void imx_epdc_complete_luts(void *opaque)
 
     /* The working buffer is released before the panel waveform finishes.
      * Keep those completions separate even if the guest handles WB slowly. */
-    if (*epdc_reg(s, EPDC_IRQ) & EPDC_IRQ_WB_CMPLT) {
+    if (*epdc_reg(s, EPDC_IRQ) & *epdc_reg(s, EPDC_IRQ_MASK) &
+        EPDC_IRQ_WB_CMPLT) {
         timer_mod(s->lut_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1);
         return;
     }
