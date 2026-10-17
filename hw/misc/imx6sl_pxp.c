@@ -549,6 +549,7 @@ static void imx6sl_pxp_write(void *opaque, hwaddr offset, uint64_t value,
         memset(s->regs, 0, sizeof(s->regs));
         s->regs[PXP_VERSION >> 2] = 0x02000000;
         s->regs[PXP_CTRL >> 2] = CTRL_SFTRST | CTRL_CLKGATE;
+        s->regs[PXP_LUT_CTRL >> 2] = LUT_BYPASS;
         s->running = false;
         qemu_set_irq(s->irq, 0);
         return;
@@ -583,6 +584,10 @@ static void imx6sl_pxp_reset(DeviceState *dev)
     memset(s->regs, 0, sizeof(s->regs));
     memset(s->lut, 0, sizeof(s->lut));
     s->regs[PXP_VERSION >> 2] = 0x02000000;
+    /* The DMA driver caches LUT_NONE from probe and can skip its first LUT
+     * write. Start with the lookup stage bypassed rather than mapping every
+     * gray sample through uninitialized lookup RAM. */
+    s->regs[PXP_LUT_CTRL >> 2] = LUT_BYPASS;
     s->lut_addr = 0;
     s->running = false;
     s->control_offset = PXP_CTRL;
