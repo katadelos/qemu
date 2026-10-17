@@ -42,6 +42,10 @@ config GOODIX_GT813
     bool
     select I2C
 
+config CY8C_SLIDER
+    bool
+    select I2C
+
 config KOBO_MSP430
     bool
     select I2C
