@@ -199,6 +199,7 @@ static void imx_gpt_compute_next_timeout(IMXGPTState *s, bool event)
 {
     uint32_t timeout = GPT_TIMER_MAX;
     uint32_t count;
+    uint32_t event_int = s->next_int;
     long long limit;
 
     if (!(s->cr & GPT_CR_EN)) {
@@ -209,12 +210,19 @@ static void imx_gpt_compute_next_timeout(IMXGPTState *s, bool event)
     /* update the count */
     count = imx_gpt_update_count(s);
 
+    /* The countdown can expire after MMIO entry synchronization. */
+    if (!event && event_int && count == s->next_timeout) {
+        s->sr |= event_int;
+        event = true;
+        imx_gpt_update_int(s);
+    }
+
     if (event) {
         /*
-         * This is an event (the ptimer reached 0 and stopped), and the
-         * timer counter is now equal to s->next_timeout.
+         * Process the scheduled compare or rollover before finding the
+         * following deadline, including an expiry observed by MMIO.
          */
-        if (!(s->cr & GPT_CR_FRR) && (count == s->ocr1)) {
+        if (!(s->cr & GPT_CR_FRR) && (event_int & GPT_SR_OF1)) {
             /* We are in restart mode and we crossed the compare channel 1
              * value. We need to reset the counter to 0.
              */
@@ -263,7 +271,7 @@ static void imx_gpt_compute_next_timeout(IMXGPTState *s, bool event)
          */
         s->sr |= s->next_int;
 
-        imx_gpt_compute_next_timeout(s, event);
+        imx_gpt_compute_next_timeout(s, true);
 
         imx_gpt_update_int(s);
     } else {
@@ -275,10 +283,33 @@ static void imx_gpt_compute_next_timeout(IMXGPTState *s, bool event)
     }
 }
 
+static void imx_gpt_timeout(void *opaque);
+
+static void imx_gpt_sync(IMXGPTState *s)
+{
+    /*
+     * A vCPU can access the registers after the countdown has expired but
+     * before the main loop runs the timer callback. Latch that old event
+     * before changing OCR/IR (or acknowledging SR): otherwise rescheduling
+     * at count == next_timeout discards its pending compare and IRQ.
+     *
+     * Only the scheduled event is due here. An OCR programmed behind CNT
+     * must still wait for the counter to wrap, as on the hardware.
+     */
+    if ((s->cr & GPT_CR_EN) && s->freq && s->next_int &&
+        ptimer_get_count(s->timer) == 0) {
+        ptimer_transaction_begin(s->timer);
+        imx_gpt_timeout(s);
+        ptimer_transaction_commit(s->timer);
+    }
+}
+
 static uint64_t imx_gpt_read(void *opaque, hwaddr offset, unsigned size)
 {
     IMXGPTState *s = IMX_GPT(opaque);
     uint32_t reg_value = 0;
+
+    imx_gpt_sync(s);
 
     switch (offset >> 2) {
     case 0: /* Control Register */
@@ -399,6 +430,8 @@ static void imx_gpt_write(void *opaque, hwaddr offset, uint64_t value,
     IMXGPTState *s = IMX_GPT(opaque);
     uint32_t oldreg;
 
+    imx_gpt_sync(s);
+
     trace_imx_gpt_write(imx_gpt_reg_name(offset >> 2), (uint32_t)value);
 
     switch (offset >> 2) {
@@ -458,6 +491,12 @@ static void imx_gpt_write(void *opaque, hwaddr offset, uint64_t value,
         ptimer_transaction_begin(s->timer);
         /* In non-freerun mode, reset count when this register is written */
         if (!(s->cr & GPT_CR_FRR)) {
+            /* Preserve an old compare reached before the counter reset. */
+            if ((s->cr & GPT_CR_EN) && s->freq && s->next_int &&
+                ptimer_get_count(s->timer) == 0) {
+                s->sr |= s->next_int;
+                imx_gpt_update_int(s);
+            }
             s->next_timeout = GPT_TIMER_MAX;
             ptimer_set_limit(s->timer, GPT_TIMER_MAX, 1);
         }
@@ -502,7 +541,6 @@ static void imx_gpt_timeout(void *opaque)
     trace_imx_gpt_timeout();
 
     s->sr |= s->next_int;
-    s->next_int = 0;
 
     imx_gpt_compute_next_timeout(s, true);
 
