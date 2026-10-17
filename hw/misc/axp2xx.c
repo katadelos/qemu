@@ -31,6 +31,7 @@
 #include "qemu/log.h"
 #include "qom/object.h"
 #include "trace.h"
+#include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/i2c/i2c.h"
 #include "migration/vmstate.h"
@@ -53,6 +54,7 @@ typedef struct AXP2xxI2CState {
     uint8_t ptr;            /* current register index */
     uint8_t count;          /* counter used for tx/rx */
     bool battery_present;
+    qemu_irq ldo3_enable;
 } AXP2xxI2CState;
 
 typedef struct AXP2xxClass {
@@ -60,10 +62,16 @@ typedef struct AXP2xxClass {
     I2CSlaveClass parent_class;
     /*< public >*/
     void (*reset_enter)(AXP2xxI2CState *s, ResetType type);
+    void (*update_outputs)(AXP2xxI2CState *s);
 } AXP2xxClass;
 
 #define AXP209_CHIP_VERSION_ID             (0x01)
 #define AXP209_DC_DC2_OUT_V_CTRL_RESET     (0x16)
+
+static void axp209_update_outputs(AXP2xxI2CState *s)
+{
+    qemu_set_irq(s->ldo3_enable, !!(s->regs[0x12] & BIT(6)));
+}
 
 /* Reset all counters and load ID register */
 static void axp209_reset_enter(AXP2xxI2CState *s, ResetType type)
@@ -182,6 +190,16 @@ static void axp2xx_reset_enter(Object *obj, ResetType type)
     sc->reset_enter(s, type);
 }
 
+static void axp2xx_reset_hold(Object *obj, ResetType type)
+{
+    AXP2xxI2CState *s = AXP2XX(obj);
+    AXP2xxClass *sc = AXP2XX_GET_CLASS(s);
+
+    if (sc->update_outputs) {
+        sc->update_outputs(s);
+    }
+}
+
 static void axp227_reset_enter(AXP2xxI2CState *s, ResetType type)
 {
     axp221_reset_enter(s, type);
@@ -231,16 +249,33 @@ static int axp2xx_tx(I2CSlave *i2c, uint8_t data)
         s->count++;
         trace_axp2xx_select(data);
     } else {
+        AXP2xxClass *sc = AXP2XX_GET_CLASS(s);
+
         trace_axp2xx_tx(s->ptr, data);
         s->regs[s->ptr++] = data;
+        if (sc->update_outputs) {
+            sc->update_outputs(s);
+        }
     }
 
+    return 0;
+}
+
+static int axp2xx_post_load(void *opaque, int version_id)
+{
+    AXP2xxI2CState *s = opaque;
+    AXP2xxClass *sc = AXP2XX_GET_CLASS(s);
+
+    if (sc->update_outputs) {
+        sc->update_outputs(s);
+    }
     return 0;
 }
 
 static const VMStateDescription vmstate_axp2xx = {
     .name = TYPE_AXP2XX,
     .version_id = 1,
+    .post_load = axp2xx_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT8_ARRAY(regs, AXP2xxI2CState, NR_REGS),
         VMSTATE_UINT8(ptr, AXP2xxI2CState),
@@ -256,6 +291,7 @@ static void axp2xx_class_init(ObjectClass *oc, const void *data)
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
     rc->phases.enter = axp2xx_reset_enter;
+    rc->phases.hold = axp2xx_reset_hold;
     dc->vmsd = &vmstate_axp2xx;
     isc->event = axp2xx_event;
     isc->recv = axp2xx_rx;
@@ -271,6 +307,13 @@ static const TypeInfo axp2xx_info = {
     .abstract = true,
 };
 
+static void axp209_init(Object *obj)
+{
+    AXP2xxI2CState *s = AXP2XX(obj);
+
+    qdev_init_gpio_out_named(DEVICE(obj), &s->ldo3_enable, "ldo3-enable", 1);
+}
+
 static void axp209_class_init(ObjectClass *oc, const void *data)
 {
     AXP2xxClass *sc = AXP2XX_CLASS(oc);
@@ -279,12 +322,14 @@ static void axp209_class_init(ObjectClass *oc, const void *data)
     };
 
     sc->reset_enter = axp209_reset_enter;
+    sc->update_outputs = axp209_update_outputs;
     device_class_set_props(DEVICE_CLASS(oc), properties);
 }
 
 static const TypeInfo axp209_info = {
     .name = TYPE_AXP209_PMU,
     .parent = TYPE_AXP2XX,
+    .instance_init = axp209_init,
     .class_init = axp209_class_init
 };
 
