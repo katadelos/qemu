@@ -191,6 +191,8 @@ struct GICv3CPUState {
      * real state above; it doesn't need to be migrated.
      */
     PendingIrq hppi;
+    /* Redistributor wake request, independent of CPU-interface masking. */
+    qemu_irq parent_wakeup;
 
     /*
      * Cached information recalculated from LPI tables

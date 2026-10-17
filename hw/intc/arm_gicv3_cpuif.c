@@ -1069,6 +1069,7 @@ void gicv3_cpuif_update(GICv3CPUState *cs)
      */
     arm_cpu_psci_wakeup(cpu, cs->hppi.prio != 0xff);
 #endif
+    qemu_set_irq(cs->parent_wakeup, cs->hppi.prio != 0xff);
 
     if (cs->hppi.grp == GICV3_G1 && !arm_feature(env, ARM_FEATURE_EL3)) {
         /* If a Security-enabled GIC sends a G1S interrupt to a
