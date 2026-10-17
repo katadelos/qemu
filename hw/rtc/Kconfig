@@ -3,6 +3,11 @@ config DS1338
     depends on I2C
     default y if I2C_DEVICES
 
+config PCF8563
+    bool
+    depends on I2C
+    default y if I2C_DEVICES
+
 config M41T80
     bool
     depends on I2C

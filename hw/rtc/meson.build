@@ -1,5 +1,6 @@
 
 system_ss.add(when: 'CONFIG_DS1338', if_true: files('ds1338.c'))
+system_ss.add(when: 'CONFIG_PCF8563', if_true: files('pcf8563.c'))
 system_ss.add(when: 'CONFIG_M41T80', if_true: files('m41t80.c'))
 system_ss.add(when: 'CONFIG_M48T59', if_true: files('m48t59.c'))
 system_ss.add(when: 'CONFIG_PL031', if_true: files('pl031.c'))
