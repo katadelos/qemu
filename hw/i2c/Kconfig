@@ -34,6 +34,10 @@ config FP9928
     bool
     select I2C
 
+config ELAN_KTF2K
+    bool
+    select I2C
+
 config KOBO_MSP430
     bool
     select I2C
