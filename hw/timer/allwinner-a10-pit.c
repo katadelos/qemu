@@ -133,6 +133,7 @@ static void a10_pit_write(void *opaque, hwaddr offset, uint64_t value,
                 ptimer_stop(s->timer[index]);
             }
             ptimer_transaction_commit(s->timer[index]);
+            s->control[index] &= ~AW_A10_PIT_TIMER_RELOAD;
             break;
         case AW_A10_PIT_TIMER_INTERVAL:
             s->interval[index] = value;
