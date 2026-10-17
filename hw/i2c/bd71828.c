@@ -7,6 +7,8 @@
 #include "migration/vmstate.h"
 #include "qemu/bcd.h"
 #include "qemu/module.h"
+#include "qemu/timer.h"
+#include "system/system.h"
 #include "system/rtc.h"
 #include "system/runstate.h"
 
@@ -23,6 +25,11 @@
 #define BD71828_REG_RTC_DAY          0x50
 #define BD71828_REG_RTC_MONTH        0x51
 #define BD71828_REG_RTC_YEAR         0x52
+#define BD71828_REG_RTC_ALM0         0x53
+#define BD71828_REG_RTC_ALM0_MASK    0x61
+#define BD71828_REG_RTC_ALM1_MASK    0x62
+#define BD71828_REG_INT_RTC         0xeb
+#define BD71828_RTC_ALM_FIELDS      0x7f
 #define BD71828_REG_CHG_STATE        0x65
 #define BD71828_REG_BAT_STAT         0x67
 #define BD71828_REG_DCIN_STAT        0x68
@@ -66,6 +73,7 @@ struct BD71828State {
     uint8_t pointer;
     uint8_t len;
     int64_t rtc_offset;
+    QEMUTimer *alarm_timer;
     qemu_irq gpio_out[3];
     qemu_irq nirq;
     bool power_button_support;
@@ -81,9 +89,6 @@ static void bd71828_update_irq(BD71828State *s)
     static const uint8_t main_bit[12] = { 7, 6, 6, 5, 4, 3, 2, 2, 2, 2, 1, 0 };
     uint8_t pending = 0;
 
-    if (!s->power_button_support) {
-        return;
-    }
     /* rohm-bd71828.c uses mask_invert: one enables an interrupt. */
     for (unsigned i = 0; i < 12; i++) {
         if (s->regs[BD71828_REG_INT_STATUS + i] &
@@ -170,6 +175,47 @@ static void bd71828_rtc_capture(BD71828State *s)
     s->regs[BD71828_REG_RTC_YEAR] = to_bcd(now.tm_year % 100);
 }
 
+static void bd71828_rtc_schedule(BD71828State *s)
+{
+    int64_t now = qemu_clock_get_ms(rtc_clock);
+
+    timer_del(s->alarm_timer);
+    if ((s->regs[BD71828_REG_RTC_ALM0_MASK] |
+         s->regs[BD71828_REG_RTC_ALM1_MASK]) & BD71828_RTC_ALM_FIELDS) {
+        timer_mod(s->alarm_timer, (now / 1000 + 1) * 1000);
+    }
+}
+
+static void bd71828_rtc_alarm(void *opaque)
+{
+    BD71828State *s = opaque;
+    static const uint8_t field_mask[] = { 0x7f, 0x7f, 0x3f, 7,
+                                          0x3f, 0x1f, 0xff };
+
+    bd71828_rtc_capture(s);
+    for (unsigned alarm = 0; alarm < 2; alarm++) {
+        uint8_t enabled = s->regs[BD71828_REG_RTC_ALM0_MASK + alarm] &
+                          BD71828_RTC_ALM_FIELDS;
+        bool match = enabled != 0;
+
+        for (unsigned field = 0; field < ARRAY_SIZE(field_mask); field++) {
+            uint8_t current = s->regs[BD71828_REG_RTC_SEC + field];
+            uint8_t target = s->regs[BD71828_REG_RTC_ALM0 + alarm * 7 + field];
+
+            if ((enabled & BIT(field)) &&
+                ((current ^ target) & field_mask[field])) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            s->regs[BD71828_REG_INT_RTC] |= BIT(alarm);
+        }
+    }
+    bd71828_update_irq(s);
+    bd71828_rtc_schedule(s);
+}
+
 static void bd71828_rtc_commit(BD71828State *s)
 {
     struct tm now;
@@ -193,7 +239,7 @@ static int bd71828_send(I2CSlave *i2c, uint8_t data)
         s->pointer = data;
         return 0;
     }
-    if (s->power_button_support && s->pointer >= BD71828_REG_INT_STATUS &&
+    if (s->pointer >= BD71828_REG_INT_STATUS &&
         s->pointer < BD71828_REG_INT_STATUS + 12) {
         if (s->pointer == BD71828_REG_INT_DCIN2 &&
             (s->regs[s->pointer] & data & BD71828_SHORTPUSH)) {
@@ -201,8 +247,7 @@ static int bd71828_send(I2CSlave *i2c, uint8_t data)
         }
         s->regs[s->pointer] &= ~data;
     } else if (s->pointer != BD71828_REG_ILIM_DCIN_STAT &&
-               (!s->power_button_support ||
-                s->pointer != BD71828_REG_INT_MAIN)) {
+               s->pointer != BD71828_REG_INT_MAIN) {
         s->regs[s->pointer] = data;
     }
     bd71828_update_irq(s);
@@ -225,6 +270,10 @@ static int bd71828_send(I2CSlave *i2c, uint8_t data)
     if (s->pointer >= BD71828_REG_RTC_SEC &&
         s->pointer <= BD71828_REG_RTC_YEAR) {
         bd71828_rtc_commit(s);
+    }
+    if (s->pointer >= BD71828_REG_RTC_SEC &&
+        s->pointer <= BD71828_REG_RTC_ALM1_MASK) {
+        bd71828_rtc_schedule(s);
     }
     s->pointer++;
     return 0;
@@ -264,6 +313,7 @@ static void bd71828_reset(DeviceState *dev)
 {
     BD71828State *s = BD71828(dev);
 
+    timer_del(s->alarm_timer);
     memset(s->regs, 0, sizeof(s->regs));
     s->pointer = 0;
     s->len = 0;
@@ -306,6 +356,7 @@ static void bd71828_init(Object *obj)
 {
     BD71828State *s = BD71828(obj);
 
+    s->alarm_timer = timer_new_ms(rtc_clock, bd71828_rtc_alarm, s);
     qdev_init_gpio_out_named(DEVICE(obj), s->gpio_out, "gpio",
                              ARRAY_SIZE(s->gpio_out));
     qdev_init_gpio_out_named(DEVICE(obj), &s->nirq, "irq", 1);
@@ -320,16 +371,29 @@ static void bd71828_init(Object *obj)
                                     OBJ_PROP_FLAG_READ);
 }
 
+static void bd71828_finalize(Object *obj)
+{
+    timer_free(BD71828(obj)->alarm_timer);
+}
+
+static int bd71828_post_load(void *opaque, int version_id)
+{
+    bd71828_update_irq(opaque);
+    return 0;
+}
+
 static const VMStateDescription bd71828_vmstate = {
     .name = TYPE_BD71828,
-    .version_id = 3,
-    .minimum_version_id = 1,
+    .version_id = 4,
+    .minimum_version_id = 4,
+    .post_load = bd71828_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_I2C_SLAVE(parent_obj, BD71828State),
         VMSTATE_UINT8_ARRAY(regs, BD71828State, 256),
         VMSTATE_UINT8(pointer, BD71828State),
         VMSTATE_UINT8(len, BD71828State),
         VMSTATE_INT64(rtc_offset, BD71828State),
+        VMSTATE_TIMER_PTR(alarm_timer, BD71828State),
         VMSTATE_BOOL_V(power_button, BD71828State, 2),
         VMSTATE_UINT64_V(power_presses, BD71828State, 2),
         VMSTATE_UINT64_V(power_releases, BD71828State, 2),
@@ -362,6 +426,7 @@ static const TypeInfo bd71828_info = {
     .parent = TYPE_I2C_SLAVE,
     .instance_size = sizeof(BD71828State),
     .instance_init = bd71828_init,
+    .instance_finalize = bd71828_finalize,
     .class_init = bd71828_class_init,
 };
 

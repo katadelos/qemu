@@ -740,6 +740,9 @@ static void bellatrix_init(MachineState *machine)
         qdev_prop_set_bit(DEVICE(bd71828), "power-button-support", true);
     }
     i2c_slave_realize_and_unref(bd71828, soc->i2c[1].bus, &error_fatal);
+    qdev_connect_gpio_out_named(DEVICE(bd71828), "irq", 0,
+            qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in", 62));
+
     if (button_support) {
         bms->pmic = OBJECT(bd71828);
         bms->powerdown_notifier.notify = bellatrix_powerdown;
@@ -777,8 +780,6 @@ static void bellatrix_init(MachineState *machine)
     }
 
     if (board->scribe) {
-        qdev_connect_gpio_out_named(DEVICE(bd71828), "irq", 0,
-            qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in", 62));
         I2CSlave *charger = i2c_slave_new(TYPE_BQ25611D, 0x6b);
         object_property_add_child(OBJECT(machine), "charger", OBJECT(charger));
         i2c_slave_realize_and_unref(charger, soc->i2c[0].bus, &error_fatal);
@@ -824,8 +825,6 @@ static void bellatrix_init(MachineState *machine)
     qemu_set_irq(qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in",
                                       board->power_good), 0);
     if (board->prosecco) {
-        qdev_connect_gpio_out_named(DEVICE(bd71828), "irq", 0,
-            qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in", 62));
         /*
          * HWID0 also raises EN_TS while enabling the panel.  All phases
          * toggle it for temperature reads; it must not gate EN or PG.
