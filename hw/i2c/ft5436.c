@@ -276,6 +276,13 @@ static void ft5726_class_init(ObjectClass *oc, const void *data)
     klass->chip_id_low = 0x22;
 }
 
+static void ft6336_class_init(ObjectClass *oc, const void *data)
+{
+    FT5436Class *klass = FT5436_CLASS(oc);
+    klass->chip_id = 0x64;
+    klass->chip_id_low = 0x26;
+}
+
 static const TypeInfo ft5436_types[] = {
     {
         .name = TYPE_FT5436,
@@ -288,6 +295,10 @@ static const TypeInfo ft5436_types[] = {
         .name = "ft5726",
         .parent = TYPE_FT5436,
         .class_init = ft5726_class_init,
+    }, {
+        .name = "ft6336",
+        .parent = TYPE_FT5436,
+        .class_init = ft6336_class_init,
     },
 };
 
