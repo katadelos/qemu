@@ -502,6 +502,7 @@ static void fsl_imx7_realize(DeviceState *dev, Error **errp)
      */
     sysbus_realize(SYS_BUS_DEVICE(&s->snvs), &error_abort);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->snvs), 0, FSL_IMX7_SNVS_HP_ADDR);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->snvs), 0, qdev_get_gpio_in(gic, 4));
 
     /*
      * SRC

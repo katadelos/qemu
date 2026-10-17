@@ -14,6 +14,7 @@
 
 #include "qemu/bitops.h"
 #include "hw/core/sysbus.h"
+#include "qemu/timer.h"
 #include "qom/object.h"
 
 
@@ -21,8 +22,11 @@ enum IMX7SNVSRegisters {
     SNVS_LPCR = 0x38,
     SNVS_LPCR_TOP   = BIT(6),
     SNVS_LPCR_DP_EN = BIT(5),
+    SNVS_LPCR_SRTC_ENV = BIT(0),
+    SNVS_LPCR_LPTA_EN = BIT(1),
     SNVS_LPSRTCMR = 0x050, /* Secure Real Time Counter MSB Register */
     SNVS_LPSRTCLR = 0x054, /* Secure Real Time Counter LSB Register */
+    SNVS_LPTAR = 0x058, /* Low Power Time Alarm Register */
 };
 
 #define TYPE_IMX7_SNVS "imx7.snvs"
@@ -36,6 +40,13 @@ struct IMX7SNVSState {
 
     uint64_t tick_offset;
     uint64_t lpcr;
+    uint32_t lpsr;
+    uint32_t lptar;
+    QEMUTimer alarm_timer;
+    uint32_t gpr[4];
+    bool button_pressed;
+    qemu_irq power_irq;
+    qemu_irq alarm_irq;
 };
 
 #endif /* IMX7_SNVS_H */
