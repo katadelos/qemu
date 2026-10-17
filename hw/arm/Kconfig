@@ -557,6 +557,19 @@ config ALLWINNER_A10
     select UNIMP
     select USB_OHCI_SYSBUS
 
+config ALLWINNER_B288
+    bool
+    select ALLWINNER_A10_PIT
+    select ALLWINNER_I2C
+    select ALLWINNER_SDHOST
+    select ALLWINNER_WDT
+    select ARM_GIC
+    select ARM_TIMER
+    select SERIAL_MM
+    select UNIMP
+    select USB_EHCI_SYSBUS
+    select USB_OHCI_SYSBUS
+
 config ALLWINNER_H3
     bool
     default y
