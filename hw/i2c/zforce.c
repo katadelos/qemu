@@ -480,12 +480,11 @@ static size_t zforce_build_touch_report(ZForceState *s, uint8_t *response,
         response[10] = 100;
     } else {
         /*
-         * Kobolabs neonode.c exposes ABS_X=native Y and
-         * ABS_Y=600-native X and consumes the original seven-byte record.
+         * The stock Touch zforce_i2c driver consumes portrait panel pixels
+         * and reports ABS_X=native Y, ABS_Y=599-native X to userspace.
          */
-        native_x = ZFORCE_WIDTH -
-                   screen_y * ZFORCE_WIDTH / ZFORCE_HEIGHT;
-        native_y = screen_x * ZFORCE_HEIGHT / ZFORCE_WIDTH;
+        native_x = screen_x;
+        native_y = screen_y;
         response[6] = state == 2 ? 0x80 : state;
         response[7] = 0;
         response[8] = 100;
@@ -516,8 +515,8 @@ static int zforce_event(I2CSlave *i2c, enum i2c_event event)
              * present in these scans; returning zero contacts here cancels
              * a normal host tap before its actual button-up arrives.
              */
-            if (!s->input_pressed && s->packed_protocol &&
-                !s->kindle_protocol && !s->kindle_ti_protocol) {
+            if (!s->input_pressed && !s->kindle_protocol &&
+                !s->kindle_ti_protocol) {
                 /* The original Kobo driver parses a contact even when the
                  * count is zero.  Keep idle scans released, not phantom down.
                  */
