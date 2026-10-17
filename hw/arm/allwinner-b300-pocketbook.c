@@ -461,6 +461,16 @@ static const B300PBProfile pb700k3_profile = {
     .page_next = 11 * 32 + 11, .page_previous = 11 * 32 + 12,
 };
 
+static const B300PBProfile pb634k3_profile = {
+    .description = "PocketBook Verse Pro Color (634K3, Allwinner B300)",
+    .ram_id = "pb634k3.ram",
+    .width = 1448, .height = 1072, .rotation = 90,
+    .touch_type = "ft3518",
+    .touch_width = 1448, .touch_height = 1072,
+    .touch_swap_axes = true, .touch_invert_y = true,
+    .page_next = 11 * 32 + 12, .page_previous = 11 * 32 + 11,
+};
+
 static const TypeInfo b300_pb_types[] = {
     {
         .name = TYPE_B300PB_BUTTONS,
@@ -485,6 +495,11 @@ static const TypeInfo b300_pb_types[] = {
         .parent = TYPE_B300PB_MACHINE,
         .class_init = b300_pb_class_init,
         .class_data = &pb700k3_profile,
+    }, {
+        .name = MACHINE_TYPE_NAME("allwinner-b300-pocketbook-634k3"),
+        .parent = TYPE_B300PB_MACHINE,
+        .class_init = b300_pb_class_init,
+        .class_data = &pb634k3_profile,
     },
 };
 DEFINE_TYPES(b300_pb_types)
