@@ -37,6 +37,7 @@
 #define TYPE_AXP2XX     "axp2xx_pmu"
 #define TYPE_AXP209_PMU "axp209_pmu"
 #define TYPE_AXP221_PMU "axp221_pmu"
+#define TYPE_AXP227_PMU "axp227_pmu"
 
 OBJECT_DECLARE_TYPE(AXP2xxI2CState, AXP2xxClass, AXP2XX)
 
@@ -168,6 +169,19 @@ static void axp2xx_reset_enter(Object *obj, ResetType type)
     sc->reset_enter(s, type);
 }
 
+static void axp227_reset_enter(AXP2xxI2CState *s, ResetType type)
+{
+    axp221_reset_enter(s, type);
+    s->regs[0x01] = BIT(5) | BIT(4); /* Battery present and detected. */
+    s->regs[0x58] = 0x50;           /* Thermistor, ambient temperature. */
+    s->regs[0x59] = 0;
+    s->regs[0x78] = 0xe3;           /* 4.0 V at 1.1 mV/LSB. */
+    s->regs[0x79] = 4;
+    s->regs[0xb9] = 0x80 | 85;      /* Valid fuel gauge reading, 85%. */
+    s->regs[0xe4] = 0x80 | 85;
+    s->regs[0xe5] = 0x80 | 85;
+}
+
 /* Handle events from master. */
 static int axp2xx_event(I2CSlave *i2c, enum i2c_event event)
 {
@@ -273,11 +287,23 @@ static const TypeInfo axp221_info = {
     .class_init = axp221_class_init,
 };
 
+static void axp227_class_init(ObjectClass *oc, const void *data)
+{
+    AXP2XX_CLASS(oc)->reset_enter = axp227_reset_enter;
+}
+
+static const TypeInfo axp227_info = {
+    .name = TYPE_AXP227_PMU,
+    .parent = TYPE_AXP2XX,
+    .class_init = axp227_class_init,
+};
+
 static void axp2xx_register_devices(void)
 {
     type_register_static(&axp2xx_info);
     type_register_static(&axp209_info);
     type_register_static(&axp221_info);
+    type_register_static(&axp227_info);
 }
 
 type_init(axp2xx_register_devices);
