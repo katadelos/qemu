@@ -40,6 +40,7 @@ struct IMXEPDCState {
     uint8_t fb_bpp;
     uint8_t fb_scanout_bpp;
     bool fb_follow_pxp;
+    uint16_t landscape_rotation;
     uint32_t regs[IMX_EPDC_MMIO_SIZE / sizeof(uint32_t)];
     bool update_pending;
 };

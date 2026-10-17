@@ -271,12 +271,9 @@ static void imx_epdc_render_update(IMXEPDCState *s)
     }
 
     /*
-     * Icewine's ED060TC1 is scanned by the EPDC in its native 1448x1072
-     * landscape order, while the assembled Kindle is viewed as a 1072x1448
-     * portrait device.  The stock PxP path has already rotated the update
-     * contents into panel order by the time EPDC_UPD_ADDR is programmed.
-     * Present that panel order clockwise to match the physical device.
-     * Portrait-native panels need no additional presentation transform.
+     * PxP supplies updates in native panel order. Boards with landscape
+     * scan order select the rotation that presents their assembled panel
+     * in portrait orientation. Portrait-native panels need no transform.
      */
     rotate_cw = panel_width > panel_height;
     display_width = rotate_cw ? panel_height : panel_width;
@@ -284,14 +281,18 @@ static void imx_epdc_render_update(IMXEPDCState *s)
     surface = imx_epdc_prepare_surface(s, display_width, display_height);
 
     if (rotate_cw) {
-        display_left = panel_height - top - height;
-        display_top = left;
+        display_left = s->landscape_rotation == 90 ?
+            panel_height - top - height : top;
+        display_top = s->landscape_rotation == 90 ?
+            left : panel_width - left - width;
         display_update_width = height;
         display_update_height = width;
         for (y = 0; y < height; y++) {
             for (x = 0; x < width; x++) {
-                unsigned dest_x = panel_height - 1 - (top + y);
-                unsigned dest_y = left + x;
+                unsigned dest_x = s->landscape_rotation == 90 ?
+                    panel_height - 1 - (top + y) : top + y;
+                unsigned dest_y = s->landscape_rotation == 90 ?
+                    left + x : panel_width - 1 - (left + x);
                 uint8_t gray = update[(size_t)y * source_stride + x];
 
                 pixels = (uint32_t *)((uint8_t *)surface_data(surface) +
@@ -629,6 +630,10 @@ static void imx_epdc_realize(DeviceState *dev, Error **errp)
 {
     IMXEPDCState *s = IMX_EPDC(dev);
 
+    if (s->landscape_rotation != 90 && s->landscape_rotation != 270) {
+        error_setg(errp, "EPDC landscape rotation must be 90 or 270 degrees");
+        return;
+    }
     if ((s->fb_addr || s->fb_width || s->fb_height || s->fb_stride) &&
         !imx_epdc_has_framebuffer(s)) {
         error_setg(errp, "invalid EPDC framebuffer configuration");
@@ -668,6 +673,7 @@ static const Property imx_epdc_properties[] = {
     DEFINE_PROP_UINT32("fb-stride", IMXEPDCState, fb_stride, 0),
     DEFINE_PROP_UINT8("fb-bpp", IMXEPDCState, fb_bpp, 1),
     DEFINE_PROP_BOOL("fb-follow-pxp", IMXEPDCState, fb_follow_pxp, false),
+    DEFINE_PROP_UINT16("landscape-rotation", IMXEPDCState, landscape_rotation, 90),
 };
 
 static void imx_epdc_init(Object *obj)
