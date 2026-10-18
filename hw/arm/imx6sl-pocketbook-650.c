@@ -628,6 +628,10 @@ static void pb650_attach_card(FslIMX6State *soc, unsigned unit)
         return;
     }
     card = qdev_new(unit ? TYPE_SD_CARD : TYPE_EMMC);
+    if (!unit) {
+        /* The vendor loader requires byte-addressed capacity from CSD alone. */
+        qdev_prop_set_bit(card, "byte-addressed-sector-count", false);
+    }
     qdev_prop_set_drive_err(card, "drive", blk_by_legacy_dinfo(di), &error_fatal);
     qdev_realize_and_unref(card,
         qdev_get_child_bus(DEVICE(&soc->usdhc[unit]), "sd-bus"), &error_fatal);

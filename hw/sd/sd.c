@@ -173,6 +173,7 @@ struct SDState {
     uint32_t rpmb_data_size;
     bool discard_writes;
     bool emmc_trim;
+    bool byte_addressed_sector_count;
     uint64_t trim_commands;
     uint64_t trim_bytes;
     uint64_t reported_capacity;
@@ -1560,9 +1561,12 @@ static const uint8_t sd_csd_rw_mask[16] = {
 
 static void emmc_set_ext_csd(SDState *sd, uint64_t size)
 {
-    /* Byte-addressed eMMC describes capacity in CSD, with SEC_COUNT zero.
-     * The extended sector count belongs to devices larger than 2 GiB. */
-    uint32_t sectcount = size > 2 * GiB ? size >> HWBLOCK_SHIFT : 0;
+    /* Some byte-addressed cards leave SEC_COUNT zero and describe capacity
+     * only in CSD. Keep it populated by default: Falcon firmware uses this
+     * field even for the Oasis 1's 2 GiB byte-addressed eMMC.
+     */
+    uint32_t sectcount = (size > 2 * GiB || sd->byte_addressed_sector_count) ?
+                         size >> HWBLOCK_SHIFT : 0;
 
     memset(sd->ext_csd, 0, sizeof(sd->ext_csd)); /* FIXME only RW at reset */
 
@@ -4820,6 +4824,8 @@ static const Property sd_properties[] = {
 
 static const Property emmc_properties[] = {
     DEFINE_PROP_BOOL("trim", SDState, emmc_trim, false),
+    DEFINE_PROP_BOOL("byte-addressed-sector-count", SDState,
+                     byte_addressed_sector_count, true),
     DEFINE_PROP_UINT64("boot-partition-size", SDState, boot_part_size, 0),
     DEFINE_PROP_BOOL("boot-partitions-in-memory", SDState,
                      boot_parts_in_memory, false),

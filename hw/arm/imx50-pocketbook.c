@@ -505,6 +505,10 @@ static void pb_attach_card(FslIMX50State *soc, unsigned unit, bool required,
         return;
     }
     card = qdev_new(emmc ? TYPE_EMMC : TYPE_SD_CARD);
+    if (emmc) {
+        /* EP7/EP8 loaders require byte-addressed capacity from CSD alone. */
+        qdev_prop_set_bit(card, "byte-addressed-sector-count", false);
+    }
     qdev_prop_set_drive_err(card, "drive", blk_by_legacy_dinfo(di), &error_fatal);
     qdev_realize_and_unref(card,
         qdev_get_child_bus(DEVICE(&soc->esdhc[unit]), "sd-bus"), &error_fatal);
