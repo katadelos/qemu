@@ -382,20 +382,35 @@ typedef struct MT8113BusProtection {
     hwaddr set;
     hwaddr clear;
     hwaddr status;
+    /* Status bits that do not follow the enable register. */
+    uint32_t unmanaged_status;
 } MT8113BusProtection;
 
+/*
+ * A Kindle Paperwhite 6 (mediatek,mt8512) reads PROTECTEN1 = 0x00030000 and
+ * PROTECTSTA1 = 0xf9dbc914: most STA1 bits are set with no matching enable
+ * bit. Report those, minus the MM and CONSYS bits modelled below. Tolino's
+ * WMT driver spins forever after releasing CONSYS if STA1 reads zero.
+ */
 static const MT8113BusProtection mt8113_bus_protection[] = {
-    { 0x220, 0x2a0, 0x2a4, 0x228 },
-    { 0x250, 0x2a8, 0x2ac, 0x258 },
-    { 0x420, 0x42c, 0x430, 0x428 },
+    { 0x220, 0x2a0, 0x2a4, 0x228, 0 },
+    { 0x250, 0x2a8, 0x2ac, 0x258,
+      0xf9dbc914 & ~(BIT(16) | BIT(17) | BIT(18) | BIT(21)) },
+    { 0x420, 0x42c, 0x430, 0x428, 0 },
 };
 
 static uint64_t mt8113_infrasys_read(void *opaque, hwaddr offset,
                                      unsigned size)
 {
     MT8113State *s = opaque;
+    uint32_t value = s->infrasys_regs[offset / sizeof(uint32_t)];
 
-    return s->infrasys_regs[offset / sizeof(uint32_t)];
+    for (size_t i = 0; i < ARRAY_SIZE(mt8113_bus_protection); i++) {
+        if (offset == mt8113_bus_protection[i].status) {
+            value |= mt8113_bus_protection[i].unmanaged_status;
+        }
+    }
+    return value;
 }
 
 static void mt8113_infrasys_write(void *opaque, hwaddr offset,
