@@ -64,6 +64,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(MT8113State, MT8113)
 #define MT8113_WIFI_ADDR         0x18000000
 #define MT8113_WIFI_SIZE         (1 * MiB)
 #define MT8113_EFUSE_ADDR        0x11c50000
+#define MT8113_CHIPID_ADDR       0x08000000
 #define MT8113_USB_MAC_SIZE      0x2e00
 #define MT8113_USB_IPPC_SIZE     0x0100
 #define MT8113_GIC_DIST_ADDR     0x0c000000
@@ -175,6 +176,7 @@ struct MT8113State {
     MemoryRegion btif_rx_dma_iomem;
     MemoryRegion wifi_iomem;
     MemoryRegion efuse_iomem;
+    MemoryRegion chipid_iomem;
     QEMUTimer *gpt_timer;
     qemu_irq timer_irq;
     int64_t gpt_start_ns;
