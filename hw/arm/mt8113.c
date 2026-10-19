@@ -144,6 +144,9 @@
 #define MT8113_WIFI_FW_READY              (BIT(1) | BIT(2))
 #define MT8113_WIFI_HIF_LPCTL             0x7000
 #define MT8113_WIFI_HIF_DBGCR01           0x7104
+/* CONN_MCU_CONFIG IP version, polled by WMT after CONSYS power-on. */
+#define MT8113_CONN_HW_VER                0xb1010
+#define MT8113_CONN_HW_VER_MT8512         0x10060000
 
 #define MT8113_APMIXED_UNIVPLL2_CON0     0x208
 #define MT8113_APMIXED_UNIVPLL2_CON1     0x20c
@@ -291,6 +294,35 @@ static void mt8113_efuse_write(void *opaque, hwaddr offset,
 static const MemoryRegionOps mt8113_efuse_ops = {
     .read = mt8113_efuse_read,
     .write = mt8113_efuse_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 4,
+        .max_access_size = 4,
+    },
+};
+
+/*
+ * AP chip identification: HW_CODE, HW_SUBCODE, HW_VER and SW_VER. WMT reads
+ * HW_VER after CONSYS power-on and copies it into CONN_MCU_CONFIG. Values as
+ * read from a Kindle Paperwhite 6 (mediatek,mt8110 / mediatek,mt8512).
+ */
+static const uint32_t mt8113_chipid[] = { 0x8512, 0x8a00, 0xca02, 0x0100 };
+
+static uint64_t mt8113_chipid_read(void *opaque, hwaddr offset,
+                                   unsigned size)
+{
+    return mt8113_chipid[offset / sizeof(uint32_t)];
+}
+
+static void mt8113_chipid_write(void *opaque, hwaddr offset,
+                                uint64_t value, unsigned size)
+{
+    /* Chip identification is read-only. */
+}
+
+static const MemoryRegionOps mt8113_chipid_ops = {
+    .read = mt8113_chipid_read,
+    .write = mt8113_chipid_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = {
         .min_access_size = 4,
@@ -1826,6 +1858,18 @@ static uint64_t mt8113_wifi_read(void *opaque, hwaddr offset, unsigned size)
 
     if (offset == MT8113_WIFI_HIF_DBGCR01) {
         return 0;
+    }
+    if (offset == MT8113_CONN_HW_VER) {
+        /*
+         * WMT polls this for 200 ms after CONSYS power-on. Drivers up to at
+         * least Kindle 5.16.3 abandon power-on when it times out, then leak
+         * the BTIF wakeup IRQ and fail every retry.
+         */
+        uint32_t control =
+            s->scpsys_regs[MT8113_SCPSYS_CONSYS_PWR_CTRL / 4];
+        uint32_t on = MT8113_SCPSYS_PWR_ON | MT8113_SCPSYS_PWR_RST_B;
+
+        return (control & on) == on ? MT8113_CONN_HW_VER_MT8512 : 0;
     }
     return s->wifi_regs[offset / sizeof(uint32_t)];
 }
@@ -3848,6 +3892,11 @@ static void mt8113_realize(DeviceState *dev, Error **errp)
     s->efuse_regs[(0x580 / 4) + 2] = 0x20200000;
     memory_region_add_subregion(get_system_memory(), MT8113_EFUSE_ADDR,
                                 &s->efuse_iomem);
+
+    memory_region_init_io(&s->chipid_iomem, OBJECT(s), &mt8113_chipid_ops, s,
+                          "mt8113.chipid", sizeof(mt8113_chipid));
+    memory_region_add_subregion(get_system_memory(), MT8113_CHIPID_ADDR,
+                                &s->chipid_iomem);
 
     for (int i = 0; i < ARRAY_SIZE(s->usbphy); i++) {
         static const hwaddr usbphy_addr[] = {
