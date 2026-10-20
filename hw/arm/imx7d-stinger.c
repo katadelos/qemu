@@ -5,6 +5,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/arm/kindle-idme.h"
 #include "qapi/error.h"
 #include "hw/arm/boot.h"
 #include "hw/arm/fsl-imx7.h"
@@ -763,14 +764,14 @@ static void stinger_set_boot_partitions_file(Object *obj, const char *value,
 static void stinger_machine_instance_init(Object *obj)
 {
     StingerMachineState *rms = STINGER_MACHINE(obj);
+    const KindleIdmeDefaults *idme = kindle_idme_defaults("stinger");
 
-    rms->idme_serial = g_strdup("G000WL0000000000");
-    rms->idme_mac = g_strdup("020000000006");
-    rms->idme_mfg = g_strdup("STINGERQEMU0000000000000");
-    /* PSN v2 prefix is also required by userspace's Wi-Fi-only detection. */
-    rms->idme_pcbsn = g_strdup("P001C70000000000");
-    rms->idme_bootmode = g_strdup("0");
-    rms->idme_postmode = g_strdup("0");
+    rms->idme_serial = g_strdup(idme->serial);
+    rms->idme_mac = g_strdup(idme->mac);
+    rms->idme_mfg = g_strdup(idme->manufacturing);
+    rms->idme_pcbsn = g_strdup(idme->board_id);
+    rms->idme_bootmode = g_strdup(idme->bootmode);
+    rms->idme_postmode = g_strdup(idme->postmode);
 }
 
 static void stinger_machine_instance_finalize(Object *obj)

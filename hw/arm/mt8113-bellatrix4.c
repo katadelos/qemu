@@ -5,6 +5,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/arm/kindle-idme.h"
 #include <libfdt.h>
 #include "hw/arm/mt8113.h"
 #include "hw/arm/machines-qom.h"
@@ -98,10 +99,6 @@ typedef enum Bellatrix4BoardKind {
 typedef struct Bellatrix4Board {
     const char *name;
     Bellatrix4BoardKind kind;
-    const char *serial;
-    const char *manufacturing;
-    const char *product_name;
-    const char *device_type;
 } Bellatrix4Board;
 
 typedef struct Bellatrix4DeviceProfile {
@@ -114,18 +111,9 @@ static const Bellatrix4Board bellatrix4_boards[] = {
     {
         .name = "sangria",
         .kind = BELLATRIX4_BOARD_SANGRIA,
-        .serial = "G003J5000000000",
-        .manufacturing = "PAPERWHITE6QEMU0000",
-        /* Let devcap select the PW12 capability group from the tattoo. */
-        .product_name = "",
-        .device_type = "3J5",
     }, {
         .name = "sangria-color",
         .kind = BELLATRIX4_BOARD_SANGRIA_COLOR,
-        .serial = "G003H9000000000",
-        .manufacturing = "COLOURSOFTQEMU00000",
-        .product_name = "se9_p",
-        .device_type = "3H9",
     },
 };
 
@@ -195,26 +183,28 @@ static void bellatrix4_apply_identity(Bellatrix4MachineState *bms)
     const Bellatrix4Board *board = bellatrix4_find_board(bms->board);
     const Bellatrix4DeviceProfile *profile =
         bellatrix4_find_device_profile(bms->device_profile);
+    const KindleIdmeDefaults *idme = kindle_idme_defaults(board->name);
     const char *tattoo = profile->tattoo[board->kind];
+    g_autofree char *board_id = NULL;
+    g_autofree char *hwid = g_strdup_printf("%u", profile->hwid);
 
     if (!tattoo) {
         error_report("Bellatrix4 device-profile '%s' is not available for "
                      "board '%s'", profile->name, board->name);
         exit(EXIT_FAILURE);
     }
-
-    g_free(bms->idme_board_id);
-    g_free(bms->idme_serial);
-    g_free(bms->idme_mfg);
-    g_free(bms->idme_product_name);
-    g_free(bms->idme_device_type);
-    g_free(bms->idme_hwid);
-    bms->idme_board_id = g_strdup_printf("000%s0000000000", tattoo);
-    bms->idme_serial = g_strdup(board->serial);
-    bms->idme_mfg = g_strdup(board->manufacturing);
-    bms->idme_product_name = g_strdup(board->product_name);
-    bms->idme_device_type = g_strdup(board->device_type);
-    bms->idme_hwid = g_strdup_printf("%u", profile->hwid);
+    board_id = kindle_idme_psn(tattoo);
+    kindle_idme_set_default(&bms->idme_board_id, board_id);
+    kindle_idme_set_default(&bms->idme_serial, idme->serial);
+    kindle_idme_set_default(&bms->idme_mac, idme->mac);
+    kindle_idme_set_default(&bms->idme_mfg, idme->manufacturing);
+    kindle_idme_set_default(&bms->idme_product_name, idme->product_name);
+    kindle_idme_set_default(&bms->idme_device_type, idme->device_type);
+    kindle_idme_set_default(&bms->idme_bootmode, idme->bootmode);
+    kindle_idme_set_default(&bms->idme_postmode, idme->postmode);
+    kindle_idme_set_default(&bms->idme_fos_flags, idme->fos_flags);
+    kindle_idme_set_default(&bms->idme_hwid, hwid);
+    kindle_idme_set_default(&bms->idme_bcm_stress, "");
 }
 
 static void bellatrix4_set_board_identity(Bellatrix4MachineState *bms,
@@ -223,7 +213,6 @@ static void bellatrix4_set_board_identity(Bellatrix4MachineState *bms,
     bellatrix4_find_board(name);
     g_free(bms->board);
     bms->board = g_strdup(name);
-    bellatrix4_apply_identity(bms);
 }
 
 static void bellatrix4_set_device_profile_identity(
@@ -232,7 +221,6 @@ static void bellatrix4_set_device_profile_identity(
     bellatrix4_find_device_profile(name);
     g_free(bms->device_profile);
     bms->device_profile = g_strdup(name);
-    bellatrix4_apply_identity(bms);
 }
 
 /*
@@ -698,6 +686,8 @@ static void bellatrix4_init(MachineState *machine)
     I2CSlave *ft5536g;
     I2CSlave *lis2du12;
 
+    bellatrix4_apply_identity(bms);
+
     if (machine->ram_size > MT8113_RAM_MAX) {
         error_report("Bellatrix4 RAM exceeds the MT8113 2 GiB address map");
         exit(EXIT_FAILURE);
@@ -849,12 +839,6 @@ static void bellatrix4_machine_instance_init(Object *obj)
     bms->boot_stage = g_strdup("u-boot");
     bms->board = g_strdup("sangria");
     bms->device_profile = g_strdup("production");
-    bellatrix4_apply_identity(bms);
-    bms->idme_mac = g_strdup("020000000005");
-    bms->idme_bootmode = g_strdup("1");
-    bms->idme_postmode = g_strdup("0");
-    bms->idme_fos_flags = g_strdup("0");
-    bms->idme_bcm_stress = g_strdup("");
     bms->cfa_bypass = false;
     bms->cfa_scan_address = BELLATRIX4_CFA_MODULE_START;
     bms->cfa_bypass_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
@@ -933,6 +917,7 @@ static void bellatrix4_machine_class_init(ObjectClass *oc, const void *data)
     BELLATRIX4_ADD_PROPERTY("quickboot", quickboot);
     BELLATRIX4_ADD_PROPERTY("boot-stage", boot_stage);
     BELLATRIX4_ADD_PROPERTY("idme-board-id", idme_board_id);
+    BELLATRIX4_ADD_PROPERTY("idme-pcbsn", idme_board_id);
     BELLATRIX4_ADD_PROPERTY("idme-serial", idme_serial);
     BELLATRIX4_ADD_PROPERTY("idme-mac", idme_mac);
     BELLATRIX4_ADD_PROPERTY("idme-mfg", idme_mfg);

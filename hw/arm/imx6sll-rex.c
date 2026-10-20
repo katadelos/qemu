@@ -5,6 +5,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/arm/kindle-idme.h"
 #include <libfdt.h>
 #include "qapi/error.h"
 #include "hw/arm/boot.h"
@@ -870,17 +871,18 @@ static void rex_set_fuse_overrides(Object *obj, const char *value,
 static void rex_machine_instance_init(Object *obj)
 {
     RexMachineState *rms = REX_MACHINE(obj);
+    const KindleIdmeDefaults *idme = kindle_idme_defaults("moonshine");
 
     object_initialize_child(obj, "rngc", &rms->rngc, TYPE_IMX_RNGC);
     rms->kernel_dtb_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
                                          rex_patch_kernel_dtb, rms);
 
-    rms->idme_serial = g_strdup("G000PP0400000000");
-    rms->idme_mac = g_strdup("020000000004");
-    rms->idme_mfg = g_strdup("REXQEMU0000000000000");
-    rms->idme_pcbsn = g_strdup("00015R0000000000");
-    rms->idme_bootmode = g_strdup("1");
-    rms->idme_postmode = g_strdup("0");
+    rms->idme_serial = g_strdup(idme->serial);
+    rms->idme_mac = g_strdup(idme->mac);
+    rms->idme_mfg = g_strdup(idme->manufacturing);
+    rms->idme_pcbsn = g_strdup(idme->board_id);
+    rms->idme_bootmode = g_strdup(idme->bootmode);
+    rms->idme_postmode = g_strdup(idme->postmode);
     rms->device_profile = g_strdup("dev-unlocked");
 }
 

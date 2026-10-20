@@ -23,12 +23,6 @@ static const MT8115I2CFittedDevice pa6_cs8_i2c[] = {
 
 static const MT8115BoardConfig calvados = {
     .name = "calvados",
-    .product_name = "cs8",
-    /* 4VX is a supported serial device code, not a captured factory tattoo. */
-    .board_id = "0004VX0000000000",
-    .serial = "G004VX0000000000",
-    .device_type_id = "4VX",
-    .manufacturing = "ScribeColorsoftQEMU",
     .hwid_pins = {52, 54, 53},
     .panel_width = 2648, .panel_height = 1986,
     .touch_width = 1986, .touch_height = 2648,
@@ -44,12 +38,6 @@ static const MT8115BoardConfig calvados = {
 
 static const MT8115BoardConfig paloma = {
     .name = "paloma",
-    .product_name = "pa6",
-    /* Supported KS3 serial code; these are synthetic emulator identities. */
-    .board_id = "0004PG0000000000",
-    .serial = "G004PG0000000000",
-    .device_type_id = "4PG",
-    .manufacturing = "Scribe3QEMU",
     .hwid_pins = {52, 54, 53},
     .panel_width = 2648, .panel_height = 1986,
     .touch_width = 1986, .touch_height = 2648,

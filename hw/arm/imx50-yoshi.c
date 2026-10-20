@@ -1,5 +1,6 @@
 /* Amazon Yoshi-family (Tequila and Whitney) board emulation */
 #include "qemu/osdep.h"
+#include "hw/arm/kindle-idme.h"
 #include <zlib.h>
 #include "qemu/bswap.h"
 #include "hw/block/flash.h"
@@ -920,41 +921,44 @@ static void yoshi_machine_instance_init(Object *obj)
 static void tequila_machine_instance_init(Object *obj)
 {
     YoshiMachineState *tms = YOSHI_MACHINE(obj);
+    const KindleIdmeDefaults *idme = kindle_idme_defaults("tequila");
 
-    yoshi_idme_set(&tms->idme_serial, "B00E000000000001");
-    yoshi_idme_set(&tms->idme_mac, "020000000001");
-    yoshi_idme_set(&tms->idme_sec, "00000000000000000000");
-    yoshi_idme_set(&tms->idme_pcbsn, "0031500000000001");
+    yoshi_idme_set(&tms->idme_serial, idme->serial);
+    yoshi_idme_set(&tms->idme_mac, idme->mac);
+    yoshi_idme_set(&tms->idme_sec, idme->manufacturing);
+    yoshi_idme_set(&tms->idme_pcbsn, idme->board_id);
 }
 
 static void whitney_machine_instance_init(Object *obj)
 {
     YoshiMachineState *tms = YOSHI_MACHINE(obj);
+    const KindleIdmeDefaults *idme = kindle_idme_defaults("whitney");
 
     tms->whitney = true;
-    yoshi_idme_set(&tms->idme_serial, "B011000000000001");
+    yoshi_idme_set(&tms->idme_serial, idme->serial);
     yoshi_idme_set(&tms->idme_accel, "0");
-    yoshi_idme_set(&tms->idme_mac, "020000000003");
-    yoshi_idme_set(&tms->idme_sec, "00000000000000000000");
+    yoshi_idme_set(&tms->idme_mac, idme->mac);
+    yoshi_idme_set(&tms->idme_sec, idme->manufacturing);
     /*
      * B011 is a Wi-Fi-only Kindle Touch.  Its production board family is
      * Whitney WFO EVT3 (00606); 005xx denotes cellular Whitney and makes
      * userspace repeatedly probe Host 1 for a WAN modem.
      */
-    yoshi_idme_set(&tms->idme_pcbsn, "0060600000000001");
+    yoshi_idme_set(&tms->idme_pcbsn, idme->board_id);
 }
 
 static void celeste_machine_instance_init(Object *obj)
 {
     YoshiMachineState *tms = YOSHI_MACHINE(obj);
+    const KindleIdmeDefaults *idme = kindle_idme_defaults("celeste");
 
     tms->celeste = true;
-    yoshi_idme_set(&tms->idme_serial, "B024000000000001");
+    yoshi_idme_set(&tms->idme_serial, idme->serial);
     yoshi_idme_set(&tms->idme_accel, "0");
-    yoshi_idme_set(&tms->idme_mac, "020000000004");
-    yoshi_idme_set(&tms->idme_sec, "00000000000000000000");
+    yoshi_idme_set(&tms->idme_mac, idme->mac);
+    yoshi_idme_set(&tms->idme_sec, idme->manufacturing);
     /* 00A10 is the production Celeste WFO 256 MiB EVT3 board family. */
-    yoshi_idme_set(&tms->idme_pcbsn, "00A1000000000001");
+    yoshi_idme_set(&tms->idme_pcbsn, idme->board_id);
 }
 
 static void yoshi_machine_instance_finalize(Object *obj)

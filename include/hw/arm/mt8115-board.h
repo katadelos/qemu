@@ -14,8 +14,6 @@ typedef struct MT8115I2CFittedDevice {
 
 typedef struct MT8115BoardConfig {
     const char *name;
-    const char *product_name, *board_id, *serial, *device_type_id;
-    const char *manufacturing;
     unsigned hwid_pins[3];
     unsigned panel_width, panel_height;
     unsigned touch_width, touch_height;

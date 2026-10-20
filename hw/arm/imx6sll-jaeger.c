@@ -9,6 +9,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/arm/kindle-idme.h"
 #include "qapi/error.h"
 #include "hw/arm/boot.h"
 #include "hw/arm/fsl-imx6.h"
@@ -781,15 +782,16 @@ static void jaeger_set_fuse_overrides(Object *obj, const char *value,
 static void jaeger_machine_instance_init(Object *obj)
 {
     JaegerMachineState *rms = JAEGER_MACHINE(obj);
+    const KindleIdmeDefaults *idme = kindle_idme_defaults("jaeger");
 
     object_initialize_child(obj, "rngc", &rms->rngc, TYPE_IMX_RNGC);
 
-    rms->idme_serial = g_strdup("G000WF0400000000");
-    rms->idme_mac = g_strdup("020000000010");
-    rms->idme_mfg = g_strdup("JAEGERQEMU0000000");
-    rms->idme_pcbsn = g_strdup("0001M70000000000");
-    rms->idme_bootmode = g_strdup("0");
-    rms->idme_postmode = g_strdup("0");
+    rms->idme_serial = g_strdup(idme->serial);
+    rms->idme_mac = g_strdup(idme->mac);
+    rms->idme_mfg = g_strdup(idme->manufacturing);
+    rms->idme_pcbsn = g_strdup(idme->board_id);
+    rms->idme_bootmode = g_strdup(idme->bootmode);
+    rms->idme_postmode = g_strdup(idme->postmode);
     rms->device_profile = g_strdup("production");
 }
 

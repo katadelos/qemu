@@ -5,6 +5,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/arm/kindle-idme.h"
 #include <libfdt.h>
 #include "hw/arm/mt8113.h"
 #include "hw/adc/mt6577_auxadc.h"
@@ -75,7 +76,6 @@ typedef struct BellatrixMachineState {
     char *idme_product_name;
     char *idme_device_type;
     char *idme_bootmode;
-    bool idme_bootmode_explicit;
     char *idme_postmode;
     char *idme_fos_flags;
     char *idme_hwid;
@@ -97,13 +97,8 @@ typedef struct BellatrixDeviceProfile {
 
 typedef struct BellatrixBoard {
     const char *name;
-    const char *board_id;
-    const char *serial;
-    const char *device_type;
-    const char *product_name;
     ram_addr_t ram_size;
     const char *soc_type;
-    const char *manufacturing;
     const BellatrixDeviceProfile *profiles;
     unsigned num_profiles;
     unsigned hwid_pins[4];
@@ -212,12 +207,8 @@ static void prosecco_init_battery_eeprom(I2CBus *bus)
 static const BellatrixBoard bellatrix_boards[] = {
     {
         .name = "malbec",
-        .board_id = "0002R9000000000",
-        .serial = "G002DK0000000000",
-        .device_type = "2DK",
         .ram_size = 512 * MiB,
         .soc_type = TYPE_MT8110,
-        .manufacturing = "PAPERWHITE5QEMU00",
         .profiles = malbec_device_profiles,
         .num_profiles = ARRAY_SIZE(malbec_device_profiles),
         .hwid_pins = { 14, 15, 16, 17 },
@@ -226,12 +217,8 @@ static const BellatrixBoard bellatrix_boards[] = {
         .power_good = 10,
     }, {
         .name = "cava",
-        .board_id = "0002R5000000000",
-        .serial = "G0022D0000000000",
-        .device_type = "22D",
         .ram_size = 512 * MiB,
         .soc_type = TYPE_MT8110,
-        .manufacturing = "KINDLE11QEMU000000",
         .profiles = bellatrix_device_profiles,
         .num_profiles = ARRAY_SIZE(bellatrix_device_profiles),
         .hwid_pins = { 14, 15, 16, 17 },
@@ -240,12 +227,8 @@ static const BellatrixBoard bellatrix_boards[] = {
         .power_good = 10,
     }, {
         .name = "rossini",
-        .board_id = "0003M5000000000",
-        .serial = "G003KM0000000000",
-        .device_type = "3KM",
         .ram_size = 1 * GiB,
         .soc_type = TYPE_MT8110,
-        .manufacturing = "KINDLE11QEMU000000",
         .profiles = bellatrix_device_profiles,
         .num_profiles = ARRAY_SIZE(bellatrix_device_profiles),
         .hwid_pins = { 14, 15, 16, 17 },
@@ -254,10 +237,7 @@ static const BellatrixBoard bellatrix_boards[] = {
         .power_good = 10,
     }, {
         .name = "barolo",
-        .board_id = "0002WS0000000000",
-        .serial = "G002WS0000000000", .device_type = "2WS",
         .ram_size = 1 * GiB, .soc_type = TYPE_MT8113,
-        .manufacturing = "SCRIBE1QEMU000000",
         .profiles = barolo_device_profiles,
         .num_profiles = ARRAY_SIZE(barolo_device_profiles),
         .hwid_pins = { 113, 112, 114, 115 },
@@ -266,10 +246,7 @@ static const BellatrixBoard bellatrix_boards[] = {
         .power_good = 37, .scribe = true,
     }, {
         .name = "pisco",
-        .board_id = "0003XE0000000000",
-        .serial = "G003XE0000000000", .device_type = "3XE",
         .ram_size = 1 * GiB, .soc_type = TYPE_MT8113,
-        .manufacturing = "SCRIBE2QEMU000000",
         .profiles = pisco_device_profiles,
         .num_profiles = ARRAY_SIZE(pisco_device_profiles),
         .hwid_pins = { 113, 112, 114, 115 },
@@ -278,14 +255,8 @@ static const BellatrixBoard bellatrix_boards[] = {
         .power_good = 37, .scribe = true,
     }, {
         .name = "prosecco",
-        .board_id = "PN44PB0200000000",
-        .serial = "GN456U0000000000",
-        .device_type = "A1BCDFP38HIEWE",
-        .product_name = "po8",
         .ram_size = 1 * GiB,
         .soc_type = TYPE_MT8110,
-        .manufacturing = "KT7QEMU0000000000 "
-                         "bsn_shipped=SWCS2610100000000056",
         .profiles = prosecco_device_profiles,
         .num_profiles = ARRAY_SIZE(prosecco_device_profiles),
         .hwid_pins = { 113, 112, 114 },
@@ -329,45 +300,38 @@ static void bellatrix_apply_identity(BellatrixMachineState *bms)
     const BellatrixBoard *board = bellatrix_find_board(bms->board);
     const BellatrixDeviceProfile *profile =
         bellatrix_find_device_profile(board, bms->device_profile);
+    const KindleIdmeDefaults *idme = kindle_idme_defaults(board->name);
+    g_autofree char *board_id = profile->tattoo ?
+        kindle_idme_psn(profile->tattoo) : g_strdup(idme->board_id);
+    g_autofree char *hwid = g_strdup_printf("%u", profile->hwid);
 
-    g_free(bms->idme_board_id);
-    g_free(bms->idme_serial);
-    g_free(bms->idme_mfg);
-    g_free(bms->idme_product_name);
-    g_free(bms->idme_device_type);
-    g_free(bms->idme_hwid);
-    bms->idme_board_id = profile->tattoo ?
-        g_strdup_printf("000%s0000000000", profile->tattoo) :
-        g_strdup(board->board_id);
-    bms->idme_serial = g_strdup(board->serial);
-    bms->idme_mfg = g_strdup(board->manufacturing);
-    bms->idme_product_name = g_strdup(board->product_name ?: "");
-    bms->idme_device_type = g_strdup(board->device_type);
-    bms->idme_hwid = g_strdup_printf("%u", profile->hwid);
+    kindle_idme_set_default(&bms->idme_board_id, board_id);
+    kindle_idme_set_default(&bms->idme_serial, idme->serial);
+    kindle_idme_set_default(&bms->idme_mac, idme->mac);
+    kindle_idme_set_default(&bms->idme_mfg, idme->manufacturing);
+    kindle_idme_set_default(&bms->idme_product_name, idme->product_name);
+    kindle_idme_set_default(&bms->idme_device_type, idme->device_type);
+    kindle_idme_set_default(&bms->idme_bootmode, idme->bootmode);
+    kindle_idme_set_default(&bms->idme_postmode, idme->postmode);
+    kindle_idme_set_default(&bms->idme_fos_flags, idme->fos_flags);
+    kindle_idme_set_default(&bms->idme_hwid, hwid);
+    kindle_idme_set_default(&bms->idme_bcm_stress, "");
 }
 
 static void bellatrix_set_board_identity(BellatrixMachineState *bms,
                                           const char *name)
 {
-    const BellatrixBoard *board = bellatrix_find_board(name);
-
+    bellatrix_find_board(name);
     g_free(bms->board);
     bms->board = g_strdup(name);
-    bellatrix_apply_identity(bms);
-    if (!bms->idme_bootmode_explicit) {
-        /* Stock KT7 recovery interprets bootmode1 as diagnostics. */
-        g_free(bms->idme_bootmode);
-        bms->idme_bootmode = g_strdup(board->prosecco ? "0" : "1");
-    }
 }
 
 static void bellatrix_set_device_profile_identity(
     BellatrixMachineState *bms, const char *name)
 {
-    bellatrix_find_device_profile(bellatrix_find_board(bms->board), name);
+    /* Validate the final board/profile pair after all CLI properties. */
     g_free(bms->device_profile);
     bms->device_profile = g_strdup(name);
-    bellatrix_apply_identity(bms);
 }
 
 static void bellatrix_firmware_reset(void *opaque)
@@ -667,6 +631,8 @@ static void bellatrix_init(MachineState *machine)
     I2CSlave *bd71828;
     I2CSlave *gtx8 = NULL;
 
+    bellatrix_apply_identity(bms);
+
     if (machine->ram_size > board->ram_size) {
         error_report("%s RAM exceeds its %" PRIu64 " MiB hardware "
                      "configuration", board->name,
@@ -889,24 +855,11 @@ BELLATRIX_STRING_PROPERTY(idme_mac)
 BELLATRIX_STRING_PROPERTY(idme_mfg)
 BELLATRIX_STRING_PROPERTY(idme_product_name)
 BELLATRIX_STRING_PROPERTY(idme_device_type)
+BELLATRIX_STRING_PROPERTY(idme_bootmode)
 BELLATRIX_STRING_PROPERTY(idme_postmode)
 BELLATRIX_STRING_PROPERTY(idme_fos_flags)
 BELLATRIX_STRING_PROPERTY(idme_hwid)
 BELLATRIX_STRING_PROPERTY(idme_bcm_stress)
-
-static char *bellatrix_get_idme_bootmode(Object *obj, Error **errp)
-{
-    return bellatrix_get_string(&BELLATRIX_MACHINE(obj)->idme_bootmode);
-}
-
-static void bellatrix_set_idme_bootmode(Object *obj, const char *value,
-                                        Error **errp)
-{
-    BellatrixMachineState *bms = BELLATRIX_MACHINE(obj);
-
-    bellatrix_set_string(&bms->idme_bootmode, value);
-    bms->idme_bootmode_explicit = true;
-}
 
 static char *bellatrix_get_board(Object *obj, Error **errp)
 {
@@ -936,12 +889,6 @@ static void bellatrix_machine_instance_init(Object *obj)
     bms->boot_stage = g_strdup("u-boot");
     bms->board = g_strdup("rossini");
     bms->device_profile = g_strdup("production");
-    bellatrix_apply_identity(bms);
-    bms->idme_mac = g_strdup("020000000006");
-    bms->idme_bootmode = g_strdup("1");
-    bms->idme_postmode = g_strdup("0");
-    bms->idme_fos_flags = g_strdup("0");
-    bms->idme_bcm_stress = g_strdup("");
 }
 
 static void bellatrix_machine_instance_finalize(Object *obj)
@@ -1009,6 +956,7 @@ static void bellatrix_machine_class_init(ObjectClass *oc, const void *data)
     BELLATRIX_ADD_PROPERTY("touch-firmware", touch_firmware);
     BELLATRIX_ADD_PROPERTY("boot-stage", boot_stage);
     BELLATRIX_ADD_PROPERTY("idme-board-id", idme_board_id);
+    BELLATRIX_ADD_PROPERTY("idme-pcbsn", idme_board_id);
     BELLATRIX_ADD_PROPERTY("idme-serial", idme_serial);
     BELLATRIX_ADD_PROPERTY("idme-mac", idme_mac);
     BELLATRIX_ADD_PROPERTY("idme-mfg", idme_mfg);

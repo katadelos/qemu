@@ -8,6 +8,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/arm/kindle-idme.h"
 #include "qapi/error.h"
 #include "hw/arm/boot.h"
 #include "hw/arm/fsl-imx6.h"
@@ -354,13 +355,14 @@ HEISENBERG_IDME_PROPERTY(idme_postmode)
 static void heisenberg_machine_instance_init(Object *obj)
 {
     HeisenbergMachineState *hms = HEISENBERG_MACHINE(obj);
+    const KindleIdmeDefaults *idme = kindle_idme_defaults("eanab");
 
-    hms->idme_serial = g_strdup("G000000000000001");
-    hms->idme_mac = g_strdup("020000000006");
-    hms->idme_mfg = g_strdup("00000000000000000000");
-    hms->idme_pcbsn = g_strdup("0001180400000001");
-    hms->idme_bootmode = g_strdup("main");
-    hms->idme_postmode = g_strdup("normal");
+    hms->idme_serial = g_strdup(idme->serial);
+    hms->idme_mac = g_strdup(idme->mac);
+    hms->idme_mfg = g_strdup(idme->manufacturing);
+    hms->idme_pcbsn = g_strdup(idme->board_id);
+    hms->idme_bootmode = g_strdup(idme->bootmode);
+    hms->idme_postmode = g_strdup(idme->postmode);
 }
 
 static void heisenberg_machine_instance_finalize(Object *obj)

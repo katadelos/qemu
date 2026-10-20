@@ -5,6 +5,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/arm/kindle-idme.h"
 #include "qapi/error.h"
 #include "hw/arm/boot.h"
 #include "hw/arm/fsl-imx7.h"
@@ -753,14 +754,14 @@ static void zelda_set_boot_partitions_file(Object *obj, const char *value,
 static void zelda_machine_instance_init(Object *obj)
 {
     ZeldaMachineState *rms = ZELDA_MACHINE(obj);
+    const KindleIdmeDefaults *idme = kindle_idme_defaults("cognac");
 
-    rms->idme_serial = g_strdup("G000SA0000000000");
-    rms->idme_mac = g_strdup("020000000004");
-    rms->idme_mfg = g_strdup("ZELDAQEMU0000000000000");
-    /* PSN v2 prefix is also required by userspace's Wi-Fi-only detection. */
-    rms->idme_pcbsn = g_strdup("P0013H0000000000");
-    rms->idme_bootmode = g_strdup("0");
-    rms->idme_postmode = g_strdup("0");
+    rms->idme_serial = g_strdup(idme->serial);
+    rms->idme_mac = g_strdup(idme->mac);
+    rms->idme_mfg = g_strdup(idme->manufacturing);
+    rms->idme_pcbsn = g_strdup(idme->board_id);
+    rms->idme_bootmode = g_strdup(idme->bootmode);
+    rms->idme_postmode = g_strdup(idme->postmode);
 }
 
 static void zelda_machine_instance_finalize(Object *obj)

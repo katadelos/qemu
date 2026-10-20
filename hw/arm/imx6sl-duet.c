@@ -5,6 +5,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/arm/kindle-idme.h"
 #include "qapi/error.h"
 #include "hw/arm/boot.h"
 #include "hw/arm/fsl-imx6.h"
@@ -275,13 +276,14 @@ DUET_STRING_PROPERTY(storage_bios, storage_bios)
 static void duet_machine_instance_init(Object *obj)
 {
     DuetMachineState *dms = DUET_MACHINE(obj);
+    const KindleIdmeDefaults *idme = kindle_idme_defaults("whisky");
 
-    dms->idme.serial = g_strdup("G0B0GC0000000001");
-    dms->idme.mac = g_strdup("020000000001");
-    dms->idme.mfg = g_strdup("00000000000000000000");
-    dms->idme.pcbsn = g_strdup("0790700000000001");
-    dms->idme.bootmode = g_strdup("main");
-    dms->idme.postmode = g_strdup("normal");
+    dms->idme.serial = g_strdup(idme->serial);
+    dms->idme.mac = g_strdup(idme->mac);
+    dms->idme.mfg = g_strdup(idme->manufacturing);
+    dms->idme.pcbsn = g_strdup(idme->board_id);
+    dms->idme.bootmode = g_strdup(idme->bootmode);
+    dms->idme.postmode = g_strdup(idme->postmode);
 }
 
 static void duet_machine_instance_finalize(Object *obj)

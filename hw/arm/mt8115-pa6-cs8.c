@@ -7,6 +7,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/arm/kindle-idme.h"
 #include <libfdt.h>
 #include "hw/arm/bsa.h"
 #include "hw/arm/mt8115-preload.h"
@@ -342,6 +343,16 @@ struct PA6CS8State {
     bool development_mode;
     char *device_profile;
     const MT8115BoardConfig *board;
+    char *idme_board_id;
+    char *idme_serial;
+    char *idme_mac;
+    char *idme_mfg;
+    char *idme_product_name;
+    char *idme_device_type;
+    char *idme_bootmode;
+    char *idme_postmode;
+    char *idme_fos_flags;
+    char *idme_hwid;
 };
 
 /* SPM register-level power transitions. Supply voltages, PCM firmware and
@@ -1964,41 +1975,65 @@ static uint64_t pa6_load_fit(PA6CS8State *s, const void *fit,
     return address && address_len == 4 ? fdt32_to_cpu(*address) : load;
 }
 
+static void pa6_apply_identity(PA6CS8State *s)
+{
+    const KindleIdmeDefaults *idme = kindle_idme_defaults(s->board->name);
+    g_autofree char *hwid =
+        g_strdup_printf("%d", mt8115_board_profile_hwid(s->device_profile));
+
+    kindle_idme_set_default(&s->idme_board_id, idme->board_id);
+    kindle_idme_set_default(&s->idme_serial, idme->serial);
+    kindle_idme_set_default(&s->idme_mac, idme->mac);
+    kindle_idme_set_default(&s->idme_mfg, idme->manufacturing);
+    kindle_idme_set_default(&s->idme_product_name, idme->product_name);
+    kindle_idme_set_default(&s->idme_device_type, idme->device_type);
+    kindle_idme_set_default(&s->idme_bootmode, idme->bootmode);
+    kindle_idme_set_default(&s->idme_postmode, idme->postmode);
+    kindle_idme_set_default(&s->idme_fos_flags, idme->fos_flags);
+    kindle_idme_set_default(&s->idme_hwid, hwid);
+}
+
 /* UFBL IDME v2 records occupy the first ten sectors of boot area 2. */
 static void pa6_populate_idme(PA6CS8State *s, DeviceState *card)
 {
-    char hwid[] = { '0' + mt8115_board_profile_hwid(s->device_profile), 0 };
     uint8_t data[5120] = { 0 };
     uint8_t *cursor = data + 16;
     const struct {
         const char *name, *value;
         unsigned size;
     } fields[] = {
-        { "board_id", s->board->board_id, 16 },
-        { "serial", s->board->serial, 16 },
-        { "mac_addr", "020000000001", 16 },
+        { "board_id", s->idme_board_id, 16 },
+        { "serial", s->idme_serial, 16 },
+        { "mac_addr", s->idme_mac, 16 },
         { "mac_sec", "0", 32 },
         { "bt_mac_addr", "020000000002", 16 },
-        { "product_name", s->board->product_name, 32 },
+        { "product_name", s->idme_product_name, 32 },
         { "productid", "0", 32 },
         { "productid2", "0", 32 },
         { "region", "US", 4 },
-        { "bootmode", "main", 4 },
-        { "postmode", "0", 4 },
+        { "bootmode", s->idme_bootmode, 4 },
+        { "postmode", s->idme_postmode, 4 },
         { "bootcount", "0", 8 },
-        { "manufacturing", s->board->manufacturing, 512 },
+        { "manufacturing", s->idme_mfg, 512 },
         { "unlock_code", "", 1024 },
-        { "device_type_id", s->board->device_type_id, 32 },
+        { "device_type_id", s->idme_device_type, 32 },
         { "dev_flags", "0", 8 },
-        { "fos_flags", "0", 8 },
+        { "fos_flags", s->idme_fos_flags, 8 },
         { "usr_flags", "0", 8 },
-        { "hwid", hwid, 4 },
+        { "hwid", s->idme_hwid, 4 },
         { "bcm_stress", "0", 1024 },
     };
 
     memcpy(data, "beefdeed2.1", 11);
     stl_le_p(data + 12, ARRAY_SIZE(fields));
     for (unsigned i = 0; i < ARRAY_SIZE(fields); i++) {
+        if (!g_str_is_ascii(fields[i].value) ||
+            strlen(fields[i].value) > fields[i].size ||
+            cursor + 28 + fields[i].size > data + sizeof(data)) {
+            error_report("PA6/CS8 IDME %s must contain at most %u ASCII bytes",
+                         fields[i].name, fields[i].size);
+            exit(EXIT_FAILURE);
+        }
         memcpy(cursor, fields[i].name, strlen(fields[i].name));
         stl_le_p(cursor + 16, fields[i].size);
         stl_le_p(cursor + 20, 1);
@@ -2438,6 +2473,8 @@ static void pa6_init(MachineState *machine)
         { 0x11296000, 0x10217780, 150 },
         { 0x11297000, 0x10217800, 151 },
     };
+
+    pa6_apply_identity(s);
 
     if (!machine->firmware ||
         !g_file_get_contents(machine->firmware, &firmware,
@@ -2970,6 +3007,16 @@ PA6_STRING_PROPERTY(aux_firmware)
 PA6_STRING_PROPERTY(touch_firmware)
 PA6_STRING_PROPERTY(touch_controller)
 PA6_STRING_PROPERTY(consys_firmware)
+PA6_STRING_PROPERTY(idme_board_id)
+PA6_STRING_PROPERTY(idme_serial)
+PA6_STRING_PROPERTY(idme_mac)
+PA6_STRING_PROPERTY(idme_mfg)
+PA6_STRING_PROPERTY(idme_product_name)
+PA6_STRING_PROPERTY(idme_device_type)
+PA6_STRING_PROPERTY(idme_bootmode)
+PA6_STRING_PROPERTY(idme_postmode)
+PA6_STRING_PROPERTY(idme_fos_flags)
+PA6_STRING_PROPERTY(idme_hwid)
 
 static char *pa6_get_device_profile(Object *obj, Error **errp)
 {
@@ -3023,6 +3070,16 @@ static void pa6_finalize(Object *obj)
 {
     PA6CS8State *s = PA6_CS8(obj);
 
+    g_free(s->idme_board_id);
+    g_free(s->idme_serial);
+    g_free(s->idme_mac);
+    g_free(s->idme_mfg);
+    g_free(s->idme_product_name);
+    g_free(s->idme_device_type);
+    g_free(s->idme_bootmode);
+    g_free(s->idme_postmode);
+    g_free(s->idme_fos_flags);
+    g_free(s->idme_hwid);
     g_free(s->device_profile);
     g_free(s->bl2);
     g_free(s->tee);
@@ -3041,6 +3098,30 @@ static void pa6_class_init(ObjectClass *klass, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(klass);
 
+    object_class_property_add_str(klass, "idme-board-id",
+                                  pa6_get_idme_board_id, pa6_set_idme_board_id);
+    object_class_property_add_str(klass, "idme-pcbsn",
+                                  pa6_get_idme_board_id, pa6_set_idme_board_id);
+    object_class_property_add_str(klass, "idme-serial",
+                                  pa6_get_idme_serial, pa6_set_idme_serial);
+    object_class_property_add_str(klass, "idme-mac",
+                                  pa6_get_idme_mac, pa6_set_idme_mac);
+    object_class_property_add_str(klass, "idme-mfg",
+                                  pa6_get_idme_mfg, pa6_set_idme_mfg);
+    object_class_property_add_str(klass, "idme-product-name",
+                                  pa6_get_idme_product_name,
+                                  pa6_set_idme_product_name);
+    object_class_property_add_str(klass, "idme-device-type",
+                                  pa6_get_idme_device_type,
+                                  pa6_set_idme_device_type);
+    object_class_property_add_str(klass, "idme-bootmode",
+                                  pa6_get_idme_bootmode, pa6_set_idme_bootmode);
+    object_class_property_add_str(klass, "idme-postmode",
+                                  pa6_get_idme_postmode, pa6_set_idme_postmode);
+    object_class_property_add_str(klass, "idme-fos-flags",
+                                  pa6_get_idme_fos_flags, pa6_set_idme_fos_flags);
+    object_class_property_add_str(klass, "idme-hwid",
+                                  pa6_get_idme_hwid, pa6_set_idme_hwid);
     object_class_property_add_str(klass, "board", pa6_get_board, pa6_set_board);
     object_class_property_set_description(klass, "board",
         "Fitted board: calvados (Scribe Colorsoft, default) or paloma (Scribe 3)");

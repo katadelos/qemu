@@ -5,6 +5,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/arm/kindle-idme.h"
 #include "qapi/error.h"
 #include "hw/arm/boot.h"
 #include "hw/arm/fsl-imx6.h"
@@ -60,11 +61,24 @@ OBJECT_DECLARE_SIMPLE_TYPE(WarioMachineState, WARIO_MACHINE)
 typedef struct WarioMachineState {
     MachineState parent_obj;
     KindleIMX6SLIdme idme;
+    char *board;
     bool idme_boot_partitions;
     bool kobo_rgb565;
 } WarioMachineState;
 
 static struct arm_boot_info wario_boot_info;
+
+static void wario_apply_identity(WarioMachineState *wms)
+{
+    const KindleIdmeDefaults *idme = kindle_idme_defaults(wms->board);
+
+    kindle_idme_set_default(&wms->idme.serial, idme->serial);
+    kindle_idme_set_default(&wms->idme.mac, idme->mac);
+    kindle_idme_set_default(&wms->idme.mfg, idme->manufacturing);
+    kindle_idme_set_default(&wms->idme.pcbsn, idme->board_id);
+    kindle_idme_set_default(&wms->idme.bootmode, idme->bootmode);
+    kindle_idme_set_default(&wms->idme.postmode, idme->postmode);
+}
 
 static bool wario_is_bourbon(const WarioMachineState *wms)
 {
@@ -157,15 +171,19 @@ static void wario_init(MachineState *machine)
     DeviceState *keyboard;
     DeviceState *pmic;
     I2CBus *i2c;
-    bool bourbon = wario_is_bourbon(wms);
-    bool pinot = wario_is_pinot(wms);
-    bool muscat = wario_is_muscat(wms);
+    bool bourbon, pinot, muscat;
     static const uint8_t muscat_barcode[] = { 0xe9, 0xe8, 0x04 }; /* ED4 */
     static const uint8_t bourbon_barcode[] = { 0xe9, 0xe6, 0xf6 }; /* EBS */
     static const uint8_t icewine_barcode[] = { 0xe9, 0xe6, 0xe5 }; /* EBA */
-    const uint8_t *panel_barcode = bourbon ? bourbon_barcode :
-                                  muscat ? muscat_barcode :
-                                  pinot ? NULL : icewine_barcode;
+    const uint8_t *panel_barcode;
+
+    wario_apply_identity(wms);
+    bourbon = wario_is_bourbon(wms);
+    pinot = wario_is_pinot(wms);
+    muscat = wario_is_muscat(wms);
+    panel_barcode = bourbon ? bourbon_barcode :
+                    muscat ? muscat_barcode :
+                    pinot ? NULL : icewine_barcode;
 
     if (machine->ram_size > WARIO_RAM_MAX) {
         error_report("RAM size " RAM_ADDR_FMT " exceeds i.MX6SL maximum",
@@ -379,12 +397,7 @@ static void wario_machine_instance_init(Object *obj)
 {
     WarioMachineState *wms = WARIO_MACHINE(obj);
 
-    wms->idme.serial = g_strdup("B054000000000001");
-    wms->idme.mac = g_strdup("020000000002");
-    wms->idme.mfg = g_strdup("00000000000000000000");
-    wms->idme.pcbsn = g_strdup("0470000000000001");
-    wms->idme.bootmode = g_strdup("main");
-    wms->idme.postmode = g_strdup("normal");
+    wms->board = g_strdup("icewine");
     wms->idme_boot_partitions = true;
     wms->kobo_rgb565 = false;
 }
@@ -393,12 +406,29 @@ static void wario_machine_instance_finalize(Object *obj)
 {
     WarioMachineState *wms = WARIO_MACHINE(obj);
 
+    g_free(wms->board);
     g_free(wms->idme.serial);
     g_free(wms->idme.mac);
     g_free(wms->idme.mfg);
     g_free(wms->idme.pcbsn);
     g_free(wms->idme.bootmode);
     g_free(wms->idme.postmode);
+}
+
+static char *wario_get_board(Object *obj, Error **errp)
+{
+    return g_strdup(WARIO_MACHINE(obj)->board);
+}
+
+static void wario_set_board(Object *obj, const char *value, Error **errp)
+{
+    if (strcmp(value, "icewine") && strcmp(value, "bourbon") &&
+        strcmp(value, "pinot") && strcmp(value, "muscat")) {
+        error_setg(errp, "invalid Wario board '%s' (expected icewine, bourbon, "
+                   "pinot, or muscat)", value);
+        return;
+    }
+    wario_idme_set(&WARIO_MACHINE(obj)->board, value);
 }
 
 static void wario_machine_init(ObjectClass *oc, const void *data)
@@ -415,6 +445,8 @@ static void wario_machine_init(ObjectClass *oc, const void *data)
     mc->ignore_memory_transaction_failures = true;
     mc->auto_create_sdcard = false;
 
+    object_class_property_add_str(oc, "board", wario_get_board,
+                                  wario_set_board);
     object_class_property_add_str(oc, "idme-serial", wario_get_idme_serial,
                                   wario_set_idme_serial);
     object_class_property_add_str(oc, "idme-mac", wario_get_idme_mac,
