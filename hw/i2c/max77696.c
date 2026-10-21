@@ -18,11 +18,31 @@
 #define GLBLINT_EN0_RISING       (1U << 7)
 #define GLBLINT_EN0_FALLING      (1U << 6)
 #define GLBLSTAT_EN0_S           (1U << 7)
+#define CHG_INT                  0x08
+#define CHG_INT_MASK             0x09
+#define CHG_INT_OK               0x0a
+#define CHG_DTLS_00              0x0b
+#define CHG_CHGINA               (1U << 6)
+#define CHG_DTLS_CHGINA_MASK     (3U << 5)
 #define INTTOP1                  0xa2
 #define INTTOP1M                 0xa3
 #define INTTOP1_TOPSYS           (1U << 7)
+#define INTTOP1_CHGA             (1U << 2)
+#define INTTOP1_UIC              (1U << 0)
+#define UIC_INT1                 0x01
+#define UIC_INT2                 0x02
+#define UIC_INT1_CHGTYP          (1U << 0)
+#define UIC_INT1_VBVOLT          (1U << 1)
+#define UIC_STATUS1              0x03
+#define UIC_STATUS1_CHGTYP_MASK   0x0f
+#define UIC_STATUS1_CHGTYP_USB    1
+#define UIC_STATUS1_VBVOLT       (1U << 4)
 #define UIC_STATUS2              0x04
 #define UIC_STATUS2_ADC_MASK     0x1f
+#define UIC_INTMASK1             0x05
+#define UIC_INTMASK2             0x06
+#define UIC_SYSCTRL1             0x07
+#define UIC_SYSCTRL1_INT_EN      (1U << 4)
 #define ADC_CNTL                 0x26
 #define ADC_CNTL_CONV            (1U << 4)
 #define ADC_CHSEL                0x2a
@@ -70,11 +90,26 @@ static bool max77696_is_main(MAX77696State *s)
     return I2C_SLAVE(s)->address == MAX77696_MAIN_ADDR;
 }
 
+static bool max77696_is_uic(MAX77696State *s)
+{
+    return I2C_SLAVE(s)->address == MAX77696_UIC_ADDR;
+}
+
 static void max77696_update_irq(MAX77696State *s)
 {
     bool topsys_pending;
     bool root_pending;
 
+    if (max77696_is_uic(s)) {
+        /* UIC masks use one to enable, unlike the main PMIC masks. This
+         * output supplies the UIC summary to the main interrupt bank. */
+        bool pending = (s->regs[UIC_SYSCTRL1] & UIC_SYSCTRL1_INT_EN) &&
+            ((s->regs[UIC_INT1] & s->regs[UIC_INTMASK1]) ||
+             (s->regs[UIC_INT2] & s->regs[UIC_INTMASK2]));
+
+        qemu_set_irq(s->irq[0], pending);
+        return;
+    }
     if (!max77696_is_main(s)) {
         return;
     }
@@ -85,12 +120,62 @@ static void max77696_update_irq(MAX77696State *s)
     } else {
         s->regs[INTTOP1] &= ~INTTOP1_TOPSYS;
     }
+    if (s->regs[CHG_INT] & ~s->regs[CHG_INT_MASK]) {
+        s->regs[INTTOP1] |= INTTOP1_CHGA;
+    } else {
+        s->regs[INTTOP1] &= ~INTTOP1_CHGA;
+    }
     root_pending = s->regs[INTTOP1] & ~s->regs[INTTOP1M];
 
     /* The physical PMIC interrupt output is active-low. */
     trace_max77696_irq(root_pending, s->regs[GLBLINT],
                        s->regs[GLBLINTM], s->regs[INTTOP1M]);
     qemu_set_irq(s->irq[0], root_pending ? 0 : 1);
+}
+
+static void max77696_uic_irq(void *opaque, int n, int level)
+{
+    MAX77696State *s = opaque;
+
+    if (level) {
+        s->regs[INTTOP1] |= INTTOP1_UIC;
+    } else {
+        s->regs[INTTOP1] &= ~INTTOP1_UIC;
+    }
+    max77696_update_irq(s);
+}
+
+static void max77696_vbus(void *opaque, int n, int level)
+{
+    MAX77696State *s = opaque;
+    bool connected = level != 0;
+
+    if (max77696_is_main(s)) {
+        bool previous = s->regs[CHG_INT_OK] & CHG_CHGINA;
+
+        s->regs[CHG_INT_OK] &= ~CHG_CHGINA;
+        s->regs[CHG_DTLS_00] &= ~CHG_DTLS_CHGINA_MASK;
+        if (connected) {
+            s->regs[CHG_INT_OK] |= CHG_CHGINA;
+            s->regs[CHG_DTLS_00] |= CHG_DTLS_CHGINA_MASK;
+        }
+        if (previous != connected) {
+            s->regs[CHG_INT] |= CHG_CHGINA;
+        }
+    } else if (max77696_is_uic(s)) {
+        bool previous = s->regs[UIC_STATUS1] & UIC_STATUS1_VBVOLT;
+
+        s->regs[UIC_STATUS1] &= ~(UIC_STATUS1_VBVOLT |
+                                  UIC_STATUS1_CHGTYP_MASK);
+        if (connected) {
+            s->regs[UIC_STATUS1] |= UIC_STATUS1_VBVOLT |
+                                    UIC_STATUS1_CHGTYP_USB;
+        }
+        if (previous != connected) {
+            s->regs[UIC_INT1] |= UIC_INT1_CHGTYP | UIC_INT1_VBVOLT;
+        }
+    }
+    max77696_update_irq(s);
 }
 
 static void max77696_power_button(void *opaque, int n, int level)
@@ -219,6 +304,14 @@ static int max77696_send(I2CSlave *i2c, uint8_t data)
     } else {
         unsigned index = max77696_index(s);
 
+        if ((max77696_is_main(s) &&
+             (index == CHG_INT || index == CHG_INT_OK || index == CHG_DTLS_00)) ||
+            (max77696_is_uic(s) &&
+             (index == UIC_INT1 || index == UIC_INT2 ||
+              index == UIC_STATUS1 || index == UIC_STATUS2))) {
+            max77696_advance(s);
+            return 0;
+        }
         if (max77696_is_rtc(s) && index == RTC_UPDATE0) {
             /* RBUDR and UDR are self-clearing update requests. */
             if (data & RTC_UPDATE0_RBUDR) {
@@ -246,7 +339,11 @@ static int max77696_send(I2CSlave *i2c, uint8_t data)
             s->regs[index] = data;
         }
         if (max77696_is_main(s) &&
-            (index == GLBLINTM || index == INTTOP1M)) {
+            (index == GLBLINTM || index == INTTOP1M || index == CHG_INT_MASK)) {
+            max77696_update_irq(s);
+        } else if (max77696_is_uic(s) &&
+                   (index == UIC_INTMASK1 || index == UIC_INTMASK2 ||
+                    index == UIC_SYSCTRL1)) {
             max77696_update_irq(s);
         }
         max77696_advance(s);
@@ -263,6 +360,13 @@ static uint8_t max77696_recv(I2CSlave *i2c)
     /* TOPSYS edge status is latched until software reads GLBLINT. */
     if (max77696_is_main(s) && index == GLBLINT) {
         s->regs[GLBLINT] = 0;
+        max77696_update_irq(s);
+    } else if (max77696_is_main(s) && index == CHG_INT) {
+        s->regs[CHG_INT] = 0;
+        max77696_update_irq(s);
+    } else if (max77696_is_uic(s) &&
+               (index == UIC_INT1 || index == UIC_INT2)) {
+        s->regs[index] = 0;
         max77696_update_irq(s);
     }
 
@@ -298,13 +402,10 @@ static void max77696_realize(DeviceState *dev, Error **errp)
         s->regs[0x0e * 2 + 1] = 0x64;
         s->regs[0x08 * 2] = 0x00;
         s->regs[0x08 * 2 + 1] = 0x19;
-    } else if (i2c->address == MAX77696_UIC_ADDR) {
+    } else if (max77696_is_uic(s)) {
         /*
-         * No cable is attached to the virtual USB port.  The Wario OTG
-         * glue interprets an ADC code of zero as an OTG accessory and then
-         * endlessly alternates host and gadget mode while trying to
-         * enumerate it.  A non-zero open-circuit code keeps the port idle,
-         * matching the physical PMIC when no cable is present.
+         * An ordinary USB cable leaves the accessory ID pin open. Zero is
+         * reserved for an OTG accessory that makes the Kindle a USB host.
          */
         s->regs[UIC_STATUS2] = UIC_STATUS2_ADC_MASK;
     } else if (max77696_is_rtc(s)) {
@@ -312,11 +413,16 @@ static void max77696_realize(DeviceState *dev, Error **errp)
         max77696_rtc_capture(s);
     }
 
+    if (max77696_is_main(s) || max77696_is_uic(s)) {
+        qdev_init_gpio_in_named(dev, max77696_vbus, "vbus", 1);
+    }
     if (max77696_is_main(s)) {
         /* The physical PMIC IRQ pin is active-low. */
         qdev_init_gpio_in_named(dev, max77696_power_button, "power-button", 1);
+        qdev_init_gpio_in_named(dev, max77696_uic_irq, "uic-irq", 1);
         s->regs[GLBLINTM] = 0xff;
         s->regs[INTTOP1M] = 0xff;
+        s->regs[CHG_INT_MASK] = 0xff;
         s->power_down = false;
         s->input_handler = qemu_input_handler_register(
             dev, &max77696_input_handler);
@@ -331,11 +437,16 @@ static void max77696_reset(DeviceState *dev)
 
     if (max77696_is_main(s)) {
         s->regs[GLBLINT] = 0;
+        s->regs[CHG_INT] = 0;
         s->regs[GLBLSTAT] &= ~GLBLSTAT_EN0_S;
         s->regs[INTTOP1] &= ~INTTOP1_TOPSYS;
         s->power_down = false;
         max77696_update_irq(s);
         qemu_set_irq(s->irq[1], 0);
+    } else if (max77696_is_uic(s)) {
+        s->regs[UIC_INT1] = 0;
+        s->regs[UIC_INT2] = 0;
+        max77696_update_irq(s);
     }
 }
 
