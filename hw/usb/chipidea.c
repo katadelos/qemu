@@ -11,6 +11,7 @@
 
 #include "qemu/osdep.h"
 #include "hw/usb/hcd-ehci.h"
+#include "hw/usb/ehci-regs.h"
 #include "hw/usb/chipidea.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/irq.h"
@@ -55,6 +56,9 @@ enum {
 #define CI_PORTSC_SUSPEND BIT(7)
 #define CI_PORTSC_PHY_LOW_POWER BIT(23)
 #define CI_PORTSC_HIGH_SPEED BIT(27)
+#define CI_PORTSC_PHY_MASK (0xf0000000U | BIT(25) | CI_PORTSC_PHY_LOW_POWER)
+#define CI_PORTSC_RESET_RETAIN (CI_PORTSC_PHY_MASK | \
+                                (7U << 20) | (3U << 14) | BIT(12))
 
 static void chipidea_process_in(ChipideaState *ci, uint32_t bits);
 
@@ -201,7 +205,8 @@ static void chipidea_config_timer(void *opaque)
         0x01, 0x0b, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00,
     };
 
-    if (!ci->gadget || !ci->gadget_host_connected ||
+    if (!ci->gadget || (ci->dc_mode & 3) != 2 ||
+        !ci->gadget_host_connected ||
         ci->gadget_configured) {
         return;
     }
@@ -504,9 +509,27 @@ static void chipidea_write(void *opaque, hwaddr offset,
                     (ci->otgsc & ~value & 0x007f0000);
         chipidea_update_irq(ci);
         break;
-    case CI_USBMODE:
+    case CI_USBMODE: {
+        EHCIState *ehci = &SYS_BUS_EHCI(ci)->ehci;
+
         ci->dc_mode = value;
+        if ((value & 3) == 3 && !(ehci->usbcmd & BIT(0))) {
+            ehci->usbsts |= USBSTS_HALT;
+        } else {
+            ehci->usbsts &= ~USBSTS_HALT;
+        }
+        if (ci->gadget && (value & 3) != 2) {
+            timer_del(ci->gadget_config_timer);
+            timer_del(ci->gadget_idle_timer);
+            timer_del(ci->gadget_resume_timer);
+            ci->gadget_configured = false;
+            ci->gadget_config_phase = 0;
+            ci->gadget_host_suspended = false;
+            ci->gadget_resuming = false;
+            qemu_set_irq(ci->resume, 0);
+        }
         break;
+    }
     case CI_ENDPTSETUPSTAT:
         ci->endptsetupstat &= ~value;
         break;
@@ -605,12 +628,35 @@ static uint64_t chipidea_command_read(void *opaque, hwaddr offset,
     ChipideaState *ci = opaque;
     EHCIState *ehci = &SYS_BUS_EHCI(ci)->ehci;
 
+    if ((ci->dc_mode & 3) == 3) {
+        return ehci_opreg_read(ehci, offset, size);
+    }
     switch (offset) {
     case 0: return ehci->usbcmd;
     case 4: return ehci->usbsts;
     case 8: return ehci->usbintr;
     default: return 0;
     }
+}
+
+static void chipidea_reset_device(ChipideaState *ci)
+{
+    timer_del(ci->gadget_config_timer);
+    timer_del(ci->gadget_idle_timer);
+    timer_del(ci->gadget_resume_timer);
+    ci->gadget_configured = false;
+    ci->gadget_config_phase = 0;
+    ci->gadget_host_suspended = false;
+    ci->gadget_resuming = false;
+    qemu_set_irq(ci->resume, 0);
+    ci->dc_mode = 0;
+    ci->endptsetupstat = 0;
+    ci->endpointprime = 0;
+    ci->endptflush = 0;
+    ci->endptstatus = 0;
+    ci->endptcomplete = 0;
+    memset(ci->endptctrl, 0, sizeof(ci->endptctrl));
+    ci->endpoint_commands_ready = false;
 }
 
 static void chipidea_command_write(void *opaque, hwaddr offset,
@@ -620,6 +666,20 @@ static void chipidea_command_write(void *opaque, hwaddr offset,
     EHCIState *ehci = &SYS_BUS_EHCI(ci)->ehci;
     bool was_running = ehci->usbcmd & BIT(0);
 
+    if ((ci->dc_mode & 3) == 3) {
+        uint32_t retained = ehci->portsc[0] & CI_PORTSC_RESET_RETAIN;
+
+        /* The same OTG core probes as an EHCI host before the UDC binds. */
+        ehci_opreg_write(ehci, offset, value, size);
+        if (offset == 0 && (value & BIT(1))) {
+            ehci->portsc[0] = (ehci->portsc[0] & ~CI_PORTSC_RESET_RETAIN) |
+                              retained;
+            chipidea_reset_device(ci);
+            ehci->usbsts &= ~USBSTS_HALT;
+        }
+        chipidea_update_irq(ci);
+        return;
+    }
     /* Device reset/suspend status occupies bits that EHCI reserves.  Using
      * the parent's USBSTS/USBINTR handlers silently loses UDC interrupts. */
     if (offset == 4) {
@@ -638,20 +698,8 @@ static void chipidea_command_write(void *opaque, hwaddr offset,
          * again can interrupt its resume path before the UDC is ready. */
         ehci->usbsts = 0;
         ehci->usbintr = 0;
-        timer_del(ci->gadget_idle_timer);
-        timer_del(ci->gadget_resume_timer);
-        ci->gadget_host_suspended = false;
-        ci->gadget_resuming = false;
-        qemu_set_irq(ci->resume, 0);
+        chipidea_reset_device(ci);
         ehci->portsc[0] &= ~(CI_PORTSC_SUSPEND | CI_PORTSC_FORCE_RESUME);
-        ci->dc_mode = 0;
-        ci->endptsetupstat = 0;
-        ci->endpointprime = 0;
-        ci->endptflush = 0;
-        ci->endptstatus = 0;
-        ci->endptcomplete = 0;
-        memset(ci->endptctrl, 0, sizeof(ci->endptctrl));
-        ci->endpoint_commands_ready = false;
         chipidea_update_irq(ci);
     }
 
@@ -695,7 +743,13 @@ static const struct MemoryRegionOps chipidea_command_ops = {
 
 static uint64_t chipidea_port_read(void *opaque, hwaddr offset, unsigned size)
 {
-    return SYS_BUS_EHCI(opaque)->ehci.portsc[0];
+    ChipideaState *ci = opaque;
+    EHCIState *ehci = &SYS_BUS_EHCI(ci)->ehci;
+
+    if ((ci->dc_mode & 3) == 3) {
+        return ehci_port_read(ehci, offset, size);
+    }
+    return ehci->portsc[0];
 }
 
 static void chipidea_port_write(void *opaque, hwaddr offset, uint64_t value,
@@ -710,6 +764,14 @@ static void chipidea_port_write(void *opaque, hwaddr offset, uint64_t value,
                   CI_PORTSC_SUSPEND | (3U << 26);
     uint32_t w1c = BIT(1) | BIT(3) | BIT(5);
 
+    if ((ci->dc_mode & 3) == 3) {
+        ehci_port_write(ehci, offset, value, size);
+        /* PHY interface and low-power controls are outside standard EHCI. */
+        ehci->portsc[0] = (ehci->portsc[0] & ~CI_PORTSC_PHY_MASK) |
+                          (value & CI_PORTSC_PHY_MASK);
+        chipidea_update_irq(ci);
+        return;
+    }
     ehci->portsc[0] = (old & ro) | (old & w1c & ~value) |
                       (value & ~(ro | w1c));
     if (value & CI_PORTSC_FORCE_RESUME) {

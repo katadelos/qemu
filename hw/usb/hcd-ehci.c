@@ -906,8 +906,7 @@ static void ehci_caps_write(void *ptr, hwaddr addr,
 {
 }
 
-static uint64_t ehci_opreg_read(void *ptr, hwaddr addr,
-                                unsigned size)
+uint64_t ehci_opreg_read(void *ptr, hwaddr addr, unsigned size)
 {
     EHCIState *s = ptr;
     uint32_t val;
@@ -925,8 +924,7 @@ static uint64_t ehci_opreg_read(void *ptr, hwaddr addr,
     return val;
 }
 
-static uint64_t ehci_port_read(void *ptr, hwaddr addr,
-                               unsigned size)
+uint64_t ehci_port_read(void *ptr, hwaddr addr, unsigned size)
 {
     EHCIState *s = ptr;
     uint32_t val;
@@ -964,8 +962,7 @@ static void handle_port_owner_write(EHCIState *s, int port, uint32_t owner)
     }
 }
 
-static void ehci_port_write(void *ptr, hwaddr addr,
-                            uint64_t val, unsigned size)
+void ehci_port_write(void *ptr, hwaddr addr, uint64_t val, unsigned size)
 {
     EHCIState *s = ptr;
     int port = addr >> 2;
@@ -1017,8 +1014,7 @@ static void ehci_port_write(void *ptr, hwaddr addr,
     trace_usb_ehci_portsc_change(addr + s->portscbase, addr >> 2, *portsc, old);
 }
 
-static void ehci_opreg_write(void *ptr, hwaddr addr,
-                             uint64_t val, unsigned size)
+void ehci_opreg_write(void *ptr, hwaddr addr, uint64_t val, unsigned size)
 {
     EHCIState *s = ptr;
     uint32_t *mmio = s->opreg + (addr >> 2);

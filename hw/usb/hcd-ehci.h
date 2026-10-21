@@ -326,6 +326,10 @@ void usb_ehci_finalize(EHCIState *s);
 void usb_ehci_realize(EHCIState *s, DeviceState *dev, Error **errp);
 void usb_ehci_unrealize(EHCIState *s, DeviceState *dev);
 void ehci_reset(void *opaque);
+uint64_t ehci_opreg_read(void *ptr, hwaddr addr, unsigned size);
+void ehci_opreg_write(void *ptr, hwaddr addr, uint64_t val, unsigned size);
+uint64_t ehci_port_read(void *ptr, hwaddr addr, unsigned size);
+void ehci_port_write(void *ptr, hwaddr addr, uint64_t val, unsigned size);
 
 #define TYPE_PCI_EHCI "pci-ehci-usb"
 OBJECT_DECLARE_SIMPLE_TYPE(EHCIPCIState, PCI_EHCI)
