@@ -11,7 +11,9 @@
 #include "hw/arm/fsl-imx6.h"
 #include "hw/arm/machines-qom.h"
 #include "hw/core/boards.h"
+#include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/core/split-irq.h"
 #include "hw/display/imx_epdc.h"
 #include "hw/i2c/drv2667.h"
 #include "hw/i2c/cyttsp4.h"
@@ -24,6 +26,7 @@
 #include "hw/misc/imx6sl_pxp.h"
 #include "hw/misc/max44009.h"
 #include "hw/sd/sd.h"
+#include "hw/usb/imx-usb-misc.h"
 #include "qemu/error-report.h"
 #include "qemu/units.h"
 #include "system/block-backend.h"
@@ -170,6 +173,9 @@ static void wario_init(MachineState *machine)
     DeviceState *pxp;
     DeviceState *keyboard;
     DeviceState *pmic;
+    DeviceState *uic;
+    DeviceState *usb_misc;
+    DeviceState *usb_vbus;
     I2CBus *i2c;
     bool bourbon, pinot, muscat;
     static const uint8_t muscat_barcode[] = { 0xe9, 0xe8, 0x04 }; /* ED4 */
@@ -217,6 +223,15 @@ static void wario_init(MachineState *machine)
     }
     qdev_realize(DEVICE(s), NULL, &error_fatal);
 
+    usb_misc = qdev_new(TYPE_IMX_USB_MISC);
+    qdev_prop_set_bit(usb_misc, "imx6-layout", true);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(usb_misc), &error_fatal);
+    sysbus_mmio_map_overlap(SYS_BUS_DEVICE(usb_misc), 0, 0x02184800, 2);
+    sysbus_connect_irq(SYS_BUS_DEVICE(usb_misc), 0,
+        qdev_get_gpio_in_named(DEVICE(&s->usb[0]), "wakeup", 0));
+    qdev_connect_gpio_out_named(DEVICE(&s->usb[0]), "resume", 0,
+                                qdev_get_gpio_in(usb_misc, 0));
+
     memory_region_add_subregion(get_system_memory(), WARIO_RAM_BASE,
                                 machine->ram);
 
@@ -228,7 +243,7 @@ static void wario_init(MachineState *machine)
 
     i2c = s->i2c[0].bus;
     i2c_slave_create_simple(i2c, TYPE_MAX77696, 0x34);
-    i2c_slave_create_simple(i2c, TYPE_MAX77696, 0x35);
+    uic = DEVICE(i2c_slave_create_simple(i2c, TYPE_MAX77696, 0x35));
     pmic = qdev_new(TYPE_MAX77696);
     qdev_prop_set_uint8(pmic, "address", 0x3c);
     qdev_connect_gpio_out(pmic, 0,
@@ -237,6 +252,20 @@ static void wario_init(MachineState *machine)
     qdev_connect_gpio_out(pmic, 1,
                           qdev_get_gpio_in(DEVICE(&s->gpio[1]), 13));
     qdev_realize_and_unref(pmic, BUS(i2c), &error_fatal);
+    qdev_connect_gpio_out(uic, 0, qdev_get_gpio_in_named(pmic, "uic-irq", 0));
+    usb_vbus = qdev_new(TYPE_SPLIT_IRQ);
+    qdev_prop_set_uint16(usb_vbus, "num-lines", 3);
+    qdev_realize_and_unref(usb_vbus, NULL, &error_fatal);
+    qdev_connect_gpio_out(usb_vbus, 0,
+                          qdev_get_gpio_in_named(usb_misc, "vbus", 0));
+    qdev_connect_gpio_out(usb_vbus, 1,
+                          qdev_get_gpio_in_named(pmic, "vbus", 0));
+    qdev_connect_gpio_out(usb_vbus, 2,
+                          qdev_get_gpio_in_named(uic, "vbus", 0));
+    qdev_connect_gpio_out_named(DEVICE(&s->usb[0]), "vbus", 0,
+                                qdev_get_gpio_in(usb_vbus, 0));
+    qemu_set_irq(qdev_get_gpio_in(usb_vbus, 0),
+                 s->usb[0].gadget_host_connected);
     i2c_slave_create_simple(i2c, TYPE_MAX77696, 0x68);
 
     /* Icewine/Wario 4 ambient-light sensor: I2C3, active-low GPIO4_14. */
