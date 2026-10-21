@@ -633,6 +633,11 @@ static void chipidea_command_write(void *opaque, hwaddr offset,
         return;
     }
     if (value & BIT(1)) {
+        /* Device reset clears pending events and interrupt enables.  Keeping
+         * a disconnect's port-change status until the driver enables USBINTR
+         * again can interrupt its resume path before the UDC is ready. */
+        ehci->usbsts = 0;
+        ehci->usbintr = 0;
         timer_del(ci->gadget_idle_timer);
         timer_del(ci->gadget_resume_timer);
         ci->gadget_host_suspended = false;
@@ -647,6 +652,7 @@ static void chipidea_command_write(void *opaque, hwaddr offset,
         ci->endptcomplete = 0;
         memset(ci->endptctrl, 0, sizeof(ci->endptctrl));
         ci->endpoint_commands_ready = false;
+        chipidea_update_irq(ci);
     }
 
     ehci->usbcmd = value & ~BIT(1);
