@@ -10,6 +10,7 @@
 
 #define IMX5_USBCTRL_OWIE BIT(27)
 #define IMX6_USBCTRL_OWIE BIT(10)
+#define IMX6_USBCTRL_WKUP_VBUS_EN BIT(17)
 #define USBCTRL_OWIR BIT(31)
 #define IMX5_USBCTRL_H1WIE BIT(11)
 #define IMX5_USBCTRL_H1WIR BIT(15)
@@ -22,6 +23,7 @@ struct IMXUSBMiscState {
     qemu_irq irq[2];
     uint32_t ctrl;
     bool imx6_layout;
+    bool vbus;
 };
 
 static uint32_t imx_usb_misc_wakeup_enable(IMXUSBMiscState *s)
@@ -48,6 +50,22 @@ static void imx_usb_misc_resume(void *opaque, int n, int level)
     trace_imx_usb_misc_resume(n, level, s->ctrl);
     if (level && (s->ctrl & enable)) {
         s->ctrl |= request;
+        imx_usb_misc_update_irq(s);
+    }
+}
+
+static void imx_usb_misc_vbus(void *opaque, int n, int level)
+{
+    IMXUSBMiscState *s = opaque;
+    uint32_t enable = IMX6_USBCTRL_OWIE | IMX6_USBCTRL_WKUP_VBUS_EN;
+
+    if (s->vbus == !!level) {
+        return;
+    }
+    s->vbus = !!level;
+    if (s->imx6_layout && (s->ctrl & enable) == enable) {
+        /* Either cable edge can wake a PHY whose controller clock is gated. */
+        s->ctrl |= USBCTRL_OWIR;
         imx_usb_misc_update_irq(s);
     }
 }
@@ -95,10 +113,11 @@ static void imx_usb_misc_reset(DeviceState *dev)
 
 static const VMStateDescription vmstate_imx_usb_misc = {
     .name = TYPE_IMX_USB_MISC,
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(ctrl, IMXUSBMiscState),
+        VMSTATE_BOOL(vbus, IMXUSBMiscState),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -117,6 +136,7 @@ static void imx_usb_misc_init(Object *obj)
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq[0]);
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq[1]);
     qdev_init_gpio_in(DEVICE(obj), imx_usb_misc_resume, 2);
+    qdev_init_gpio_in_named(DEVICE(obj), imx_usb_misc_vbus, "vbus", 1);
 }
 
 static void imx_usb_misc_class_init(ObjectClass *klass, const void *data)
