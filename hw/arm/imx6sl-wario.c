@@ -216,9 +216,9 @@ static void wario_init(MachineState *machine)
     object_property_set_uint(OBJECT(s), "fec-phy-num", 0,
                              &error_fatal);
 
-    /* Icewine's Hall output is high while the cover is open. */
+    /* Icewine and Muscat Hall outputs are high with the cover open. */
     if (g_str_has_prefix(wms->idme.pcbsn, "047") ||
-        g_str_has_prefix(wms->idme.pcbsn, "048")) {
+        g_str_has_prefix(wms->idme.pcbsn, "048") || muscat) {
         object_property_set_uint(OBJECT(&s->gpio[3]), "reset-psr",
                                  BIT(7), &error_fatal);
     }
