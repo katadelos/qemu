@@ -9,6 +9,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "migration/vmstate.h"
 #include "hw/display/mt8113_hwtcon.h"
 #include "hw/core/cpu.h"
 #include "hw/core/irq.h"
@@ -1628,6 +1629,7 @@ static void mt8113_hwtcon_unrealize(DeviceState *dev)
     s->fb_buffer = NULL;
     g_free(s->pending_fb_buffer);
     s->pending_fb_buffer = NULL;
+    g_clear_pointer(&s->migration_panel, g_free);
     g_free(s->working_image_buffer);
     s->working_image_buffer = NULL;
     s->working_image_buffer_size = 0;
@@ -1645,10 +1647,171 @@ static const Property mt8113_hwtcon_properties[] = {
                      retain_boot_splash, false),
 };
 
+/* The e-ink panel retains pixels independently of guest scanout RAM. */
+static int mt8113_hwtcon_pre_save(void *opaque)
+{
+    MT8113HWTCONState *s = opaque;
+    DisplaySurface *surface = qemu_console_surface(s->console);
+    uint64_t fb_size = (uint64_t)s->fb_pitch * s->fb_source_height;
+
+    if (fb_size > MDP_MAX_DMA_BYTES || surface_bits_per_pixel(surface) != 32) {
+        return -EINVAL;
+    }
+    s->migration_fb_size = s->fb_buffer_ready ? fb_size : 0;
+    s->migration_pending_size = s->pending_fb_buffer_ready ? fb_size : 0;
+    s->migration_panel_width = surface_width(surface);
+    s->migration_panel_height = surface_height(surface);
+    s->migration_panel_size = s->migration_panel_width *
+                               s->migration_panel_height * 4;
+    s->migration_panel = g_realloc(s->migration_panel, s->migration_panel_size);
+    for (uint32_t y = 0; y < s->migration_panel_height; y++) {
+        memcpy(s->migration_panel + y * s->migration_panel_width * 4,
+               surface_data(surface) + y * surface_stride(surface),
+               s->migration_panel_width * 4);
+    }
+    s->migration_handoff_remaining_ms = s->boot_handoff_active ?
+        MAX(INT64_C(0), s->boot_handoff_deadline_ms -
+            qemu_clock_get_ms(QEMU_CLOCK_REALTIME)) : 0;
+    return 0;
+}
+
+static bool mt8113_hwtcon_valid_buffers(void *opaque, int version_id)
+{
+    MT8113HWTCONState *s = opaque;
+    uint64_t fb_size = (uint64_t)s->fb_pitch * s->fb_source_height;
+
+    return s->migration_panel_width && s->migration_panel_width <= 4096 &&
+           s->migration_panel_height && s->migration_panel_height <= 4096 &&
+           s->migration_panel_size == (uint64_t)s->migration_panel_width *
+                                     s->migration_panel_height * 4 &&
+           fb_size <= MDP_MAX_DMA_BYTES &&
+           s->migration_fb_size == (s->fb_buffer_ready ? fb_size : 0) &&
+           s->migration_pending_size ==
+               (s->pending_fb_buffer_ready ? fb_size : 0) &&
+           s->working_image_buffer_size <= MDP_MAX_DMA_BYTES;
+}
+
+static int mt8113_hwtcon_post_load(void *opaque, int version_id)
+{
+    MT8113HWTCONState *s = opaque;
+    DisplaySurface *surface = mt8113_hwtcon_prepare_surface(
+        s, s->migration_panel_width, s->migration_panel_height);
+
+    for (uint32_t y = 0; y < s->migration_panel_height; y++) {
+        memcpy(surface_data(surface) + y * surface_stride(surface),
+               s->migration_panel + y * s->migration_panel_width * 4,
+               s->migration_panel_width * 4);
+    }
+    g_clear_pointer(&s->migration_panel, g_free);
+    s->boot_handoff_deadline_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
+                                 s->migration_handoff_remaining_ms;
+    mt8113_hwtcon_update_irq(s);
+    dpy_gfx_update_full(s->console);
+    /* Host realtime deadlines are re-established on the receiving host. */
+    if (s->scanout_dirty) {
+        mt8113_hwtcon_schedule_scanout(s);
+    }
+    return 0;
+}
+
+static const VMStateDescription mt8113_hwtcon_bank_vmstate = {
+    .name = "mt8113-hwtcon-bank",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(regs, MT8113HWTCONBank,
+                             MT8113_HWTCON_MMIO_SIZE / sizeof(uint32_t)),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static const VMStateDescription mt8113_hwtcon_vmstate = {
+    .name = "mt8113-hwtcon",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .pre_save = mt8113_hwtcon_pre_save,
+    .post_load = mt8113_hwtcon_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_STRUCT_ARRAY(bank, MT8113HWTCONState,
+                             MT8113_HWTCON_MMIO_BANKS, 1,
+                             mt8113_hwtcon_bank_vmstate, MT8113HWTCONBank),
+        VMSTATE_UINT32_ARRAY(cfa_mailbox_regs, MT8113HWTCONState, MT8113_HWTCON_CFA_MAILBOX_SIZE /
+                              sizeof(uint32_t)),
+        VMSTATE_UINT32(working_image_buffer_size, MT8113HWTCONState),
+        VMSTATE_UINT32(migration_fb_size, MT8113HWTCONState),
+        VMSTATE_UINT32(migration_pending_size, MT8113HWTCONState),
+        VMSTATE_UINT32(migration_panel_size, MT8113HWTCONState),
+        VMSTATE_UINT32(migration_panel_width, MT8113HWTCONState),
+        VMSTATE_UINT32(migration_panel_height, MT8113HWTCONState),
+        VMSTATE_INT64(migration_handoff_remaining_ms, MT8113HWTCONState),
+        VMSTATE_UINT32(fb_iova, MT8113HWTCONState),
+        VMSTATE_UINT32(fb_base_iova, MT8113HWTCONState),
+        VMSTATE_UINT32(fb_guest_va, MT8113HWTCONState),
+        VMSTATE_UINT32(fb_width, MT8113HWTCONState),
+        VMSTATE_UINT32(fb_height, MT8113HWTCONState),
+        VMSTATE_UINT32(fb_source_width, MT8113HWTCONState),
+        VMSTATE_UINT32(fb_source_height, MT8113HWTCONState),
+        VMSTATE_UINT32(fb_pitch, MT8113HWTCONState),
+        VMSTATE_UINT32(fb_format, MT8113HWTCONState),
+        VMSTATE_UINT32(fb_rotation, MT8113HWTCONState),
+        VMSTATE_BOOL(fb_flip_x, MT8113HWTCONState),
+        VMSTATE_UINT32(last_update_x, MT8113HWTCONState),
+        VMSTATE_UINT32(last_update_y, MT8113HWTCONState),
+        VMSTATE_UINT32(last_update_width, MT8113HWTCONState),
+        VMSTATE_UINT32(last_update_height, MT8113HWTCONState),
+        VMSTATE_UINT32(last_pipeline_flags, MT8113HWTCONState),
+        VMSTATE_UINT32(last_pipeline_lut, MT8113HWTCONState),
+        VMSTATE_UINT32(last_frame_min, MT8113HWTCONState),
+        VMSTATE_UINT32(last_frame_max, MT8113HWTCONState),
+        VMSTATE_UINT32(dual_pipeline_img_addr, MT8113HWTCONState),
+        VMSTATE_UINT32(dual_pipeline_wb_addr0, MT8113HWTCONState),
+        VMSTATE_UINT32(dual_pipeline_wb_addr1, MT8113HWTCONState),
+        VMSTATE_UINT32(dual_pipeline_position, MT8113HWTCONState),
+        VMSTATE_UINT32(dual_pipeline_extent, MT8113HWTCONState),
+        VMSTATE_UINT32(dual_pipeline_flags, MT8113HWTCONState),
+        VMSTATE_UINT32(dual_pipeline_lut, MT8113HWTCONState),
+        VMSTATE_BOOL(fb_buffer_ready, MT8113HWTCONState),
+        VMSTATE_BOOL(pending_fb_buffer_ready, MT8113HWTCONState),
+        VMSTATE_BOOL(dual_pipeline_pending, MT8113HWTCONState),
+        VMSTATE_BOOL(cfa_active, MT8113HWTCONState),
+        VMSTATE_BOOL(scanout_dirty, MT8113HWTCONState),
+        VMSTATE_BOOL(image_scanout_active, MT8113HWTCONState),
+        VMSTATE_BOOL(boot_handoff_active, MT8113HWTCONState),
+        VMSTATE_UINT64(mdp_transactions, MT8113HWTCONState),
+        VMSTATE_UINT64(mdp_writebacks, MT8113HWTCONState),
+        VMSTATE_UINT64(mdp_writeback_skips, MT8113HWTCONState),
+        VMSTATE_UINT64(mdp_writeback_failures, MT8113HWTCONState),
+        VMSTATE_UINT64(pipeline_triggers, MT8113HWTCONState),
+        VMSTATE_UINT64(pipeline_voids, MT8113HWTCONState),
+        VMSTATE_UINT64(waveform_triggers, MT8113HWTCONState),
+        VMSTATE_UINT64(boot_handoff_arms, MT8113HWTCONState),
+        VMSTATE_UINT64(boot_blank_retentions, MT8113HWTCONState),
+        VMSTATE_UINT64(cfa_source_reports, MT8113HWTCONState),
+        VMSTATE_UINT32(cfa_fault_va, MT8113HWTCONState),
+        VMSTATE_UINT32(cfa_fault_cpu, MT8113HWTCONState),
+        VMSTATE_UINT64(scanout_captures, MT8113HWTCONState),
+        VMSTATE_UINT64(scanout_refreshes, MT8113HWTCONState),
+        VMSTATE_UINT64(scanout_read_failures, MT8113HWTCONState),
+        VMSTATE_UINT64(pending_luts, MT8113HWTCONState),
+        VMSTATE_VALIDATE("buffer dimensions", mt8113_hwtcon_valid_buffers),
+        VMSTATE_VBUFFER_ALLOC_UINT32(fb_buffer, MT8113HWTCONState, 1,
+                                     NULL, migration_fb_size),
+        VMSTATE_VBUFFER_ALLOC_UINT32(pending_fb_buffer, MT8113HWTCONState, 1,
+                                     NULL, migration_pending_size),
+        VMSTATE_VBUFFER_ALLOC_UINT32(working_image_buffer, MT8113HWTCONState, 1,
+                                     NULL, working_image_buffer_size),
+        VMSTATE_VBUFFER_ALLOC_UINT32(migration_panel, MT8113HWTCONState, 1,
+                                     NULL, migration_panel_size),
+        VMSTATE_TIMER_PTR(lut_timer, MT8113HWTCONState),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static void mt8113_hwtcon_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
 
+    dc->vmsd = &mt8113_hwtcon_vmstate;
     dc->realize = mt8113_hwtcon_realize;
     dc->unrealize = mt8113_hwtcon_unrealize;
     device_class_set_legacy_reset(dc, mt8113_hwtcon_reset);

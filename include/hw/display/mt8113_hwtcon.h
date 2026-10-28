@@ -56,7 +56,14 @@ struct MT8113HWTCONState {
     uint8_t *fb_buffer;
     uint8_t *pending_fb_buffer;
     uint8_t *working_image_buffer;
-    size_t working_image_buffer_size;
+    uint32_t working_image_buffer_size;
+    uint32_t migration_fb_size;
+    uint32_t migration_pending_size;
+    uint32_t migration_panel_size;
+    uint32_t migration_panel_width;
+    uint32_t migration_panel_height;
+    uint8_t *migration_panel;
+    int64_t migration_handoff_remaining_ms;
     uint32_t fb_iova;
     uint32_t fb_base_iova;
     uint32_t fb_guest_va;
