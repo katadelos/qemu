@@ -636,7 +636,7 @@ static void bellatrix_init(MachineState *machine)
     const BellatrixBoard *board = bellatrix_find_board(bms->board);
     bool malbec = !strcmp(board->name, "malbec");
     bool rossini = !strcmp(board->name, "rossini");
-    bool button_support = board->scribe || board->prosecco;
+    bool button_support = board->scribe || board->prosecco || rossini;
     MT8113State *soc;
     I2CSlave *fp9930 = NULL;
     I2CSlave *bd71828;
