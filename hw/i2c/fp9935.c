@@ -1,4 +1,4 @@
-/* Fitipower FP9935 electrophoretic display PMIC register model. */
+/* Fitipower FP9935/FP9937 electrophoretic display PMIC register model. */
 
 #include "qemu/osdep.h"
 #include "hw/i2c/fp9935.h"
@@ -135,8 +135,21 @@ static const TypeInfo fp9935_info = {
     .class_init = fp9935_class_init,
 };
 
+/*
+ * The AO5 FP9937 driver uses the same byte-addressed register interface,
+ * signed temperature at register 0, EN/EN_TS inputs and power-good output.
+ * Its additional voltage channels are programmed in registers 0x14..0x19;
+ * voltage encodings are interpreted by the guest, so the register backing
+ * and rail sequencing can be shared with FP9935.
+ */
+static const TypeInfo fp9937_info = {
+    .name = TYPE_FP9937,
+    .parent = TYPE_FP9935,
+};
+
 static void fp9935_register_types(void)
 {
     type_register_static(&fp9935_info);
+    type_register_static(&fp9937_info);
 }
 type_init(fp9935_register_types)

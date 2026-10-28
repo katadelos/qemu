@@ -7,6 +7,7 @@
 #include "qom/object.h"
 
 #define TYPE_FP9935 "fp9935"
+#define TYPE_FP9937 "fp9937"
 /* Named GPIO inputs: enable, temperature-enable. Named output: power-good.
  * Temperature ADC enable is independent of the display rail enable.
  */
