@@ -183,6 +183,7 @@ static bool mtk_msdc_dma_descriptors(MTKMSDCState *s)
              i < MSDC_MAX_BD_NUM && s->transfer_remaining; i++) {
             MTKMSDCDescriptor bd;
             hwaddr buffer_addr;
+            uint32_t length;
 
             if (!mtk_msdc_dma_read_desc(bd_addr, &bd)) {
                 return false;
@@ -190,7 +191,13 @@ static bool mtk_msdc_dma_descriptors(MTKMSDCState *s)
             buffer_addr = bd.ptr |
                 ((hwaddr)((bd.info >> MSDC_BD_PTR_H4_SHIFT) &
                           MSDC_DMA_ADDR_H4_MASK) << 32);
-            if (!mtk_msdc_dma_buffer(s, buffer_addr, bd.length & 0xffffff)) {
+            /* The 16-bit BD length encodes a full 64 KiB segment as zero.
+             * Linux's MT8512 driver emits this for coalesced DMA mappings. */
+            length = bd.length & 0xffffff;
+            if (!length) {
+                length = 0x10000;
+            }
+            if (!mtk_msdc_dma_buffer(s, buffer_addr, length)) {
                 return false;
             }
             if (bd.info & MSDC_BD_EOL) {
