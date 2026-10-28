@@ -176,6 +176,7 @@ static void wario_init(MachineState *machine)
     DeviceState *uic;
     DeviceState *usb_misc;
     DeviceState *usb_vbus;
+    DeviceState *rtc;
     I2CBus *i2c;
     bool bourbon, pinot, muscat;
     static const uint8_t muscat_barcode[] = { 0xe9, 0xe8, 0x04 }; /* ED4 */
@@ -266,7 +267,9 @@ static void wario_init(MachineState *machine)
                                 qdev_get_gpio_in(usb_vbus, 0));
     qemu_set_irq(qdev_get_gpio_in(usb_vbus, 0),
                  s->usb[0].gadget_host_connected);
-    i2c_slave_create_simple(i2c, TYPE_MAX77696, 0x68);
+    rtc = DEVICE(i2c_slave_create_simple(i2c, TYPE_MAX77696, 0x68));
+    qdev_connect_gpio_out_named(rtc, "rtc-irq", 0,
+                                qdev_get_gpio_in_named(pmic, "rtc-irq-in", 0));
 
     /* Icewine/Wario 4 ambient-light sensor: I2C3, active-low GPIO4_14. */
     pmic = qdev_new(TYPE_MAX44009);

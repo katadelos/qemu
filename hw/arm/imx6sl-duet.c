@@ -133,6 +133,7 @@ static void duet_init(MachineState *machine)
     DuetMachineState *dms = DUET_MACHINE(machine);
     FslIMX6State *s;
     DeviceState *pmic;
+    DeviceState *rtc;
     DeviceState *touch;
     DeviceState *epdc;
     DeviceState *mmdc;
@@ -186,7 +187,9 @@ static void duet_init(MachineState *machine)
     qdev_connect_gpio_out(pmic, 1,
                           qdev_get_gpio_in(DEVICE(&s->gpio[1]), 13));
     qdev_realize_and_unref(pmic, BUS(s->i2c[0].bus), &error_fatal);
-    i2c_slave_create_simple(s->i2c[0].bus, TYPE_MAX77696, 0x68);
+    rtc = DEVICE(i2c_slave_create_simple(s->i2c[0].bus, TYPE_MAX77696, 0x68));
+    qdev_connect_gpio_out_named(rtc, "rtc-irq", 0,
+                                qdev_get_gpio_in_named(pmic, "rtc-irq-in", 0));
 
     touch = qdev_new(TYPE_CYTTSP4);
     qdev_prop_set_uint8(touch, "address", 0x24);

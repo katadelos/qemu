@@ -5,7 +5,10 @@
 #include "hw/core/irq.h"
 #include "migration/vmstate.h"
 #include "qemu/module.h"
+#include "qemu/bcd.h"
+#include "qemu/timer.h"
 #include "system/rtc.h"
+#include "system/system.h"
 #include "system/runstate.h"
 #include "ui/input.h"
 #include "trace.h"
@@ -27,6 +30,7 @@
 #define INTTOP1                  0xa2
 #define INTTOP1M                 0xa3
 #define INTTOP1_TOPSYS           (1U << 7)
+#define INTTOP1_RTC              (1U << 3)
 #define INTTOP1_CHGA             (1U << 2)
 #define INTTOP1_UIC              (1U << 0)
 #define UIC_INT1                 0x01
@@ -55,6 +59,20 @@
 #define VREG_EPDCNFG_EPDEN       (1U << 7)
 
 #define MAX77696_RTC_ADDR        0x68
+#define RTC_INT                  0x00
+#define RTC_INTM                 0x01
+#define RTC_CONTROL              0x03
+#define RTC_CONTROL_BCD          BIT(0)
+#define RTC_CONTROL_24H          BIT(1)
+#define RTC_INT_ALARM1           BIT(1)
+#define RTC_INT_ALARM2           BIT(2)
+#define RTC_INT_1S               BIT(4)
+#define RTC_INT_60S              BIT(0)
+#define RTC_AE1                  0x0e
+#define RTC_ALARM1               0x0f
+#define RTC_AE2                  0x16
+#define RTC_ALARM2               0x17
+#define RTC_FIELDS               7
 #define RTC_UPDATE0              0x04
 #define RTC_UPDATE0_RBUDR        (1U << 4)
 #define RTC_UPDATE0_UDR          (1U << 0)
@@ -70,12 +88,19 @@
 struct MAX77696State {
     I2CSlave parent_obj;
     qemu_irq irq[2];
+    qemu_irq rtc_irq;
+    QEMUTimer *rtc_timer;
     uint8_t regs[512];
     uint8_t pointer;
     uint8_t byte;
     uint8_t len;
     uint8_t width;
     int64_t rtc_offset;
+    int64_t rtc_last_tick;
+    uint8_t rtc_alarm[RTC_FIELDS * 2];
+    bool rtc_time_dirty;
+    bool rtc_pending;
+    bool rtc_alarm_match[2];
     bool power_down;
     QemuInputHandlerState *input_handler;
 };
@@ -110,7 +135,11 @@ static void max77696_update_irq(MAX77696State *s)
         qemu_set_irq(s->irq[0], pending);
         return;
     }
-    if (!max77696_is_main(s)) {
+    if (max77696_is_rtc(s)) {
+        bool pending = s->regs[RTC_INT] & ~s->regs[RTC_INTM];
+        qemu_set_irq(s->rtc_irq, pending);
+        return;
+    } else if (!max77696_is_main(s)) {
         return;
     }
 
@@ -124,6 +153,11 @@ static void max77696_update_irq(MAX77696State *s)
         s->regs[INTTOP1] |= INTTOP1_CHGA;
     } else {
         s->regs[INTTOP1] &= ~INTTOP1_CHGA;
+    }
+    if (s->rtc_pending) {
+        s->regs[INTTOP1] |= INTTOP1_RTC;
+    } else {
+        s->regs[INTTOP1] &= ~INTTOP1_RTC;
     }
     root_pending = s->regs[INTTOP1] & ~s->regs[INTTOP1M];
 
@@ -242,43 +276,152 @@ static void max77696_adc_select_channel(MAX77696State *s, uint8_t value)
     s->regs[ADC_DATA_L] = sample;
 }
 
+static void max77696_rtc_irq(void *opaque, int n, int level)
+{
+    MAX77696State *s = opaque;
+
+    s->rtc_pending = level != 0;
+    max77696_update_irq(s);
+}
+
+static uint8_t max77696_rtc_encode(MAX77696State *s, unsigned value)
+{
+    return s->regs[RTC_CONTROL] & RTC_CONTROL_BCD ? to_bcd(value) : value;
+}
+
+static unsigned max77696_rtc_decode(MAX77696State *s, uint8_t value)
+{
+    return s->regs[RTC_CONTROL] & RTC_CONTROL_BCD ? from_bcd(value) : value;
+}
+
+static void max77696_rtc_format(MAX77696State *s, struct tm *now,
+                                uint8_t *regs)
+{
+    unsigned hour = now->tm_hour;
+
+    if (!(s->regs[RTC_CONTROL] & RTC_CONTROL_24H)) {
+        hour = hour % 12 ? hour % 12 : 12;
+    }
+    regs[0] = max77696_rtc_encode(s, now->tm_sec);
+    regs[1] = max77696_rtc_encode(s, now->tm_min);
+    regs[2] = max77696_rtc_encode(s, hour);
+    if (!(s->regs[RTC_CONTROL] & RTC_CONTROL_24H) && now->tm_hour >= 12) {
+        regs[2] |= RTC_HOUR_PM;
+    }
+    regs[3] = 1U << now->tm_wday;
+    regs[4] = max77696_rtc_encode(s, now->tm_mon + 1);
+    regs[5] = max77696_rtc_encode(s, now->tm_year - 100);
+    regs[6] = max77696_rtc_encode(s, now->tm_mday);
+}
+
 static void max77696_rtc_capture(MAX77696State *s)
 {
     struct tm now;
-    int hour;
 
     qemu_get_timedate(&now, s->rtc_offset);
-    s->regs[RTC_SEC] = now.tm_sec;
-    s->regs[RTC_MIN] = now.tm_min;
+    max77696_rtc_format(s, &now, &s->regs[RTC_SEC]);
+}
 
-    hour = now.tm_hour % 12;
-    if (hour == 0) {
-        hour = 12;
+static void max77696_rtc_schedule(MAX77696State *s)
+{
+    int64_t now = qemu_clock_get_ms(rtc_clock);
+
+    if ((s->regs[RTC_AE1] | s->regs[RTC_AE2]) & 0x7f ||
+        (~s->regs[RTC_INTM] & (RTC_INT_1S | RTC_INT_60S))) {
+        timer_mod(s->rtc_timer, (now / 1000 + 1) * 1000);
+    } else {
+        timer_del(s->rtc_timer);
     }
-    s->regs[RTC_HOUR] = hour | (now.tm_hour >= 12 ? RTC_HOUR_PM : 0);
-    s->regs[RTC_DOW] = 1U << now.tm_wday;
-    s->regs[RTC_MONTH] = now.tm_mon + 1;
-    s->regs[RTC_YEAR] = now.tm_year - 100;
-    s->regs[RTC_DOM] = now.tm_mday;
+}
+
+static void max77696_rtc_tick(void *opaque)
+{
+    MAX77696State *s = opaque;
+    struct tm now;
+    uint8_t current[RTC_FIELDS];
+    unsigned alarm, field;
+    int64_t clock_now = qemu_clock_get_ms(rtc_clock) / 1000;
+
+    qemu_get_timedate(&now, s->rtc_offset);
+    max77696_rtc_format(s, &now, current);
+    for (alarm = 0; alarm < 2; alarm++) {
+        uint8_t enabled = s->regs[alarm ? RTC_AE2 : RTC_AE1] & 0x7f;
+        bool match = enabled != 0;
+
+        for (field = 0; field < RTC_FIELDS; field++) {
+            if (enabled & BIT(field)) {
+                uint8_t value = s->rtc_alarm[alarm * RTC_FIELDS + field];
+                match &= field == 3 ? (current[field] & value) != 0 :
+                                      current[field] == value;
+            }
+        }
+        if (enabled == 0x77) {
+            const uint8_t *value = &s->rtc_alarm[alarm * RTC_FIELDS];
+            struct tm target = now;
+            unsigned hour = max77696_rtc_decode(s, value[2] & 0x3f);
+            int64_t deadline;
+
+            if (!(s->regs[RTC_CONTROL] & RTC_CONTROL_24H)) {
+                hour = hour % 12 + ((value[2] & RTC_HOUR_PM) ? 12 : 0);
+            }
+            target.tm_sec = max77696_rtc_decode(s, value[0] & 0x7f);
+            target.tm_min = max77696_rtc_decode(s, value[1] & 0x7f);
+            target.tm_hour = hour;
+            target.tm_mon = max77696_rtc_decode(s, value[4] & 0x1f) - 1;
+            target.tm_year = max77696_rtc_decode(s, value[5]) + 100;
+            target.tm_mday = max77696_rtc_decode(s, value[6] & 0x3f);
+            deadline = clock_now + qemu_timedate_diff(&target) - s->rtc_offset;
+            /* A delayed host callback must still latch an elapsed alarm. */
+            match = deadline > s->rtc_last_tick && deadline <= clock_now;
+        }
+        if (match && !s->rtc_alarm_match[alarm]) {
+            s->regs[RTC_INT] |= alarm ? RTC_INT_ALARM2 : RTC_INT_ALARM1;
+            trace_max77696_rtc_alarm(alarm + 1, s->regs[RTC_INT],
+                                     s->regs[RTC_INTM]);
+            if (s->regs[RTC_INT] & ~s->regs[RTC_INTM]) {
+                qemu_system_wakeup_request(QEMU_WAKEUP_REASON_RTC, NULL);
+            }
+        }
+        s->rtc_alarm_match[alarm] = match;
+    }
+    /* Periodic flags share the RTC bank's clear-on-read interrupt register. */
+    s->regs[RTC_INT] |= RTC_INT_1S;
+    if (now.tm_sec == 0) {
+        s->regs[RTC_INT] |= RTC_INT_60S;
+    }
+    s->rtc_last_tick = clock_now;
+    max77696_update_irq(s);
+    max77696_rtc_schedule(s);
 }
 
 static void max77696_rtc_commit(MAX77696State *s)
 {
-    struct tm now;
-    int hour = s->regs[RTC_HOUR] & 0x3f;
+    if (s->rtc_time_dirty) {
+        struct tm now;
+        unsigned hour = max77696_rtc_decode(s, s->regs[RTC_HOUR] & 0x3f);
 
-    qemu_get_timedate(&now, s->rtc_offset);
-    hour %= 12;
-    if (s->regs[RTC_HOUR] & RTC_HOUR_PM) {
-        hour += 12;
+        qemu_get_timedate(&now, s->rtc_offset);
+        if (!(s->regs[RTC_CONTROL] & RTC_CONTROL_24H)) {
+            hour %= 12;
+            if (s->regs[RTC_HOUR] & RTC_HOUR_PM) {
+                hour += 12;
+            }
+        }
+        now.tm_sec = max77696_rtc_decode(s, s->regs[RTC_SEC] & 0x7f);
+        now.tm_min = max77696_rtc_decode(s, s->regs[RTC_MIN] & 0x7f);
+        now.tm_hour = hour;
+        now.tm_mon = max77696_rtc_decode(s, s->regs[RTC_MONTH] & 0x1f) - 1;
+        now.tm_year = max77696_rtc_decode(s, s->regs[RTC_YEAR]) + 100;
+        now.tm_mday = max77696_rtc_decode(s, s->regs[RTC_DOM] & 0x3f);
+        s->rtc_offset = qemu_timedate_diff(&now);
+        s->rtc_time_dirty = false;
     }
-    now.tm_sec = s->regs[RTC_SEC] & 0x7f;
-    now.tm_min = s->regs[RTC_MIN] & 0x7f;
-    now.tm_hour = hour;
-    now.tm_mon = (s->regs[RTC_MONTH] & 0x1f) - 1;
-    now.tm_year = (s->regs[RTC_YEAR] & 0xff) + 100;
-    now.tm_mday = s->regs[RTC_DOM] & 0x3f;
-    s->rtc_offset = qemu_timedate_diff(&now);
+    /* An alarm-only UDR must not set the clock from its old read buffer. */
+    memcpy(s->rtc_alarm, &s->regs[RTC_ALARM1], RTC_FIELDS);
+    memcpy(s->rtc_alarm + RTC_FIELDS, &s->regs[RTC_ALARM2], RTC_FIELDS);
+    memset(s->rtc_alarm_match, 0, sizeof(s->rtc_alarm_match));
+    s->rtc_last_tick = qemu_clock_get_ms(rtc_clock) / 1000;
+    max77696_rtc_schedule(s);
 }
 
 static unsigned max77696_index(MAX77696State *s)
@@ -338,6 +481,15 @@ static int max77696_send(I2CSlave *i2c, uint8_t data)
         } else {
             s->regs[index] = data;
         }
+        if (max77696_is_rtc(s)) {
+            if (index >= RTC_SEC && index <= RTC_DOM) {
+                s->rtc_time_dirty = true;
+            }
+            if (index == RTC_AE1 || index == RTC_AE2 || index == RTC_INTM) {
+                max77696_rtc_schedule(s);
+                max77696_update_irq(s);
+            }
+        }
         if (max77696_is_main(s) &&
             (index == GLBLINTM || index == INTTOP1M || index == CHG_INT_MASK)) {
             max77696_update_irq(s);
@@ -367,6 +519,11 @@ static uint8_t max77696_recv(I2CSlave *i2c)
     } else if (max77696_is_uic(s) &&
                (index == UIC_INT1 || index == UIC_INT2)) {
         s->regs[index] = 0;
+        max77696_update_irq(s);
+    }
+
+    if (max77696_is_rtc(s) && index == RTC_INT) {
+        s->regs[RTC_INT] = 0;
         max77696_update_irq(s);
     }
 
@@ -410,6 +567,9 @@ static void max77696_realize(DeviceState *dev, Error **errp)
         s->regs[UIC_STATUS2] = UIC_STATUS2_ADC_MASK;
     } else if (max77696_is_rtc(s)) {
         s->rtc_offset = 0;
+        s->rtc_last_tick = qemu_clock_get_ms(rtc_clock) / 1000;
+        s->regs[RTC_INTM] = 0xff;
+        s->rtc_timer = timer_new_ms(rtc_clock, max77696_rtc_tick, s);
         max77696_rtc_capture(s);
     }
 
@@ -420,6 +580,7 @@ static void max77696_realize(DeviceState *dev, Error **errp)
         /* The physical PMIC IRQ pin is active-low. */
         qdev_init_gpio_in_named(dev, max77696_power_button, "power-button", 1);
         qdev_init_gpio_in_named(dev, max77696_uic_irq, "uic-irq", 1);
+        qdev_init_gpio_in_named(dev, max77696_rtc_irq, "rtc-irq-in", 1);
         s->regs[GLBLINTM] = 0xff;
         s->regs[INTTOP1M] = 0xff;
         s->regs[CHG_INT_MASK] = 0xff;
@@ -457,11 +618,19 @@ static void max77696_unrealize(DeviceState *dev)
     if (s->input_handler) {
         qemu_input_handler_unregister(s->input_handler);
     }
+    if (s->rtc_timer) {
+        timer_free(s->rtc_timer);
+    }
 }
 
 static int max77696_post_load(void *opaque, int version_id)
 {
-    max77696_update_irq(opaque);
+    MAX77696State *s = opaque;
+
+    max77696_update_irq(s);
+    if (max77696_is_rtc(s)) {
+        max77696_rtc_schedule(s);
+    }
     return 0;
 }
 
@@ -470,12 +639,13 @@ static void max77696_init(Object *obj)
     MAX77696State *s = MAX77696(obj);
 
     qdev_init_gpio_out(DEVICE(obj), s->irq, ARRAY_SIZE(s->irq));
+    qdev_init_gpio_out_named(DEVICE(obj), &s->rtc_irq, "rtc-irq", 1);
 }
 
 static const VMStateDescription max77696_vmstate = {
     .name = "max77696",
-    .version_id = 2,
-    .minimum_version_id = 1,
+    .version_id = 3,
+    .minimum_version_id = 3,
     .post_load = max77696_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_I2C_SLAVE(parent_obj, MAX77696State),
@@ -485,7 +655,12 @@ static const VMStateDescription max77696_vmstate = {
         VMSTATE_UINT8(len, MAX77696State),
         VMSTATE_UINT8(width, MAX77696State),
         VMSTATE_INT64(rtc_offset, MAX77696State),
-        VMSTATE_BOOL_V(power_down, MAX77696State, 2),
+        VMSTATE_INT64(rtc_last_tick, MAX77696State),
+        VMSTATE_BOOL(power_down, MAX77696State),
+        VMSTATE_UINT8_ARRAY(rtc_alarm, MAX77696State, RTC_FIELDS * 2),
+        VMSTATE_BOOL(rtc_time_dirty, MAX77696State),
+        VMSTATE_BOOL(rtc_pending, MAX77696State),
+        VMSTATE_BOOL_ARRAY(rtc_alarm_match, MAX77696State, 2),
         VMSTATE_END_OF_LIST()
     },
 };
