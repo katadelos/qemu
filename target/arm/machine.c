@@ -1257,6 +1257,48 @@ static const VMStateDescription vmstate_a9_tlb = {
     },
 };
 
+/* CPU_SUSPEND can lose architectural context while the CPU remains PSCI_ON.
+ * The firmware resume target and redistributor wake latch are separate state.
+ */
+static bool psci_powerdown_needed(void *opaque)
+{
+    ARMCPU *cpu = opaque;
+
+    return cpu->psci_powerdown_pending || cpu->psci_wakeup_requested;
+}
+
+static int psci_powerdown_post_load(void *opaque, int version_id)
+{
+    ARMCPU *cpu = opaque;
+
+    if (cpu->psci_powerdown_pending &&
+        (cpu->psci_powerdown_target_el < 1 ||
+         cpu->psci_powerdown_target_el > 2)) {
+        return -EINVAL;
+    }
+    if (cpu->psci_powerdown_pending && cpu->psci_wakeup_requested) {
+        cpu_interrupt(CPU(cpu), CPU_INTERRUPT_EXITTB);
+    }
+    return 0;
+}
+
+static const VMStateDescription vmstate_psci_powerdown = {
+    .name = "cpu/psci-powerdown",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = psci_powerdown_needed,
+    .post_load = psci_powerdown_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(psci_powerdown_pending, ARMCPU),
+        VMSTATE_BOOL(psci_wakeup_requested, ARMCPU),
+        VMSTATE_BOOL(psci_powerdown_target_aa64, ARMCPU),
+        VMSTATE_UINT8(psci_powerdown_target_el, ARMCPU),
+        VMSTATE_UINT64(psci_powerdown_entry, ARMCPU),
+        VMSTATE_UINT64(psci_powerdown_context_id, ARMCPU),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 const VMStateDescription vmstate_arm_cpu = {
     .name = "cpu",
     .version_id = 22,
@@ -1356,6 +1398,7 @@ const VMStateDescription vmstate_arm_cpu = {
         &vmstate_pstate64,
         &vmstate_event,
         &vmstate_wfe,
+        &vmstate_psci_powerdown,
         NULL
     }
 };
