@@ -8,6 +8,7 @@
 #include "hw/arm/kindle-idme.h"
 #include <libfdt.h>
 #include "hw/arm/mt8113.h"
+#include "hw/adc/mt6577_auxadc.h"
 #include "hw/arm/machines-qom.h"
 #include "hw/core/boards.h"
 #include "hw/core/cpu.h"
@@ -20,6 +21,9 @@
 #include "hw/i2c/ft5536g.h"
 #include "hw/i2c/lis2du12.h"
 #include "hw/i2c/max20342.h"
+#include "hw/i2c/ti-opt-sensors.h"
+#include "hw/i2c/tmp103.h"
+#include "hw/nvram/eeprom_at24c.h"
 #include "hw/sd/sd.h"
 #include "qapi/error.h"
 #include "exec/target_page.h"
@@ -93,6 +97,7 @@ typedef struct Bellatrix4IdmeField {
 typedef enum Bellatrix4BoardKind {
     BELLATRIX4_BOARD_SANGRIA,
     BELLATRIX4_BOARD_SANGRIA_COLOR,
+    BELLATRIX4_BOARD_AMARO,
     BELLATRIX4_BOARD_COUNT,
 } Bellatrix4BoardKind;
 
@@ -114,6 +119,9 @@ static const Bellatrix4Board bellatrix4_boards[] = {
     }, {
         .name = "sangria-color",
         .kind = BELLATRIX4_BOARD_SANGRIA_COLOR,
+    }, {
+        .name = "amaro",
+        .kind = BELLATRIX4_BOARD_AMARO,
     },
 };
 
@@ -137,6 +145,9 @@ static const Bellatrix4DeviceProfile bellatrix4_device_profiles[] = {
         .hwid = 2,
         .tattoo = { "3L9", "3L8" },
     }, {
+        .name = "evt-doe",
+        .hwid = 3,
+    }, {
         .name = "hvt1.1",
         .hwid = 1,
         .tattoo = { "3K2", NULL },
@@ -159,8 +170,8 @@ static const Bellatrix4Board *bellatrix4_find_board(const char *name)
         }
     }
 
-    error_report("invalid Bellatrix4 board '%s' (expected sangria or "
-                 "sangria-color)", name);
+    error_report("invalid Bellatrix4 board '%s' (expected sangria, "
+                 "sangria-color, or amaro)", name);
     exit(EXIT_FAILURE);
 }
 
@@ -174,8 +185,64 @@ bellatrix4_find_device_profile(const char *name)
     }
 
     error_report("invalid Bellatrix4 device-profile '%s' (expected "
-                 "production, dvt, evt, hvt1.1, hvt, or proto)", name);
+                 "production, dvt, evt, evt-doe, hvt1.1, hvt, or proto)", name);
     exit(EXIT_FAILURE);
+}
+
+static unsigned bellatrix4_profile_hwid(const Bellatrix4Board *board,
+                                      const Bellatrix4DeviceProfile *profile)
+{
+    /* AO5's shipped U-Boot inserts EVT_DOE before DVT in its GPIO table. */
+    if (board->kind == BELLATRIX4_BOARD_AMARO &&
+        (!strcmp(profile->name, "production") ||
+         !strcmp(profile->name, "dvt"))) {
+        return 4;
+    }
+    return profile->hwid;
+}
+
+static void amaro_init_battery_eeprom(I2CBus *bus)
+{
+    /* AO5's kernel accepts the SWLW 1900 mAh pack profile. */
+    static const struct {
+        uint16_t offset;
+        const char *record;
+    } records[] = {
+        { 0x010, "PV200" },
+        { 0x020, "DI2QM" },
+        { 0x030, "S1CSWLW26101000" },
+        { 0x040, "S2800000100" },
+        { 0x050, "BC41900" },
+        { 0x060, "NV43850" },
+        { 0x070, "RV44480" },
+        { 0x080, "PH1Q" },
+        { 0x090, "PC40100" },
+        { 0x200, "FU10" },
+        { 0x210, "FR10" },
+        { 0x220, "CC10" },
+        { 0x230, "SH3100" },
+        { 0x240, "PE15" },
+        { 0x250, "PT3000" },
+        { 0x260, "PF10" },
+    };
+    g_autofree uint8_t *contents = g_malloc0(8 * KiB);
+
+    for (unsigned i = 0; i < ARRAY_SIZE(records); i++) {
+        uint8_t *record = contents + records[i].offset;
+        size_t len = strlen(records[i].record);
+        uint8_t crc = 0;
+
+        memcpy(record, records[i].record, len);
+        for (size_t j = 0; j < len; j++) {
+            crc ^= record[j];
+            for (unsigned bit = 0; bit < 8; bit++) {
+                crc = (crc << 1) ^ ((crc & 0x80) ? 0x07 : 0);
+            }
+        }
+        record[15] = crc;
+        memcpy(record + 0x400, record, 16);
+    }
+    at24c_eeprom_init_rom(bus, 0x50, 8 * KiB, contents, 8 * KiB);
 }
 
 static void bellatrix4_apply_identity(Bellatrix4MachineState *bms)
@@ -186,14 +253,19 @@ static void bellatrix4_apply_identity(Bellatrix4MachineState *bms)
     const KindleIdmeDefaults *idme = kindle_idme_defaults(board->name);
     const char *tattoo = profile->tattoo[board->kind];
     g_autofree char *board_id = NULL;
-    g_autofree char *hwid = g_strdup_printf("%u", profile->hwid);
+    g_autofree char *hwid = g_strdup_printf("%u",
+        bellatrix4_profile_hwid(board, profile));
 
-    if (!tattoo) {
+    if (board->kind == BELLATRIX4_BOARD_AMARO &&
+        strcmp(profile->name, "hvt1.1")) {
+        board_id = g_strdup(idme->board_id);
+    } else if (!tattoo) {
         error_report("Bellatrix4 device-profile '%s' is not available for "
                      "board '%s'", profile->name, board->name);
         exit(EXIT_FAILURE);
+    } else {
+        board_id = kindle_idme_psn(tattoo);
     }
-    board_id = kindle_idme_psn(tattoo);
     kindle_idme_set_default(&bms->idme_board_id, board_id);
     kindle_idme_set_default(&bms->idme_serial, idme->serial);
     kindle_idme_set_default(&bms->idme_mac, idme->mac);
@@ -429,19 +501,26 @@ static void bellatrix4_firmware_reset(void *opaque)
 static void bellatrix4_profile_reset(void *opaque)
 {
     Bellatrix4MachineState *bms = opaque;
+    const Bellatrix4Board *board = bellatrix4_find_board(bms->board);
     const Bellatrix4DeviceProfile *profile =
         bellatrix4_find_device_profile(bms->device_profile);
+    unsigned hwid = bellatrix4_profile_hwid(board, profile);
     static const unsigned hwid_pins[] = { 113, 112, 114, 115 };
 
     for (size_t bit = 0; bit < ARRAY_SIZE(hwid_pins); bit++) {
         qemu_set_irq(qdev_get_gpio_in_named(DEVICE(&bms->soc->gpio),
                                             "gpio-in", hwid_pins[bit]),
-                     profile->hwid & BIT(bit));
+                     hwid & BIT(bit));
     }
 
     /* The emulated USB cable is permanently attached to the SLIRP host. */
     qemu_set_irq(qdev_get_gpio_in_named(DEVICE(&bms->soc->gpio),
                                         "gpio-in", 16), 0);
+    if (board->kind == BELLATRIX4_BOARD_AMARO) {
+        /* AO5's stock touch job selects the fitted FocalTech controller. */
+        qemu_set_irq(qdev_get_gpio_in_named(DEVICE(&bms->soc->gpio),
+                                            "gpio-in", 18), 1);
+    }
 }
 
 /*
@@ -658,8 +737,12 @@ static void bellatrix4_attach_emmc(Bellatrix4MachineState *bms)
     BusState *bus = qdev_get_child_bus(DEVICE(&bms->soc->msdc0), "sd-bus");
     DeviceState *card = qdev_new(TYPE_EMMC);
 
-    qdev_prop_set_uint64(card, "boot-partition-size", 4 * MiB);
+    bool amaro = bellatrix4_find_board(bms->board)->kind ==
+                 BELLATRIX4_BOARD_AMARO;
+
+    qdev_prop_set_uint64(card, "boot-partition-size", (amaro ? 8 : 4) * MiB);
     qdev_prop_set_bit(card, "boot-partitions-in-memory", true);
+    qdev_prop_set_bit(card, "trim", amaro);
     qdev_prop_set_drive_err(card, "drive", blk, &error_fatal);
     qdev_realize(card, bus, &error_fatal);
 
@@ -680,6 +763,7 @@ static void bellatrix4_init(MachineState *machine)
 {
     Bellatrix4MachineState *bms = BELLATRIX4_MACHINE(machine);
     const Bellatrix4Board *board = bellatrix4_find_board(bms->board);
+    bool amaro = board->kind == BELLATRIX4_BOARD_AMARO;
     MT8113State *soc;
     I2CSlave *fp9935;
     I2CSlave *bd71828;
@@ -701,8 +785,12 @@ static void bellatrix4_init(MachineState *machine)
                              board->kind == BELLATRIX4_BOARD_SANGRIA_COLOR,
                              &error_abort);
     object_property_set_bool(OBJECT(&soc->hwtcon), "scanout-image-buffer",
-                             board->kind == BELLATRIX4_BOARD_SANGRIA,
+                             board->kind != BELLATRIX4_BOARD_SANGRIA_COLOR,
                              &error_abort);
+    if (amaro) {
+        qdev_prop_set_uint32(DEVICE(soc), "iommu-irq", 75);
+        qdev_prop_set_bit(DEVICE(&soc->gce), "inclusive-end-address", false);
+    }
     qdev_realize(DEVICE(soc), NULL, &error_fatal);
     bms->soc = soc;
     for (int cpu = 0; cpu < MT8113_NUM_CPUS; cpu++) {
@@ -712,9 +800,33 @@ static void bellatrix4_init(MachineState *machine)
     i2c_slave_create_simple(soc->i2c[0].bus, TYPE_FP9967, 0x26);
     lis2du12 = i2c_slave_create_simple(soc->i2c[0].bus,
                                       TYPE_LIS2DU12, 0x19);
-    fp9935 = i2c_slave_create_simple(soc->i2c[0].bus, TYPE_FP9935, 0x30);
-    i2c_slave_create_simple(soc->i2c[0].bus, TYPE_MAX20342, 0x35);
+    fp9935 = i2c_slave_create_simple(soc->i2c[0].bus,
+                                      amaro ? TYPE_FP9937 : TYPE_FP9935,
+                                      amaro ? 0x3c : 0x30);
+    I2CSlave *usb_detector = i2c_slave_create_simple(soc->i2c[0].bus,
+                                                    TYPE_MAX20342, 0x35);
+    if (amaro) {
+        DeviceState *adc = qdev_new(TYPE_MT6577_AUXADC);
+        object_property_add_child(OBJECT(machine), "auxadc", OBJECT(adc));
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(adc), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(adc), 0, 0x11001000);
+        amaro_init_battery_eeprom(soc->i2c[0].bus);
+        i2c_slave_create_simple(soc->i2c[0].bus, TYPE_TMP103, 0x70);
+        I2CSlave *als = i2c_slave_create_simple(soc->i2c[0].bus,
+                                               TYPE_TI_OPT3001, 0x44);
+        qdev_connect_gpio_out(DEVICE(als), 0,
+            qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in", 13));
+        qdev_connect_gpio_out(DEVICE(usb_detector), 0,
+            qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in", 43));
+        qemu_set_irq(qdev_get_gpio_in_named(DEVICE(usb_detector), "vbus", 0), 1);
+        qdev_connect_gpio_out_named(DEVICE(&soc->gpio), "gpio-out", 74,
+            qdev_get_gpio_in_named(DEVICE(fp9935), "temperature-enable", 0));
+    }
     bd71828 = i2c_slave_create_simple(soc->i2c[1].bus, TYPE_BD71828, 0x4b);
+    if (amaro) {
+        qdev_connect_gpio_out_named(DEVICE(bd71828), "irq", 0,
+            qdev_get_gpio_in_named(DEVICE(&soc->gpio), "gpio-in", 62));
+    }
     i2c_slave_create_simple(soc->i2c[1].bus, TYPE_BD71828, 0x4d);
     ft5536g = i2c_slave_create_simple(soc->i2c[2].bus, TYPE_FT5536G, 0x38);
 

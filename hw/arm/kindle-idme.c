@@ -238,6 +238,18 @@ static const KindleIdmeDefaults kindle_identities[] = {
         .fos_flags = "80",
     },
     {
+        .board = "amaro",
+        .serial = "G095R10000000000",
+        .board_id = "PN45R10400000000",
+        .mac = "020000000007",
+        .manufacturing = "PW7QEMU0000000000 bsn_shipped=SWLW2610100000000100",
+        .bootmode = "0",
+        .postmode = "0",
+        .product_name = "ao5",
+        .device_type = "A2KGRYXQBPALXK",
+        .fos_flags = "80",
+    },
+    {
         .board = "sangria",
         .serial = "G003J50000000000",
         .board_id = "P003RV0000000000",
