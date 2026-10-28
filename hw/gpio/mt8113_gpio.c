@@ -5,6 +5,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "migration/vmstate.h"
 #include "hw/gpio/mt8113_gpio.h"
 #include "hw/core/irq.h"
 #include "qemu/bitops.h"
@@ -272,9 +273,32 @@ static void mt8113_gpio_init(Object *obj)
                              "gpio-out", MT8113_GPIO_NUM_PINS);
 }
 
+static int mt8113_gpio_post_load(void *opaque, int version_id)
+{
+    MT8113GPIOState *s = opaque;
+
+    mt8113_eint_update_irq(s);
+    /* Leaf devices restore their input state; do not synthesize reset edges. */
+    return 0;
+}
+
+static const VMStateDescription mt8113_gpio_vmstate = {
+    .name = "mt8113-gpio",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = mt8113_gpio_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(regs, MT8113GPIOState, MT8113_GPIO_MMIO_SIZE / sizeof(uint32_t)),
+        VMSTATE_UINT32_ARRAY(eint_regs, MT8113GPIOState, MT8113_GPIO_MMIO_SIZE / sizeof(uint32_t)),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static void mt8113_gpio_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
+
+    dc->vmsd = &mt8113_gpio_vmstate;
 
     dc->desc = "MediaTek MT8113 pinctrl/GPIO";
     device_class_set_legacy_reset(dc, mt8113_gpio_reset);

@@ -9,6 +9,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "migration/vmstate.h"
 #include "hw/misc/mt8113_iommu.h"
 #include "hw/core/irq.h"
 #include "qemu/bitops.h"
@@ -232,9 +233,23 @@ static void mt8113_iommu_init(Object *obj)
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
 }
 
+static const VMStateDescription mt8113_iommu_vmstate = {
+    .name = "mt8113-iommu",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(regs, MT8113IOMMUState, MT8113_IOMMU_MMIO_SIZE / sizeof(uint32_t)),
+        VMSTATE_UINT32_ARRAY(tlb_iova_page, MT8113IOMMUState, MT8113_IOMMU_TLB_ENTRIES),
+        VMSTATE_UINT64_ARRAY(tlb_physical_page, MT8113IOMMUState, MT8113_IOMMU_TLB_ENTRIES),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static void mt8113_iommu_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
+
+    dc->vmsd = &mt8113_iommu_vmstate;
 
     device_class_set_legacy_reset(dc, mt8113_iommu_reset);
 }

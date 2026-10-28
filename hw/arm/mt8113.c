@@ -5,6 +5,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "migration/vmstate.h"
 #include "hw/arm/mt8113.h"
 #include "hw/arm/bsa.h"
 #include "hw/char/serial-mm.h"
@@ -4090,9 +4091,166 @@ static void mt8113_init(Object *obj)
     object_initialize_child(obj, "hwtcon", &s->hwtcon, TYPE_MT8113_HWTCON);
 }
 
+static bool mt8113_usb_has_backend(void *opaque, int version_id)
+{
+    return ((MT8113USBState *)opaque)->nic != NULL;
+}
+
+static bool mt8113_wifi_has_backend(void *opaque, int version_id)
+{
+    return ((MT8113State *)opaque)->wifi_nic != NULL;
+}
+
+static const VMStateDescription mt8113_usb_vmstate = {
+    .name = "mt8113-usb",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(mac_regs, MT8113USBState, MT8113_USB_MAC_SIZE / sizeof(uint32_t)),
+        VMSTATE_UINT32_ARRAY(ippc_regs, MT8113USBState, MT8113_USB_IPPC_SIZE / sizeof(uint32_t)),
+        VMSTATE_UINT8_ARRAY(ep0_fifo, MT8113USBState, 64),
+        VMSTATE_UINT8_ARRAY(control_in, MT8113USBState, 512),
+        VMSTATE_UINT8_ARRAY(control_out, MT8113USBState, 64),
+        VMSTATE_UINT32(ep0_fifo_length, MT8113USBState),
+        VMSTATE_UINT32(ep0_fifo_offset, MT8113USBState),
+        VMSTATE_UINT32(control_in_length, MT8113USBState),
+        VMSTATE_UINT32(control_out_length, MT8113USBState),
+        VMSTATE_UINT32(config_phase, MT8113USBState),
+        VMSTATE_UINT8(config_value, MT8113USBState),
+        VMSTATE_UINT8(control_interface, MT8113USBState),
+        VMSTATE_UINT8(data_interface, MT8113USBState),
+        VMSTATE_UINT8(network_in, MT8113USBState),
+        VMSTATE_UINT8(network_out, MT8113USBState),
+        VMSTATE_UINT8(notify_in, MT8113USBState),
+        VMSTATE_UINT8(hid_in, MT8113USBState),
+        VMSTATE_UINT8(adb_in, MT8113USBState),
+        VMSTATE_UINT8(adb_out, MT8113USBState),
+        VMSTATE_UINT8_ARRAY(adb_rx, MT8113USBState, 65536),
+        VMSTATE_UINT32(adb_rx_length, MT8113USBState),
+        VMSTATE_UINT32(adb_payload_left, MT8113USBState),
+        VMSTATE_UINT32(adb_tx_offset, MT8113USBState),
+        VMSTATE_UINT64(adb_tx_gpd, MT8113USBState),
+        VMSTATE_UINT8_ARRAY(hid_report, MT8113USBState, 1024),
+        VMSTATE_UINT32(hid_report_length, MT8113USBState),
+        VMSTATE_UINT64(hid_reports, MT8113USBState),
+        VMSTATE_BOOL(rndis, MT8113USBState),
+        VMSTATE_BOOL(control_tx_pending, MT8113USBState),
+        VMSTATE_BOOL(setup_pending, MT8113USBState),
+        VMSTATE_BOOL(configured, MT8113USBState),
+        VMSTATE_TIMER_PTR_TEST(config_timer, MT8113USBState,
+                               mt8113_usb_has_backend),
+        VMSTATE_TIMER_PTR_TEST(tx_timer, MT8113USBState,
+                               mt8113_usb_has_backend),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static const VMStateDescription mt8113_usbphy_vmstate = {
+    .name = "mt8113-usbphy",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(regs, MT8113USBPHYState, 0x400 / 4),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static int mt8113_post_load(void *opaque, int version_id)
+{
+    MT8113State *s = opaque;
+
+    if (s->usb.ep0_fifo_length > sizeof(s->usb.ep0_fifo) ||
+        s->usb.ep0_fifo_offset > s->usb.ep0_fifo_length ||
+        s->usb.control_in_length > sizeof(s->usb.control_in) ||
+        s->usb.control_out_length > sizeof(s->usb.control_out) ||
+        s->usb.adb_rx_length > sizeof(s->usb.adb_rx) ||
+        s->usb.hid_report_length > sizeof(s->usb.hid_report) ||
+        s->btif_tx_stream_len > sizeof(s->btif_tx_stream) ||
+        s->btif_rx_pending_len > sizeof(s->btif_rx_pending) ||
+        s->btif_last_response_len > sizeof(s->btif_last_response) ||
+        s->wifi_management_length > sizeof(s->wifi_management)) {
+        return -EINVAL;
+    }
+    mt8113_gpt_update_irq(s);
+    mt8113_usb_update_irq(&s->usb);
+    mt8113_wifi_irq_update(s);
+    mt8113_btif_rx_irq_update(s);
+    qemu_set_irq(s->svs_irq, !!s->svs_regs[MT8113_SVS_INTSTS / 4]);
+    qemu_set_irq(s->btif_tx_dma_irq,
+                 !!s->btif_tx_dma_regs[MT8113_BTIF_DMA_INT_FLAG / 4]);
+    return 0;
+}
+
+static const VMStateDescription mt8113_vmstate = {
+    .name = "mt8113",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = mt8113_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_INT64(gpt_start_ns, MT8113State),
+        VMSTATE_UINT32(gpt_irq_status, MT8113State),
+        VMSTATE_UINT32_ARRAY(topckgen_regs, MT8113State, 0x1000 / sizeof(uint32_t)),
+        VMSTATE_UINT32_ARRAY(infrasys_regs, MT8113State, 0x1000 / sizeof(uint32_t)),
+        VMSTATE_UINT32_ARRAY(scpsys_regs, MT8113State, 0x1000 / sizeof(uint32_t)),
+        VMSTATE_UINT32_ARRAY(toprgu_regs, MT8113State, 0x1000 / sizeof(uint32_t)),
+        VMSTATE_UINT32_ARRAY(timer_regs, MT8113State, 0x1000 / sizeof(uint32_t)),
+        VMSTATE_UINT32_ARRAY(apmixedsys_regs, MT8113State, 0x1000 / sizeof(uint32_t)),
+        VMSTATE_UINT32_ARRAY(dvfsrc_regs, MT8113State, 0x1000 / sizeof(uint32_t)),
+        VMSTATE_UINT32_ARRAY(mcucfg_regs, MT8113State, 0x1000 / sizeof(uint32_t)),
+        VMSTATE_UINT32(rng_ctrl, MT8113State),
+        VMSTATE_UINT32_ARRAY(svs_regs, MT8113State, 0x1000 / sizeof(uint32_t)),
+        VMSTATE_UINT32_ARRAY(btif_regs, MT8113State, 0x1000 / sizeof(uint32_t)),
+        VMSTATE_UINT32_ARRAY(btif_tx_dma_regs, MT8113State, 0x80 / sizeof(uint32_t)),
+        VMSTATE_UINT32_ARRAY(btif_rx_dma_regs, MT8113State, 0x80 / sizeof(uint32_t)),
+        VMSTATE_UINT32_ARRAY(wifi_regs, MT8113State, MT8113_WIFI_SIZE / sizeof(uint32_t)),
+        VMSTATE_UINT32(btif_wmt_stp_config, MT8113State),
+        VMSTATE_UINT8_ARRAY(btif_tx_stream, MT8113State, 16 * KiB),
+        VMSTATE_UINT8_ARRAY(btif_rx_pending, MT8113State, 16 * KiB),
+        VMSTATE_UINT8_ARRAY(btif_last_response, MT8113State, 1 * KiB),
+        VMSTATE_UINT32(btif_tx_stream_len, MT8113State),
+        VMSTATE_UINT32(btif_rx_pending_len, MT8113State),
+        VMSTATE_UINT32(btif_last_response_len, MT8113State),
+        VMSTATE_UINT32(btif_wmt_pda_remaining, MT8113State),
+        VMSTATE_UINT8(btif_wmt_txseq, MT8113State),
+        VMSTATE_UINT8(btif_wmt_expected_rxseq, MT8113State),
+        VMSTATE_UINT8(btif_wmt_last_rxseq, MT8113State),
+        VMSTATE_BOOL(btif_wmt_full_mode, MT8113State),
+        VMSTATE_BOOL(btif_wmt_asleep, MT8113State),
+        VMSTATE_BOOL(btif_wak, MT8113State),
+        VMSTATE_BOOL(wifi_firmware_ready, MT8113State),
+        VMSTATE_BOOL(wifi_associated, MT8113State),
+        VMSTATE_UINT64(wifi_tx_packets, MT8113State),
+        VMSTATE_UINT64(wifi_rx_packets, MT8113State),
+        VMSTATE_UINT8(wifi_wlan_index, MT8113State),
+        VMSTATE_UINT8(wifi_bss_index, MT8113State),
+        VMSTATE_UINT8(wifi_scan_pending, MT8113State),
+        VMSTATE_UINT8(wifi_scan_sequence, MT8113State),
+        VMSTATE_BOOL(wifi_sched_enabled, MT8113State),
+        VMSTATE_BOOL(wifi_sched_matches, MT8113State),
+        VMSTATE_BOOL(wifi_sched_stop_after, MT8113State),
+        VMSTATE_BOOL(wifi_sched_event_pending, MT8113State),
+        VMSTATE_UINT8(wifi_sched_sequence, MT8113State),
+        VMSTATE_UINT32(wifi_sched_interval, MT8113State),
+        VMSTATE_INT64(wifi_sched_next, MT8113State),
+        VMSTATE_UINT16(wifi_rx_sequence, MT8113State),
+        VMSTATE_UINT16(wifi_management_length, MT8113State),
+        VMSTATE_UINT8_ARRAY(wifi_management, MT8113State, 256),
+        VMSTATE_UINT32_ARRAY(efuse_regs, MT8113State, 0x1000 / sizeof(uint32_t)),
+        VMSTATE_STRUCT(usb, MT8113State, 1, mt8113_usb_vmstate, MT8113USBState),
+        VMSTATE_STRUCT_ARRAY(usbphy, MT8113State, 2, 1,
+                             mt8113_usbphy_vmstate, MT8113USBPHYState),
+        VMSTATE_TIMER_PTR(gpt_timer, MT8113State),
+        VMSTATE_TIMER_PTR_TEST(wifi_timer, MT8113State,
+                               mt8113_wifi_has_backend),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static void mt8113_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
+
+    dc->vmsd = &mt8113_vmstate;
 
     dc->desc = "MediaTek MT8113 SoC";
     dc->realize = mt8113_realize;

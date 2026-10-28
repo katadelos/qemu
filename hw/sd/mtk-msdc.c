@@ -8,6 +8,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "migration/vmstate.h"
 #include "hw/sd/mtk-msdc.h"
 #include "hw/core/irq.h"
 #include "qemu/log.h"
@@ -546,9 +547,35 @@ static void mtk_msdc_finalize(Object *obj)
     timer_free(s->dma_timer);
 }
 
+static int mtk_msdc_post_load(void *opaque, int version_id)
+{
+    MTKMSDCState *s = opaque;
+
+    mtk_msdc_update_irq(s);
+    return 0;
+}
+
+static const VMStateDescription mtk_msdc_vmstate = {
+    .name = "mtk-msdc",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = mtk_msdc_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(regs, MTKMSDCState, MTK_MSDC_MMIO_SIZE / sizeof(uint32_t)),
+        VMSTATE_UINT32_ARRAY(top_regs, MTKMSDCState, MTK_MSDC_MMIO_SIZE / sizeof(uint32_t)),
+        VMSTATE_UINT32(transfer_remaining, MTKMSDCState),
+        VMSTATE_BOOL(transfer_write, MTKMSDCState),
+        VMSTATE_BOOL(dma_active, MTKMSDCState),
+        VMSTATE_TIMER_PTR(dma_timer, MTKMSDCState),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static void mtk_msdc_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
+
+    dc->vmsd = &mtk_msdc_vmstate;
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
     dc->desc = "MediaTek MSDC controller";

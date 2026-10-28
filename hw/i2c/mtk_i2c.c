@@ -5,6 +5,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "migration/vmstate.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/i2c/mtk_i2c.h"
@@ -362,9 +363,37 @@ static const Property mtk_i2c_properties[] = {
     DEFINE_PROP_UINT32("ap-offset", MTKI2CState, ap_offset, 0),
 };
 
+static int mtk_i2c_post_load(void *opaque, int version_id)
+{
+    MTKI2CState *s = opaque;
+
+    if (s->fifo_count > MTK_I2C_FIFO_SIZE) {
+        return -EINVAL;
+    }
+    mtk_i2c_update_irq(s);
+    return 0;
+}
+
+static const VMStateDescription mtk_i2c_vmstate = {
+    .name = "mtk-i2c",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = mtk_i2c_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8_ARRAY(regs, MTKI2CState, 0x1000),
+        VMSTATE_UINT8_ARRAY(dma_regs, MTKI2CState, MTK_I2C_DMA_MMIO_SIZE),
+        VMSTATE_UINT8_ARRAY(fifo, MTKI2CState, MTK_I2C_FIFO_SIZE),
+        VMSTATE_UINT32(fifo_head, MTKI2CState),
+        VMSTATE_UINT32(fifo_count, MTKI2CState),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static void mtk_i2c_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
+
+    dc->vmsd = &mtk_i2c_vmstate;
 
     dc->desc = "MediaTek MT65xx I2C controller";
     dc->realize = mtk_i2c_realize;

@@ -5,6 +5,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "migration/vmstate.h"
 #include "hw/arm/kindle-idme.h"
 #include <libfdt.h>
 #include "hw/arm/mt8113.h"
@@ -619,6 +620,16 @@ static void bellatrix_usb_vbus(void *opaque, int line, int level)
     }
 }
 
+static const VMStateDescription bellatrix_vmstate = {
+    .name = "bellatrix-board",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(usb_vbus, BellatrixMachineState),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static void bellatrix_init(MachineState *machine)
 {
     BellatrixMachineState *bms = BELLATRIX_MACHINE(machine);
@@ -820,6 +831,7 @@ static void bellatrix_init(MachineState *machine)
     bellatrix_attach_emmc(bms);
     bellatrix_load_firmware(bms, machine);
     qemu_register_reset(bellatrix_profile_reset, bms);
+    vmstate_register(NULL, 0, &bellatrix_vmstate, bms);
 }
 
 static char *bellatrix_get_string(char **value)
@@ -895,6 +907,7 @@ static void bellatrix_machine_instance_finalize(Object *obj)
 {
     BellatrixMachineState *bms = BELLATRIX_MACHINE(obj);
 
+    vmstate_unregister(NULL, &bellatrix_vmstate, bms);
     if (bms->powerdown_registered) {
         notifier_remove(&bms->powerdown_notifier);
     }

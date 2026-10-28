@@ -9,6 +9,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "migration/vmstate.h"
 #include "hw/misc/mt8113_gce.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
@@ -644,9 +645,38 @@ static void mt8113_gce_finalize(Object *obj)
     timer_free(s->exec_timer);
 }
 
+static int mt8113_gce_post_load(void *opaque, int version_id)
+{
+    MT8113GCEState *s = opaque;
+
+    mt8113_gce_update_irq(s);
+    return 0;
+}
+
+static const VMStateDescription mt8113_gce_vmstate = {
+    .name = "mt8113-gce",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = mt8113_gce_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(regs, MT8113GCEState, MT8113_GCE_MMIO_SIZE / sizeof(uint32_t)),
+        VMSTATE_UINT32_ARRAY(gpr, MT8113GCEState, UINT16_MAX + 1),
+        VMSTATE_BOOL_ARRAY(tokens, MT8113GCEState, 1024),
+        VMSTATE_BOOL_ARRAY(waiting, MT8113GCEState, MT8113_GCE_THREADS),
+        VMSTATE_UINT16_ARRAY(wait_token, MT8113GCEState, MT8113_GCE_THREADS),
+        VMSTATE_UINT16(selected_token, MT8113GCEState),
+        VMSTATE_UINT32(pending_threads, MT8113GCEState),
+        VMSTATE_INT64_ARRAY(thread_ready_ns, MT8113GCEState, MT8113_GCE_THREADS),
+        VMSTATE_TIMER_PTR(exec_timer, MT8113GCEState),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static void mt8113_gce_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
+
+    dc->vmsd = &mt8113_gce_vmstate;
     static const Property properties[] = {
         DEFINE_PROP_UINT32("frame-done-event", MT8113GCEState,
                            frame_done_event, 9),
