@@ -929,6 +929,15 @@ typedef struct {
  *
  * An ARM CPU core.
  */
+#define ARM_MTK_OPTEE_MAX_REGISTRATIONS 32
+
+typedef struct ARMMtkOpteeRegistration {
+    bool used;
+    uint64_t ref;
+    uint64_t addr;
+    uint64_t size;
+} ARMMtkOpteeRegistration;
+
 struct ArchCPU {
     CPUState parent_obj;
 
@@ -1048,6 +1057,9 @@ struct ArchCPU {
     int32_t (*mtk_iommu_config)(uint64_t command, uint64_t ports);
     uint32_t mtk_optee_fbe;
     uint64_t mtk_rollback_versions[6];
+    /* Shared firmware service state is owned by CPU0 for migration. */
+    ARMMtkOpteeRegistration mtk_optee_registrations[
+        ARM_MTK_OPTEE_MAX_REGISTRATIONS];
 
     /* For v8M, initial value of the Secure VTOR */
     uint32_t init_svtor;

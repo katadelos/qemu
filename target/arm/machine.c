@@ -1299,6 +1299,39 @@ static const VMStateDescription vmstate_psci_powerdown = {
     },
 };
 
+static bool mtk_optee_needed(void *opaque)
+{
+    return ((ARMCPU *)opaque)->mtk_optee_fbe != 0;
+}
+
+static const VMStateDescription vmstate_mtk_optee_registration = {
+    .name = "arm-mtk-optee-registration",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(used, ARMMtkOpteeRegistration),
+        VMSTATE_UINT64(ref, ARMMtkOpteeRegistration),
+        VMSTATE_UINT64(addr, ARMMtkOpteeRegistration),
+        VMSTATE_UINT64(size, ARMMtkOpteeRegistration),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static const VMStateDescription vmstate_mtk_optee = {
+    .name = "cpu/mtk-optee",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = mtk_optee_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT64_ARRAY(mtk_rollback_versions, ARMCPU, 6),
+        VMSTATE_STRUCT_ARRAY(mtk_optee_registrations, ARMCPU,
+                             ARM_MTK_OPTEE_MAX_REGISTRATIONS, 1,
+                             vmstate_mtk_optee_registration,
+                             ARMMtkOpteeRegistration),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 const VMStateDescription vmstate_arm_cpu = {
     .name = "cpu",
     .version_id = 22,
@@ -1399,6 +1432,7 @@ const VMStateDescription vmstate_arm_cpu = {
         &vmstate_event,
         &vmstate_wfe,
         &vmstate_psci_powerdown,
+        &vmstate_mtk_optee,
         NULL
     }
 };

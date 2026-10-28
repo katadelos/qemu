@@ -95,7 +95,6 @@
 #define MTK_OPTEE_MSG_PARAM_SIZE         32
 #define MTK_OPTEE_MAX_PARAMS             8
 #define MTK_OPTEE_MAX_KEY_SIZE           4096
-#define MTK_OPTEE_MAX_REGISTRATIONS      32
 #define MTK_OPTEE_PAGE_MASK              (~0xfffULL)
 #define MTK_KEYSTORE_INPUT_SIZE          1036
 #define MTK_KEYSTORE_OUTPUT_SIZE         260
@@ -104,16 +103,6 @@
 #define MTK_CREDENTIAL_CHECK_ENABLED     5
 #define MTK_CREDENTIAL_INPUT_SIZE        76
 #define MTK_CREDENTIAL_OUTPUT_SIZE       20
-
-typedef struct MtkOpteeRegistration {
-    bool used;
-    uint64_t ref;
-    uint64_t addr;
-    uint64_t size;
-} MtkOpteeRegistration;
-
-static MtkOpteeRegistration mtk_optee_registrations[
-    MTK_OPTEE_MAX_REGISTRATIONS];
 
 static const uint8_t mtk_optee_fbe_uuid[16] = {
     0xa6, 0xf7, 0x22, 0xd3, 0xfa, 0xec, 0x49, 0x06,
@@ -199,9 +188,11 @@ static bool mtk_optee_write(uint64_t addr, const void *buf, size_t size)
     return true;
 }
 
-static MtkOpteeRegistration *mtk_optee_find_registration(uint64_t ref)
+static ARMMtkOpteeRegistration *mtk_optee_find_registration(uint64_t ref)
 {
-    for (int n = 0; n < ARRAY_SIZE(mtk_optee_registrations); n++) {
+    ARMMtkOpteeRegistration *mtk_optee_registrations =
+        ARM_CPU(first_cpu)->mtk_optee_registrations;
+    for (int n = 0; n < ARM_MTK_OPTEE_MAX_REGISTRATIONS; n++) {
         if (mtk_optee_registrations[n].used &&
             mtk_optee_registrations[n].ref == ref) {
             return &mtk_optee_registrations[n];
@@ -212,11 +203,13 @@ static MtkOpteeRegistration *mtk_optee_find_registration(uint64_t ref)
 
 static bool mtk_optee_register_shm(const uint8_t *param)
 {
+    ARMMtkOpteeRegistration *mtk_optee_registrations =
+        ARM_CPU(first_cpu)->mtk_optee_registrations;
     uint64_t page_list = ldq_le_p(param + 8);
     uint64_t size = ldq_le_p(param + 16);
     uint64_t ref = ldq_le_p(param + 24);
     uint64_t page_addr;
-    MtkOpteeRegistration *reg = mtk_optee_find_registration(ref);
+    ARMMtkOpteeRegistration *reg = mtk_optee_find_registration(ref);
 
     if (!size || !ref ||
         !mtk_optee_read(page_list & MTK_OPTEE_PAGE_MASK,
@@ -230,7 +223,7 @@ static bool mtk_optee_register_shm(const uint8_t *param)
     }
 
     if (!reg) {
-        for (int n = 0; n < ARRAY_SIZE(mtk_optee_registrations); n++) {
+        for (int n = 0; n < ARM_MTK_OPTEE_MAX_REGISTRATIONS; n++) {
             if (!mtk_optee_registrations[n].used) {
                 reg = &mtk_optee_registrations[n];
                 break;
@@ -240,7 +233,7 @@ static bool mtk_optee_register_shm(const uint8_t *param)
     if (!reg) {
         return false;
     }
-    *reg = (MtkOpteeRegistration) {
+    *reg = (ARMMtkOpteeRegistration) {
         .used = true,
         .ref = ref,
         .addr = page_addr,
@@ -251,7 +244,7 @@ static bool mtk_optee_register_shm(const uint8_t *param)
 
 static void mtk_optee_unregister_shm(const uint8_t *param)
 {
-    MtkOpteeRegistration *reg =
+    ARMMtkOpteeRegistration *reg =
         mtk_optee_find_registration(ldq_le_p(param + 24));
 
     if (reg) {
@@ -275,7 +268,7 @@ static bool mtk_optee_resolve_memref(const uint8_t *param, uint64_t *addr,
         type == MTK_OPTEE_ATTR_RMEM_OUTPUT ||
         type == MTK_OPTEE_ATTR_RMEM_INOUT) {
         uint64_t offset = ldq_le_p(param + 8);
-        MtkOpteeRegistration *reg =
+        ARMMtkOpteeRegistration *reg =
             mtk_optee_find_registration(ldq_le_p(param + 24));
 
         if (!reg || offset > reg->size || *size > reg->size - offset) {
