@@ -244,6 +244,7 @@ static void aurahd_create_peripherals(FslIMX50State *soc)
     DeviceState *usb_misc = qdev_new(TYPE_IMX_USB_MISC);
     I2CSlave *touch;
     I2CSlave *tps65185;
+    I2CSlave *msp430;
     DeviceState *pmic;
     DeviceState *wifi;
     DeviceState *buttons;
@@ -273,7 +274,10 @@ static void aurahd_create_peripherals(FslIMX50State *soc)
     qdev_connect_gpio_out(DEVICE(&soc->gpio[4]), 26,
         qdev_get_gpio_in(DEVICE(touch), 0));
 
-    i2c_slave_create_simple(soc->i2c[2].bus, TYPE_KOBOTOUCH_MSP430, 0x43);
+    msp430 = i2c_slave_create_simple(soc->i2c[2].bus,
+                                     TYPE_KOBOTOUCH_MSP430, 0x43);
+    qdev_connect_gpio_out_named(DEVICE(msp430), "irq", 0,
+        qdev_get_gpio_in(DEVICE(&soc->gpio[3]), 11));
 
     pmic = qdev_new(TYPE_MC13892);
     ssi_realize_and_unref(pmic,

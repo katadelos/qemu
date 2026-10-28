@@ -8,6 +8,7 @@
 #include "qemu/osdep.h"
 #include "hw/i2c/zforce.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/core/irq.h"
 #include "migration/vmstate.h"
 #include "qemu/bswap.h"
 #include "qemu/crc-ccitt.h"
@@ -18,6 +19,14 @@
 #include "system/runstate.h"
 
 #define NTXEC_REG_VERSION       0x00
+#define NTXEC_REG_RTC_YEAR      0x10
+#define NTXEC_REG_RTC_SECOND    0x15
+#define NTXEC_REG_ALARM_HIGH    0x1b
+#define NTXEC_REG_ALARM_LOW     0x1c
+#define NTXEC_REG_RTC_YM        0x20
+#define NTXEC_REG_RTC_DH        0x21
+#define NTXEC_REG_RTC_MS        0x23
+#define NTXEC_ALARM_PENDING     0x8000
 #define NTXEC_REG_BATTERY_ADC   0x41
 #define NTXEC_REG_SYSTEM_FLAGS  0x60
 #define NTXEC_REG_RESET         0x90
@@ -37,10 +46,102 @@ struct KoboTouchMSP430State {
     uint8_t read_pos;
     bool have_pointer;
     uint16_t version;
-    uint32_t rtc_seconds;
+    int64_t rtc_seconds;
     uint32_t alarm_seconds;
     int64_t rtc_base_ns;
+    QEMUTimer *alarm_timer;
+    qemu_irq irq;
 };
+
+static void ntxec_update_irq(KoboTouchMSP430State *s)
+{
+    /* MSP_INT# is a falling-edge wake source on the Netronix boards. */
+    qemu_set_irq(s->irq,
+                 !(s->regs[NTXEC_REG_SYSTEM_FLAGS] & NTXEC_ALARM_PENDING));
+}
+
+static void ntxec_rtc_time(KoboTouchMSP430State *s, struct tm *tm)
+{
+    time_t seconds = s->rtc_seconds +
+        (qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->rtc_base_ns) /
+        NANOSECONDS_PER_SECOND;
+
+    gmtime_r(&seconds, tm);
+}
+
+static void ntxec_rtc_capture(KoboTouchMSP430State *s)
+{
+    struct tm tm;
+
+    ntxec_rtc_time(s, &tm);
+    s->regs[NTXEC_REG_RTC_YM] = ((tm.tm_year - 100) << 8) |
+                                (tm.tm_mon + 1);
+    s->regs[NTXEC_REG_RTC_DH] = (tm.tm_mday << 8) | tm.tm_hour;
+    s->regs[NTXEC_REG_RTC_MS] = (tm.tm_min << 8) | tm.tm_sec;
+}
+
+static void ntxec_rtc_begin_write(KoboTouchMSP430State *s)
+{
+    struct tm tm;
+
+    ntxec_rtc_time(s, &tm);
+    s->regs[0x10] = (tm.tm_year - 100) << 8;
+    s->regs[0x11] = (tm.tm_mon + 1) << 8;
+    s->regs[0x12] = tm.tm_mday << 8;
+    s->regs[0x13] = tm.tm_hour << 8;
+    s->regs[0x14] = tm.tm_min << 8;
+    s->regs[0x15] = tm.tm_sec << 8;
+}
+
+static void ntxec_rtc_commit(KoboTouchMSP430State *s)
+{
+    struct tm tm = {
+        .tm_year = (s->regs[0x10] >> 8) + 100,
+        .tm_mon = (s->regs[0x11] >> 8) - 1,
+        .tm_mday = s->regs[0x12] >> 8,
+        .tm_hour = s->regs[0x13] >> 8,
+        .tm_min = s->regs[0x14] >> 8,
+        .tm_sec = s->regs[0x15] >> 8,
+    };
+    struct tm normalized;
+    time_t seconds;
+
+    if (tm.tm_mon < 0 || tm.tm_mon > 11 ||
+        tm.tm_mday < 1 || tm.tm_mday > 31 ||
+        tm.tm_hour > 23 || tm.tm_min > 59 || tm.tm_sec > 59) {
+        return;
+    }
+    seconds = mktimegm(&tm);
+    gmtime_r(&seconds, &normalized);
+    if (normalized.tm_mon != tm.tm_mon || normalized.tm_mday != tm.tm_mday) {
+        return;
+    }
+    s->rtc_seconds = seconds;
+    s->rtc_base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+}
+
+static void ntxec_alarm_expired(void *opaque)
+{
+    KoboTouchMSP430State *s = opaque;
+
+    s->regs[NTXEC_REG_SYSTEM_FLAGS] |= NTXEC_ALARM_PENDING;
+    ntxec_update_irq(s);
+    qemu_system_wakeup_request(QEMU_WAKEUP_REASON_RTC, NULL);
+}
+
+static void ntxec_alarm_set(KoboTouchMSP430State *s)
+{
+    unsigned seconds = (s->regs[NTXEC_REG_ALARM_HIGH] & 0xff00) |
+                       (s->regs[NTXEC_REG_ALARM_LOW] >> 8);
+
+    timer_del(s->alarm_timer);
+    s->regs[NTXEC_REG_SYSTEM_FLAGS] &= ~NTXEC_ALARM_PENDING;
+    ntxec_update_irq(s);
+    if (seconds) {
+        timer_mod(s->alarm_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                  (int64_t)seconds * NANOSECONDS_PER_SECOND);
+    }
+}
 
 /* E916 uses little-endian command payloads and CRC-CCITT-FALSE, while
  * retaining the two-byte big-endian identity read of the older MCU. */
@@ -137,16 +238,17 @@ static int kobotouch_msp430_send(I2CSlave *i2c, uint8_t data)
 static uint8_t kobotouch_msp430_recv(I2CSlave *i2c)
 {
     KoboTouchMSP430State *s = KOBOTOUCH_MSP430(i2c);
-    uint16_t value = s->regs[s->pointer];
+    uint8_t value;
 
-    if (s->version == NTXEC_VERSION_E916) {
-        if (s->read_pos < s->reply_len) {
-            return s->reply[s->read_pos++];
-        }
+    if (s->read_pos >= s->reply_len) {
         return 0;
     }
-    if (s->read_pos++ == 0) {
-        return value >> 8;
+    value = s->reply[s->read_pos++];
+    if (s->version != NTXEC_VERSION_E916 &&
+        s->pointer == NTXEC_REG_SYSTEM_FLAGS && s->read_pos == 2) {
+        /* Reading both status bytes acknowledges the latched alarm. */
+        s->regs[NTXEC_REG_SYSTEM_FLAGS] &= ~NTXEC_ALARM_PENDING;
+        ntxec_update_irq(s);
     }
     return value;
 }
@@ -164,6 +266,14 @@ static int kobotouch_msp430_event(I2CSlave *i2c, enum i2c_event event)
         s->read_pos = 0;
         if (s->version == NTXEC_VERSION_E916) {
             ntxec_e916_reply(s);
+        } else {
+            if (s->pointer == NTXEC_REG_RTC_YM ||
+                s->pointer == NTXEC_REG_RTC_DH ||
+                s->pointer == NTXEC_REG_RTC_MS) {
+                ntxec_rtc_capture(s);
+            }
+            stw_be_p(s->reply, s->regs[s->pointer]);
+            s->reply_len = 2;
         }
         break;
     case I2C_FINISH:
@@ -172,7 +282,16 @@ static int kobotouch_msp430_event(I2CSlave *i2c, enum i2c_event event)
         } else if (s->have_pointer && s->write_len == 2) {
             uint16_t value = (s->write_data[0] << 8) | s->write_data[1];
 
+            if (s->pointer == NTXEC_REG_RTC_YEAR) {
+                ntxec_rtc_begin_write(s);
+            }
             s->regs[s->pointer] = value;
+            if (s->pointer == NTXEC_REG_RTC_SECOND) {
+                /* The stock driver writes year through second in order. */
+                ntxec_rtc_commit(s);
+            } else if (s->pointer == NTXEC_REG_ALARM_LOW) {
+                ntxec_alarm_set(s);
+            }
             if (s->pointer == NTXEC_REG_RESET && value == NTXEC_RESET_VALUE) {
                 qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
             }
@@ -204,6 +323,10 @@ static void kobotouch_msp430_reset(DeviceState *dev)
     s->rtc_seconds = mktimegm(&tm);
     s->rtc_base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     s->alarm_seconds = 0;
+    timer_del(s->alarm_timer);
+    ntxec_rtc_begin_write(s);
+    ntxec_rtc_capture(s);
+    ntxec_update_irq(s);
 }
 
 static int kobotouch_msp430_post_load(void *opaque, int version_id)
@@ -215,13 +338,14 @@ static int kobotouch_msp430_post_load(void *opaque, int version_id)
         (s->version == NTXEC_VERSION_E916 && s->read_pos > s->reply_len)) {
         return -EINVAL;
     }
+    ntxec_update_irq(s);
     return 0;
 }
 
 static const VMStateDescription kobotouch_msp430_vmstate = {
     .name = TYPE_KOBOTOUCH_MSP430,
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
     .post_load = kobotouch_msp430_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_I2C_SLAVE(parent_obj, KoboTouchMSP430State),
@@ -233,12 +357,28 @@ static const VMStateDescription kobotouch_msp430_vmstate = {
         VMSTATE_UINT8(write_len, KoboTouchMSP430State),
         VMSTATE_UINT8(read_pos, KoboTouchMSP430State),
         VMSTATE_BOOL(have_pointer, KoboTouchMSP430State),
-        VMSTATE_UINT32(rtc_seconds, KoboTouchMSP430State),
+        VMSTATE_INT64(rtc_seconds, KoboTouchMSP430State),
         VMSTATE_UINT32(alarm_seconds, KoboTouchMSP430State),
         VMSTATE_INT64(rtc_base_ns, KoboTouchMSP430State),
+        VMSTATE_TIMER_PTR(alarm_timer, KoboTouchMSP430State),
         VMSTATE_END_OF_LIST()
     },
 };
+
+static void kobotouch_msp430_init(Object *obj)
+{
+    KoboTouchMSP430State *s = KOBOTOUCH_MSP430(obj);
+
+    qdev_init_gpio_out_named(DEVICE(s), &s->irq, "irq", 1);
+    s->alarm_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, ntxec_alarm_expired, s);
+}
+
+static void kobotouch_msp430_finalize(Object *obj)
+{
+    KoboTouchMSP430State *s = KOBOTOUCH_MSP430(obj);
+
+    timer_free(s->alarm_timer);
+}
 
 static void kobotouch_msp430_class_init(ObjectClass *oc, const void *data)
 {
@@ -261,6 +401,8 @@ static const TypeInfo kobotouch_msp430_type = {
     .name = TYPE_KOBOTOUCH_MSP430,
     .parent = TYPE_I2C_SLAVE,
     .instance_size = sizeof(KoboTouchMSP430State),
+    .instance_init = kobotouch_msp430_init,
+    .instance_finalize = kobotouch_msp430_finalize,
     .class_init = kobotouch_msp430_class_init,
 };
 
