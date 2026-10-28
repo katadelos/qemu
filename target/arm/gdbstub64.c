@@ -37,18 +37,30 @@ int aarch64_cpu_gdb_read_register(CPUState *cs, GByteArray *mem_buf, int n)
     ARMCPU *cpu = ARM_CPU(cs);
     CPUARMState *env = &cpu->env;
 
+    /*
+     * An AArch64 CPU keeps its debugger register layout while executing
+     * AArch32 code. TCG updates regs[], not the inactive xregs[] bank, so
+     * synchronize the architectural aliases before exposing them to GDB
+     * or a plugin. This also handles the privileged/FIQ banked registers.
+     */
+    if (!is_a64(env)) {
+        aarch64_sync_32_to_64(env);
+    }
+
     if (n < 31) {
         /* Core integer register.  */
         return gdb_get_reg64(mem_buf, env->xregs[n]);
     }
     switch (n) {
     case 31:
-        return gdb_get_reg64(mem_buf, env->xregs[31]);
+        /* AArch32 SPs are represented by their banked X-register aliases. */
+        return gdb_get_reg64(mem_buf, is_a64(env) ? env->xregs[31] : 0);
     case 32:
         return gdb_get_reg64(mem_buf, env->pc);
     case 33:
-        /* pstate is now a 64-bit value; can we simply adjust the xml? */
-        return gdb_get_reg32(mem_buf, pstate_read(env));
+        /* The debugger's status register is CPSR in AArch32 state. */
+        return gdb_get_reg32(mem_buf, is_a64(env) ?
+                            pstate_read(env) : cpsr_read(env));
     }
     /* Unknown register.  */
     return 0;
