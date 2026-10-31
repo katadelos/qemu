@@ -565,10 +565,72 @@ static const VMStateDescription vmstate_imx50_epdc_rgb = {
     },
 };
 
+static int imx50_epdc_pre_save(void *opaque)
+{
+    IMX50EPDCState *s = opaque;
+    DisplaySurface *surface = qemu_console_surface(s->console);
+
+    s->migration_panel_width = 0;
+    s->migration_panel_height = 0;
+    s->migration_panel_size = 0;
+    if (!surface || surface_is_placeholder(surface)) {
+        g_clear_pointer(&s->migration_panel, g_free);
+        return 0;
+    }
+    if (surface_bits_per_pixel(surface) != 32 ||
+        !surface_width(surface) || !surface_height(surface) ||
+        surface_width(surface) > EPDC_MAX_DIMENSION ||
+        surface_height(surface) > EPDC_MAX_DIMENSION) {
+        return -EINVAL;
+    }
+    s->migration_panel_width = surface_width(surface);
+    s->migration_panel_height = surface_height(surface);
+    s->migration_panel_size = s->migration_panel_width *
+                              s->migration_panel_height * 4;
+    s->migration_panel = g_realloc(s->migration_panel, s->migration_panel_size);
+    for (uint32_t y = 0; y < s->migration_panel_height; y++) {
+        memcpy(s->migration_panel + y * s->migration_panel_width * 4,
+               surface_data(surface) + y * surface_stride(surface),
+               s->migration_panel_width * 4);
+    }
+    return 0;
+}
+
+static bool imx50_epdc_valid_panel(void *opaque, int version_id)
+{
+    IMX50EPDCState *s = opaque;
+
+    if (version_id != 2) {
+        return false;
+    }
+    if (!s->migration_panel_size) {
+        return !s->migration_panel_width && !s->migration_panel_height;
+    }
+    return s->migration_panel_width &&
+           s->migration_panel_width <= EPDC_MAX_DIMENSION &&
+           s->migration_panel_height &&
+           s->migration_panel_height <= EPDC_MAX_DIMENSION &&
+           s->migration_panel_size == (uint64_t)s->migration_panel_width *
+                                      s->migration_panel_height * 4;
+}
+
 static int imx50_epdc_post_load(void *opaque, int version_id)
 {
     IMX50EPDCState *s = opaque;
 
+    (void)version_id;
+    if (s->migration_panel_size) {
+        DisplaySurface *surface = imx50_epdc_prepare_surface(
+            s, s->migration_panel_width, s->migration_panel_height);
+
+        for (uint32_t y = 0; y < s->migration_panel_height; y++) {
+            memcpy(surface_data(surface) + y * surface_stride(surface),
+                   s->migration_panel + y * s->migration_panel_width * 4,
+                   s->migration_panel_width * 4);
+        }
+        dpy_gfx_update_full(s->console);
+    }
+    g_clear_pointer(&s->migration_panel, g_free);
     imx50_epdc_update_irq(s);
     imx50_epdc_schedule_luts(s);
     return 0;
@@ -576,14 +638,21 @@ static int imx50_epdc_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_imx50_epdc = {
     .name = TYPE_IMX50_EPDC,
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
+    .pre_save = imx50_epdc_pre_save,
     .post_load = imx50_epdc_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IMX50EPDCState,
                              IMX50_EPDC_MMIO_SIZE / sizeof(uint32_t)),
         VMSTATE_UINT32(pending_luts, IMX50EPDCState),
         VMSTATE_INT64_ARRAY(lut_deadline, IMX50EPDCState, 16),
+        VMSTATE_UINT32_V(migration_panel_width, IMX50EPDCState, 2),
+        VMSTATE_UINT32_V(migration_panel_height, IMX50EPDCState, 2),
+        VMSTATE_UINT32_V(migration_panel_size, IMX50EPDCState, 2),
+        VMSTATE_VALIDATE("panel dimensions", imx50_epdc_valid_panel),
+        VMSTATE_VBUFFER_ALLOC_UINT32(migration_panel, IMX50EPDCState, 2,
+                                     NULL, migration_panel_size),
         VMSTATE_TIMER_PTR(wb_timer, IMX50EPDCState),
         VMSTATE_TIMER_PTR(lut_timer, IMX50EPDCState),
         VMSTATE_END_OF_LIST()
@@ -620,6 +689,7 @@ static void imx50_epdc_unrealize(DeviceState *dev)
     timer_free(s->scanout_timer);
     g_free(s->direct_fb_buffer);
     s->direct_fb_buffer = NULL;
+    g_clear_pointer(&s->migration_panel, g_free);
 }
 
 static void imx50_epdc_init(Object *obj)

@@ -27,6 +27,10 @@ struct IMX50EPDCState {
     QEMUTimer *lut_timer;
     QEMUTimer *scanout_timer;
     QemuConsole *console;
+    uint8_t *migration_panel;
+    uint32_t migration_panel_width;
+    uint32_t migration_panel_height;
+    uint32_t migration_panel_size;
     uint32_t regs[IMX50_EPDC_MMIO_SIZE / sizeof(uint32_t)];
     uint32_t pending_luts;
     int64_t lut_deadline[16];
