@@ -417,6 +417,25 @@ static void tlbi_aa64_alle3is_write(CPUARMState *env, const ARMCPRegInfo *ri,
     tlb_flush_by_mmuidx_all_cpus_synced(cs, vae3_tlbmask());
 }
 
+/* Invalidate a guest translation granule, including every internal TCG page.
+ * Mixed CPU machines can use 1 KiB TCG pages even with an AArch64 MMU.
+ */
+static void tlbi_aa64_va_flush(CPUARMState *env, uint64_t addr,
+                               MMUIdxMap mask, unsigned bits, bool synced)
+{
+    ARMMMUIdx mmu_idx = ARM_MMU_IDX_A | ctz32(mask);
+    ARMVAParameters param = aa64_va_parameters(env, addr, mmu_idx, true, false);
+    uint64_t size = UINT64_C(1) << arm_granule_bits(param.gran);
+
+    addr &= ~(size - 1);
+    if (synced) {
+        tlb_flush_range_by_mmuidx_all_cpus_synced(env_cpu(env), addr, size,
+                                                  mask, bits);
+    } else {
+        tlb_flush_range_by_mmuidx(env_cpu(env), addr, size, mask, bits);
+    }
+}
+
 static void tlbi_aa64_vae2_write(CPUARMState *env, const ARMCPRegInfo *ri,
                                  uint64_t value)
 {
@@ -425,12 +444,11 @@ static void tlbi_aa64_vae2_write(CPUARMState *env, const ARMCPRegInfo *ri,
      * Currently handles both VAE2 and VALE2, since we don't support
      * flush-last-level-only.
      */
-    CPUState *cs = env_cpu(env);
     int mask = vae2_tlbmask(env);
     uint64_t pageaddr = sextract64(value << 12, 0, 56);
     int bits = vae2_tlbbits(env, pageaddr);
 
-    tlb_flush_page_bits_by_mmuidx(cs, pageaddr, mask, bits);
+    tlbi_aa64_va_flush(env, pageaddr, mask, bits, false);
 }
 
 static void tlbi_aa64_vae3_write(CPUARMState *env, const ARMCPRegInfo *ri,
@@ -441,22 +459,19 @@ static void tlbi_aa64_vae3_write(CPUARMState *env, const ARMCPRegInfo *ri,
      * Currently handles both VAE3 and VALE3, since we don't support
      * flush-last-level-only.
      */
-    ARMCPU *cpu = env_archcpu(env);
-    CPUState *cs = CPU(cpu);
     uint64_t pageaddr = sextract64(value << 12, 0, 56);
 
-    tlb_flush_page_by_mmuidx(cs, pageaddr, vae3_tlbmask());
+    tlbi_aa64_va_flush(env, pageaddr, vae3_tlbmask(), 64, false);
 }
 
 static void tlbi_aa64_vae1is_write(CPUARMState *env, const ARMCPRegInfo *ri,
                                    uint64_t value)
 {
-    CPUState *cs = env_cpu(env);
     int mask = vae1_tlbmask(env);
     uint64_t pageaddr = sextract64(value << 12, 0, 56);
     int bits = vae1_tlbbits(env, pageaddr);
 
-    tlb_flush_page_bits_by_mmuidx_all_cpus_synced(cs, pageaddr, mask, bits);
+    tlbi_aa64_va_flush(env, pageaddr, mask, bits, true);
 }
 
 static void tlbi_aa64_vae1_write(CPUARMState *env, const ARMCPRegInfo *ri,
@@ -468,38 +483,34 @@ static void tlbi_aa64_vae1_write(CPUARMState *env, const ARMCPRegInfo *ri,
      * since we don't support flush-for-specific-ASID-only or
      * flush-last-level-only.
      */
-    CPUState *cs = env_cpu(env);
     int mask = vae1_tlbmask(env);
     uint64_t pageaddr = sextract64(value << 12, 0, 56);
     int bits = vae1_tlbbits(env, pageaddr);
 
     if (tlb_force_broadcast(env)) {
-        tlb_flush_page_bits_by_mmuidx_all_cpus_synced(cs, pageaddr, mask, bits);
+        tlbi_aa64_va_flush(env, pageaddr, mask, bits, true);
     } else {
-        tlb_flush_page_bits_by_mmuidx(cs, pageaddr, mask, bits);
+        tlbi_aa64_va_flush(env, pageaddr, mask, bits, false);
     }
 }
 
 static void tlbi_aa64_vae2is_write(CPUARMState *env, const ARMCPRegInfo *ri,
                                    uint64_t value)
 {
-    CPUState *cs = env_cpu(env);
     int mask = vae2_tlbmask(env);
     uint64_t pageaddr = sextract64(value << 12, 0, 56);
     int bits = vae2_tlbbits(env, pageaddr);
 
-    tlb_flush_page_bits_by_mmuidx_all_cpus_synced(cs, pageaddr, mask, bits);
+    tlbi_aa64_va_flush(env, pageaddr, mask, bits, true);
 }
 
 static void tlbi_aa64_vae3is_write(CPUARMState *env, const ARMCPRegInfo *ri,
                                    uint64_t value)
 {
-    CPUState *cs = env_cpu(env);
     uint64_t pageaddr = sextract64(value << 12, 0, 56);
     int bits = tlbbits_for_regime(env, ARMMMUIdx_E3, pageaddr);
 
-    tlb_flush_page_bits_by_mmuidx_all_cpus_synced(cs, pageaddr,
-                                                  vae3_tlbmask(), bits);
+    tlbi_aa64_va_flush(env, pageaddr, vae3_tlbmask(), bits, true);
 }
 
 static int ipas2e1_tlbmask(CPUARMState *env, int64_t value)
