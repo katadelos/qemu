@@ -47,6 +47,7 @@
 #include "qobject/qlist.h"
 #include "system/block-backend.h"
 #include "system/reset.h"
+#include "system/runstate.h"
 #include "system/system.h"
 #include "target/arm/cpu.h"
 #include "target/arm/cpregs.h"
@@ -331,6 +332,8 @@ struct PA6CS8State {
     bool systimer_pending;
     uint64_t systimer_expirations, systimer_masked_expirations;
     uint32_t timer_regs[0x1000 / 4];
+    MemoryRegion toprgu;
+    uint32_t toprgu_regs[0x1000 / 4];
     uint64_t entry;
     char *quickboot;
     char *bl2;
@@ -353,6 +356,57 @@ struct PA6CS8State {
     char *idme_postmode;
     char *idme_fos_flags;
     char *idme_hwid;
+};
+
+/* Linux and U-Boot request AP resets through TOPRGU's keyed SWRST register.
+ * NONRST registers and the reset cause survive that reset for the bootloader.
+ * The watchdog countdown and peripheral reset outputs are separate hardware.
+ */
+static uint64_t pa6_toprgu_read(void *opaque, hwaddr offset, unsigned size)
+{
+    PA6CS8State *s = opaque;
+
+    return s->toprgu_regs[offset / 4];
+}
+
+static void pa6_toprgu_write(void *opaque, hwaddr offset, uint64_t value,
+                             unsigned size)
+{
+    PA6CS8State *s = opaque;
+
+    switch (offset) {
+    case 0x00: /* MODE */
+        if ((value & 0xff000000) != 0x22000000) {
+            return;
+        }
+        value &= 0x00ffffff;
+        break;
+    case 0x0c: /* STATUS is read-only. */
+        return;
+    case 0x14: /* SWRST */
+        if (value == 0x1209) {
+            s->toprgu_regs[0x0c / 4] = BIT(30); /* SWWDT_RST */
+            qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+        }
+        return;
+    case 0x18: /* SWSYSRST */
+        if ((value & 0xff000000) != 0x88000000) {
+            return;
+        }
+        value &= 0x00ffffff;
+        break;
+    }
+    s->toprgu_regs[offset / 4] = value;
+}
+
+static const MemoryRegionOps pa6_toprgu_ops = {
+    .read = pa6_toprgu_read,
+    .write = pa6_toprgu_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 4,
+        .max_access_size = 4,
+    },
 };
 
 /* SPM register-level power transitions. Supply voltages, PCM firmware and
@@ -2257,6 +2311,9 @@ static void pa6_reset(void *opaque)
 {
     PA6CS8State *s = opaque;
 
+    /* NONRST and STATUS belong to the always-on reset domain. */
+    s->toprgu_regs[0x00 / 4] = 0;
+    s->toprgu_regs[0x18 / 4] = 0;
     timer_del(s->systimer_alarm);
     s->systimer_control = s->systimer_ticks = 0;
     s->systimer_pending = false;
@@ -2687,7 +2744,9 @@ static void pa6_init(MachineState *machine)
     for (unsigned i = 0; i < 4; i++) {
         s->auxadc.input_mv[i] = 900;
     }
-    create_unimplemented_device("mt8115.watchdog", 0x10007000, 0x1000);
+    memory_region_init_io(&s->toprgu, OBJECT(s), &pa6_toprgu_ops, s,
+                          "mt8115.toprgu", sizeof(s->toprgu_regs));
+    memory_region_add_subregion(get_system_memory(), 0x10007000, &s->toprgu);
     object_initialize_child(OBJECT(s), "consys", &s->consys, TYPE_MT8171_CONSYS);
     s->consys.spm_regs = s->spm.regs;
     for (unsigned i = 0; i < ARRAY_SIZE(pa6_clock_map); i++) {
