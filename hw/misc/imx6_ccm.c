@@ -264,8 +264,8 @@ static int imx6_ccm_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_imx6_ccm = {
     .name = TYPE_IMX6_CCM,
-    .version_id = 2,
-    .minimum_version_id = 2,
+    .version_id = 3,
+    .minimum_version_id = 3,
     .post_load = imx6_ccm_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(ccm, IMX6CCMState, CCM_MAX),
@@ -422,6 +422,7 @@ static void imx6_ccm_reset(DeviceState *dev)
 
     trace_imx6_ccm_reset();
 
+    memset(s->analog, 0, sizeof(s->analog));
     s->ccm[CCM_CCR] = 0x040116FF;
     s->ccm[CCM_CCDR] = 0x00000000;
     s->ccm[CCM_CSR] = 0x00000010;
@@ -556,6 +557,13 @@ static uint64_t imx6_analog_read(void *opaque, hwaddr offset, unsigned size)
     uint32_t index = offset >> 2;
     IMX6CCMState *s = (IMX6CCMState *)opaque;
 
+    if (index >= ARRAY_SIZE(s->analog)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "[%s] Bad analog register at offset 0x%" HWADDR_PRIx "\n",
+                      TYPE_IMX6_CCM, offset);
+        return 0;
+    }
+
     switch (index) {
     case PMU_REG_2P5:
         value = s->analog[index] & ~REG_2P5_OK_VDD2P5;
@@ -682,6 +690,13 @@ static void imx6_analog_write(void *opaque, hwaddr offset, uint64_t value,
 {
     uint32_t index = offset >> 2;
     IMX6CCMState *s = (IMX6CCMState *)opaque;
+
+    if (index >= ARRAY_SIZE(s->analog)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "[%s] Bad analog register at offset 0x%" HWADDR_PRIx "\n",
+                      TYPE_IMX6_CCM, offset);
+        return;
+    }
 
     trace_imx6_analog_write(imx6_analog_reg_name(index), (uint32_t)value);
 
@@ -871,7 +886,7 @@ static void imx6_ccm_init(Object *obj)
     /* We initialize an IO memory region for the ANALOG part */
     memory_region_init_io(&s->ioanalog, OBJECT(dev), &imx6_analog_ops, s,
                           TYPE_IMX6_CCM ".analog",
-                          CCM_ANALOG_REGION_MAX * sizeof(uint32_t));
+                          sizeof(s->analog));
 
     /* Add the ANALOG as a subregion at offset 0x4000 */
     memory_region_add_subregion(&s->container, 0x4000, &s->ioanalog);
