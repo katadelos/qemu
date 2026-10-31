@@ -278,7 +278,10 @@ static void zelda_firmware_reset(void *opaque)
     qemu_set_irq(s->sdma_irq, 0);
     /* The boot ROM has already selected USDHC3 and initialized DDR. */
     s->soc->src.regs[SRC_SBMR1] = 0x2810;
-    cpu_reset(CPU(cpu));
+    /* Firmware boot bypasses arm_load_kernel()'s per-CPU reset handlers. */
+    for (unsigned i = 0; i < MACHINE(s)->smp.cpus; i++) {
+        cpu_reset(CPU(&s->soc->cpu[i]));
+    }
     cpu_set_pc(CPU(cpu), zelda_boot_info.entry);
 }
 
