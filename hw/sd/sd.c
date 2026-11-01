@@ -2541,6 +2541,25 @@ static void sd_erase(SDState *sd)
     sd->csd[14] |= 0x40;
 
     memset(sd->data, 0xff, erase_len);
+    if (!sdsc && erase_start <= erase_end) {
+        uint64_t remaining = erase_end - erase_start + erase_len;
+        uint32_t capacity = MIN(remaining, MiB);
+        g_autofree uint8_t *erased = g_malloc(capacity);
+
+        /* Sector-addressed cards have no write-protect groups to skip.
+         * Batch the contiguous erase while keeping its inclusive end and
+         * erased byte value. A synchronous backend otherwise flushes every
+         * 512-byte sector during the stock guest's first-boot mkfs. */
+        memset(erased, 0xff, capacity);
+        for (erase_addr = erase_start; remaining; ) {
+            uint32_t length = MIN(remaining, capacity);
+
+            sd_blk_write_buffer(sd, erase_addr, length, erased);
+            erase_addr += length;
+            remaining -= length;
+        }
+        return;
+    }
     for (erase_addr = erase_start; erase_addr <= erase_end;
          erase_addr += erase_len) {
         if (sdsc) {
