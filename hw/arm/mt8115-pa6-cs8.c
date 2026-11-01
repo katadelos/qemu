@@ -2240,7 +2240,10 @@ static void pa6_aux_load(PA6CS8State *s, const char *filename, bool tee)
                 error_report("PA6/CS8 firmware has no DPM payload");
                 exit(EXIT_FAILURE);
             }
-            pa6_load_fit(s, fit, path);
+            /* BL2 relocates dpmpm/dpmdm into DPM's local memories. The FIT
+             * load address is staging, not a runtime DRAM payload. Keeping
+             * the container there as a reset ROM puts non-CPIO data inside
+             * the stock kernel's 0x44100000..0x45000000 initrd window. */
             uint32_t pm_size = mt8115_preload_dpm(data, len);
             for (unsigned i = 0; i < ARRAY_SIZE(s->dpm); i++) {
                 s->dpm[i].pm_size = pm_size;
