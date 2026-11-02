@@ -77,6 +77,7 @@ struct BD71828State {
     qemu_irq gpio_out[3];
     qemu_irq nirq;
     bool power_button_support;
+    uint8_t battery_id;
     bool power_button;
     bool vbus_present;
     uint64_t power_presses;
@@ -341,7 +342,7 @@ static void bd71828_reset(DeviceState *dev)
     bd71828_store_be16(s, BD71828_REG_VBAT_REX_U, 4000);
     bd71828_store_be16(s, BD71828_REG_VSYS_U, 4000);
     bd71828_store_be16(s, BD71828_REG_VSYS_MIN_U, 3950);
-    s->regs[BD71828_REG_BATID] = BD71828_SUNWODA_BATID;
+    s->regs[BD71828_REG_BATID] = s->battery_id;
     bd71828_store_be16(s, BD71828_REG_BTMP_U, BD71828_BTMP_25C);
     bd71828_store_be32(s, BD71828_REG_CC_CNT3, 1296U << 16);
     bd71828_store_be32(s, BD71828_REG_CC_FULL3, 0);
@@ -404,6 +405,8 @@ static const VMStateDescription bd71828_vmstate = {
 };
 
 static const Property bd71828_properties[] = {
+    DEFINE_PROP_UINT8("battery-id", BD71828State, battery_id,
+                      BD71828_SUNWODA_BATID),
     DEFINE_PROP_BOOL("power-button-support", BD71828State,
                      power_button_support, false),
 };

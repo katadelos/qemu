@@ -717,6 +717,10 @@ static void bellatrix_init(MachineState *machine)
         qemu_set_irq(bms->usb_detector_vbus, bms->usb_vbus);
     }
     bd71828 = i2c_slave_new(TYPE_BD71828, 0x4b);
+    if (malbec) {
+        /* BD71827 identifies Malbec's 15 kohm battery in 0x20..0x25. */
+        qdev_prop_set_uint8(DEVICE(bd71828), "battery-id", 0x22);
+    }
     if (button_support) {
         object_property_add_child(OBJECT(machine), "pmic", OBJECT(bd71828));
         qdev_prop_set_bit(DEVICE(bd71828), "power-button-support", true);
