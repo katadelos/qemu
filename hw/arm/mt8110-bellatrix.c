@@ -689,7 +689,7 @@ static void bellatrix_init(MachineState *machine)
         sysbus_realize_and_unref(SYS_BUS_DEVICE(adc), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(adc), 0, 0x11001000);
     }
-    for (int cpu = 0; cpu < MT8113_NUM_CPUS; cpu++) {
+    for (int cpu = 0; cpu < soc->num_cpus; cpu++) {
         qemu_register_reset(bellatrix_firmware_reset, &soc->cpu[cpu]);
     }
 
@@ -913,7 +913,7 @@ static void bellatrix_machine_instance_finalize(Object *obj)
     }
     qemu_free_irq(bms->usb_vbus_input);
     if (bms->soc) {
-        for (int cpu = 0; cpu < MT8113_NUM_CPUS; cpu++) {
+        for (int cpu = 0; cpu < bms->soc->num_cpus; cpu++) {
             qemu_unregister_reset(bellatrix_firmware_reset,
                                   &bms->soc->cpu[cpu]);
         }
