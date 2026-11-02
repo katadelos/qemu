@@ -69,20 +69,37 @@ static void tlbiasid_is_write(CPUARMState *env, const ARMCPRegInfo *ri,
     }
 }
 
+/*
+ * The minimum guest translation granule may span several internal TCG pages.
+ * Flush the entire granule so the jump cache cannot retain its later subpages.
+ * Pre-v6 short descriptors can still describe 1 KiB tiny pages.
+ */
+static void tlbi_aa32_va_flush(CPUARMState *env, uint64_t addr,
+                              MMUIdxMap mask, bool synced, bool hyp)
+{
+    unsigned bits = (hyp || arm_feature(env, ARM_FEATURE_V7) ||
+                     (regime_sctlr(env, ARMMMUIdx_E10_1) & SCTLR_XP)) ? 12 : 10;
+    uint64_t size = UINT64_C(1) << bits;
+
+    addr &= ~(size - 1);
+    if (synced) {
+        tlb_flush_range_by_mmuidx_all_cpus_synced(env_cpu(env), addr, size,
+                                                mask, 64);
+    } else {
+        tlb_flush_range_by_mmuidx(env_cpu(env), addr, size, mask, 64);
+    }
+}
+
 static void tlbimva_is_write(CPUARMState *env, const ARMCPRegInfo *ri,
                              uint64_t value)
 {
-    CPUState *cs = env_cpu(env);
-
-    tlb_flush_page_all_cpus_synced(cs, value & TARGET_PAGE_MASK);
+    tlbi_aa32_va_flush(env, value, MAKE_64BIT_MASK(0, NB_MMU_MODES), true, false);
 }
 
 static void tlbimvaa_is_write(CPUARMState *env, const ARMCPRegInfo *ri,
                              uint64_t value)
 {
-    CPUState *cs = env_cpu(env);
-
-    tlb_flush_page_all_cpus_synced(cs, value & TARGET_PAGE_MASK);
+    tlbi_aa32_va_flush(env, value, MAKE_64BIT_MASK(0, NB_MMU_MODES), true, false);
 }
 
 /*
@@ -111,15 +128,8 @@ static void tlbiall_write(CPUARMState *env, const ARMCPRegInfo *ri,
 static void tlbimva_write(CPUARMState *env, const ARMCPRegInfo *ri,
                           uint64_t value)
 {
-    /* Invalidate single TLB entry by MVA and ASID (TLBIMVA) */
-    CPUState *cs = env_cpu(env);
-
-    value &= TARGET_PAGE_MASK;
-    if (tlb_force_broadcast(env)) {
-        tlb_flush_page_all_cpus_synced(cs, value);
-    } else {
-        tlb_flush_page(cs, value);
-    }
+    tlbi_aa32_va_flush(env, value, MAKE_64BIT_MASK(0, NB_MMU_MODES),
+                      tlb_force_broadcast(env), false);
 }
 
 static void tlbiasid_write(CPUARMState *env, const ARMCPRegInfo *ri,
@@ -147,56 +157,38 @@ static void tlbiasid_write(CPUARMState *env, const ARMCPRegInfo *ri,
 }
 
 static void tlbimvaa_write(CPUARMState *env, const ARMCPRegInfo *ri,
-                           uint64_t value)
+                          uint64_t value)
 {
-    /* Invalidate single entry by MVA, all ASIDs (TLBIMVAA) */
-    CPUState *cs = env_cpu(env);
-
-    value &= TARGET_PAGE_MASK;
-    if (tlb_force_broadcast(env)) {
-        tlb_flush_page_all_cpus_synced(cs, value);
-    } else {
-        tlb_flush_page(cs, value);
-    }
+    tlbi_aa32_va_flush(env, value, MAKE_64BIT_MASK(0, NB_MMU_MODES),
+                      tlb_force_broadcast(env), false);
 }
 
 static void tlbimva_hyp_write(CPUARMState *env, const ARMCPRegInfo *ri,
-                              uint64_t value)
+                                uint64_t value)
 {
-    CPUState *cs = env_cpu(env);
-    uint64_t pageaddr = value & ~MAKE_64BIT_MASK(0, 12);
-
-    tlb_flush_page_by_mmuidx(cs, pageaddr,
-                             ARMMMUIdxBit_E2 | ARMMMUIdxBit_E2_GCS);
+    tlbi_aa32_va_flush(env, value,
+                      ARMMMUIdxBit_E2 | ARMMMUIdxBit_E2_GCS, false, true);
 }
 
 static void tlbimva_hyp_is_write(CPUARMState *env, const ARMCPRegInfo *ri,
-                                 uint64_t value)
+                                uint64_t value)
 {
-    CPUState *cs = env_cpu(env);
-    uint64_t pageaddr = value & ~MAKE_64BIT_MASK(0, 12);
-
-    tlb_flush_page_by_mmuidx_all_cpus_synced(cs, pageaddr,
-                                             ARMMMUIdxBit_E2 |
-                                             ARMMMUIdxBit_E2_GCS);
+    tlbi_aa32_va_flush(env, value,
+                      ARMMMUIdxBit_E2 | ARMMMUIdxBit_E2_GCS, true, true);
 }
 
 static void tlbiipas2_hyp_write(CPUARMState *env, const ARMCPRegInfo *ri,
                                 uint64_t value)
 {
-    CPUState *cs = env_cpu(env);
-    uint64_t pageaddr = (value & MAKE_64BIT_MASK(0, 28)) << 12;
-
-    tlb_flush_page_by_mmuidx(cs, pageaddr, ARMMMUIdxBit_Stage2);
+    tlbi_aa32_va_flush(env, (value & MAKE_64BIT_MASK(0, 28)) << 12,
+                      ARMMMUIdxBit_Stage2, false, true);
 }
 
 static void tlbiipas2is_hyp_write(CPUARMState *env, const ARMCPRegInfo *ri,
                                 uint64_t value)
 {
-    CPUState *cs = env_cpu(env);
-    uint64_t pageaddr = (value & MAKE_64BIT_MASK(0, 28)) << 12;
-
-    tlb_flush_page_by_mmuidx_all_cpus_synced(cs, pageaddr, ARMMMUIdxBit_Stage2);
+    tlbi_aa32_va_flush(env, (value & MAKE_64BIT_MASK(0, 28)) << 12,
+                      ARMMMUIdxBit_Stage2, true, true);
 }
 
 static void tlbiall_nsnh_write(CPUARMState *env, const ARMCPRegInfo *ri,
