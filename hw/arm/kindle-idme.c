@@ -167,14 +167,14 @@ static const KindleIdmeDefaults kindle_identities[] = {
     },
     {
         .board = "malbec",
-        .serial = "G002DK0000000000",
-        .board_id = "P002R90000000000",
+        .serial = "G001PX0000000000",
+        .board_id = "P002B10000000000",
         .mac = "020000000006",
         .manufacturing = "PAPERWHITE5QEMU00",
         .bootmode = "1",
         .postmode = "0",
         .product_name = "",
-        .device_type = "2DK",
+        .device_type = "1PX",
         .fos_flags = "0",
     },
     {

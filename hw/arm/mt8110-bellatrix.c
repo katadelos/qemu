@@ -121,9 +121,9 @@ static const BellatrixDeviceProfile bellatrix_device_profiles[] = {
     { .name = "proto",      .hwid = 0 },
 };
 
-/* Malbec's shipped U-Boot names HWID 14 DVT1.1 and accepts tattoo 2R9. */
+/* Malbec's shipped U-Boot names HWID 14 DVT1.1 and accepts tattoo 2B1. */
 static const BellatrixDeviceProfile malbec_device_profiles[] = {
-    { "production", 14, "2R9" },
+    { "production", 14, "2B1" },
 };
 
 /* The stock Bellatrix3 board source names each Barolo tattoo phase. */
