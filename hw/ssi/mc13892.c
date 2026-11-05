@@ -9,9 +9,12 @@
 #include "hw/core/qdev-properties.h"
 #include "hw/ssi/mc13892.h"
 #include "migration/vmstate.h"
+#include "qemu/cutils.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
+#include "system/rtc.h"
 #include "system/runstate.h"
+#include "system/system.h"
 #include "trace.h"
 
 #define MC13892_NUM_REGS       64
@@ -64,7 +67,7 @@ static void mc13892_update_irq(MC13892State *s);
 static int64_t mc13892_rtc_count(MC13892State *s)
 {
     return s->rtc_offset +
-        qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / NANOSECONDS_PER_SECOND;
+        qemu_clock_get_ns(rtc_clock) / NANOSECONDS_PER_SECOND;
 }
 
 static void mc13892_rtc_reschedule(MC13892State *s)
@@ -81,7 +84,7 @@ static void mc13892_rtc_reschedule(MC13892State *s)
 
     alarm = (int64_t)alarm_day * MC13892_RTC_DAY_SECONDS + alarm_tod;
     expiry = (alarm - s->rtc_offset) * NANOSECONDS_PER_SECOND;
-    if (expiry > qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL)) {
+    if (expiry > qemu_clock_get_ns(rtc_clock)) {
         timer_mod(s->rtc_timer, expiry);
     }
 }
@@ -89,7 +92,7 @@ static void mc13892_rtc_reschedule(MC13892State *s)
 static void mc13892_rtc_set_count(MC13892State *s, int64_t count)
 {
     s->rtc_offset = count -
-        qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / NANOSECONDS_PER_SECOND;
+        qemu_clock_get_ns(rtc_clock) / NANOSECONDS_PER_SECOND;
     mc13892_rtc_reschedule(s);
 }
 
@@ -292,8 +295,7 @@ static void mc13892_reset(DeviceState *dev)
     s->reg = 0;
     s->write = false;
     s->power_down = false;
-    s->rtc_offset =
-        -qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / NANOSECONDS_PER_SECOND;
+    /* The battery-backed RTC keeps its programmed time across system reset. */
     timer_del(s->rtc_timer);
     mc13892_update_irq(s);
 }
@@ -301,6 +303,11 @@ static void mc13892_reset(DeviceState *dev)
 static void mc13892_realize(SSIPeripheral *peripheral, Error **errp)
 {
     MC13892State *s = MC13892(peripheral);
+    struct tm tm;
+
+    qemu_get_timedate(&tm, 0);
+    s->rtc_offset = mktimegm(&tm) -
+        qemu_clock_get_ns(rtc_clock) / NANOSECONDS_PER_SECOND;
 
     qdev_init_gpio_out_named(DEVICE(peripheral), &s->irq, "irq", 1);
     qdev_init_gpio_in_named(DEVICE(peripheral), mc13892_power_input,
@@ -309,7 +316,7 @@ static void mc13892_realize(SSIPeripheral *peripheral, Error **errp)
                            "vbus", 1);
     qdev_init_gpio_in_named(DEVICE(peripheral), mc13892_watchdog_input,
                            "watchdog", 1);
-    s->rtc_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+    s->rtc_timer = timer_new_ns(rtc_clock,
                                 mc13892_rtc_alarm, s);
 }
 

@@ -54,6 +54,7 @@ struct FslIMX50State {
     uint32_t databahn[0x400 / 4];
     uint32_t sdma[0x1000 / 4];
     uint32_t srtc[0x40 / 4];
+    uint64_t srtc_tick_offset;
     uint32_t anatop[0x100 / 4];
     uint32_t pxp[0x1000 / 4];
     uint8_t pxp_lut[256];

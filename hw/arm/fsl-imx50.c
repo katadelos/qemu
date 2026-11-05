@@ -5,9 +5,11 @@
 #include "hw/arm/fsl-imx50.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/misc/unimp.h"
+#include "qemu/cutils.h"
 #include "qemu/timer.h"
 #include "qemu/module.h"
 #include "system/dma.h"
+#include "system/rtc.h"
 #include "system/system.h"
 #include "target/arm/cpu-qom.h"
 #include "trace.h"
@@ -17,6 +19,9 @@
 #define IMX50_SDMA_INTR          0x04
 #define IMX50_SDMA_START         0x0c
 #define IMX50_SDMA_RESET         0x24
+#define IMX50_SRTC_LPSCMR        0x00
+#define IMX50_SRTC_LPSCLR        0x04
+#define IMX50_SRTC_FREQ          32768ULL
 #define IMX50_SRTC_LPCR          0x10
 #define IMX50_SRTC_LPSR          0x14
 #define IMX50_SRTC_LPCR_NVE      (1 << 14)
@@ -401,12 +406,23 @@ static const MemoryRegionOps imx50_pxp_ops = {
     .valid = { .min_access_size = 4, .max_access_size = 4 },
 };
 
+static uint64_t imx50_srtc_count(FslIMX50State *s)
+{
+    return s->srtc_tick_offset +
+        muldiv64(qemu_clock_get_ns(rtc_clock), IMX50_SRTC_FREQ,
+                 NANOSECONDS_PER_SECOND);
+}
+
 static uint64_t imx50_srtc_read(void *opaque, hwaddr offset, unsigned size)
 {
     FslIMX50State *s = opaque;
 
-    if (offset == 0x04) {
-        return ++s->srtc[offset / 4];
+    /* Seconds occupy LPSCMR; the 15 fractional bits occupy LPSCLR[31:17]. */
+    if (offset == IMX50_SRTC_LPSCMR) {
+        return (uint32_t)(imx50_srtc_count(s) >> 15);
+    }
+    if (offset == IMX50_SRTC_LPSCLR) {
+        return (imx50_srtc_count(s) & 0x7fff) << 17;
     }
     return s->srtc[offset / 4];
 }
@@ -415,6 +431,19 @@ static void imx50_srtc_write(void *opaque, hwaddr offset, uint64_t value,
                              unsigned size)
 {
     FslIMX50State *s = opaque;
+
+    if (offset == IMX50_SRTC_LPSCMR || offset == IMX50_SRTC_LPSCLR) {
+        uint64_t count = imx50_srtc_count(s);
+        uint64_t updated;
+
+        if (offset == IMX50_SRTC_LPSCMR) {
+            updated = ((uint64_t)(uint32_t)value << 15) | (count & 0x7fff);
+        } else {
+            updated = (count & ~0x7fffULL) | ((value >> 17) & 0x7fff);
+        }
+        s->srtc_tick_offset += updated - count;
+        return;
+    }
 
     if (offset == IMX50_SRTC_LPSR) {
         /* Status is W1C; the state-machine indications are read-only. */
@@ -544,8 +573,14 @@ static const MemoryRegionOps imx50_src_ops = {
 static void fsl_imx50_init(Object *obj)
 {
     FslIMX50State *s = FSL_IMX50(obj);
+    struct tm tm;
     unsigned i;
     char name[12];
+
+    qemu_get_timedate(&tm, 0);
+    s->srtc_tick_offset = (uint64_t)mktimegm(&tm) * IMX50_SRTC_FREQ -
+        muldiv64(qemu_clock_get_ns(rtc_clock), IMX50_SRTC_FREQ,
+                 NANOSECONDS_PER_SECOND);
 
     /* PxP's power-on LUT is a pass-through table, not an all-black map. */
     for (i = 0; i < ARRAY_SIZE(s->pxp_lut); i++) {
