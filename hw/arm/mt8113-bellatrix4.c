@@ -98,6 +98,7 @@ typedef enum Bellatrix4BoardKind {
     BELLATRIX4_BOARD_SANGRIA,
     BELLATRIX4_BOARD_SANGRIA_COLOR,
     BELLATRIX4_BOARD_AMARO,
+    BELLATRIX4_BOARD_JULEP,
     BELLATRIX4_BOARD_COUNT,
 } Bellatrix4BoardKind;
 
@@ -122,6 +123,9 @@ static const Bellatrix4Board bellatrix4_boards[] = {
     }, {
         .name = "amaro",
         .kind = BELLATRIX4_BOARD_AMARO,
+    }, {
+        .name = "julep",
+        .kind = BELLATRIX4_BOARD_JULEP,
     },
 };
 
@@ -171,7 +175,7 @@ static const Bellatrix4Board *bellatrix4_find_board(const char *name)
     }
 
     error_report("invalid Bellatrix4 board '%s' (expected sangria, "
-                 "sangria-color, or amaro)", name);
+                 "sangria-color, amaro, or julep)", name);
     exit(EXIT_FAILURE);
 }
 
@@ -191,7 +195,8 @@ bellatrix4_find_device_profile(const char *name)
 
 static bool bellatrix4_is_ao5(const Bellatrix4Board *board)
 {
-    return board->kind == BELLATRIX4_BOARD_AMARO;
+    return board->kind == BELLATRIX4_BOARD_AMARO ||
+           board->kind == BELLATRIX4_BOARD_JULEP;
 }
 
 static unsigned bellatrix4_profile_hwid(const Bellatrix4Board *board,
@@ -769,7 +774,8 @@ static void bellatrix4_init(MachineState *machine)
     Bellatrix4MachineState *bms = BELLATRIX4_MACHINE(machine);
     const Bellatrix4Board *board = bellatrix4_find_board(bms->board);
     bool ao5 = bellatrix4_is_ao5(board);
-    bool color = board->kind == BELLATRIX4_BOARD_SANGRIA_COLOR;
+    bool color = board->kind == BELLATRIX4_BOARD_SANGRIA_COLOR ||
+                 board->kind == BELLATRIX4_BOARD_JULEP;
     MT8113State *soc;
     I2CSlave *fp9935;
     I2CSlave *bd71828;
